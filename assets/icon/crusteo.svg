@@ -1,0 +1,84 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <!-- crusteo: a crab sidestepping across a crosswalk whose stripes are
+       Lanes' lane colours. Original artwork. -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#262b31"/>
+      <stop offset="1" stop-color="#16191c"/>
+    </linearGradient>
+    <linearGradient id="shell" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ff6a52"/>
+      <stop offset="1" stop-color="#e2412f"/>
+    </linearGradient>
+    <clipPath id="tile">
+      <rect x="0" y="0" width="512" height="512" rx="112"/>
+    </clipPath>
+  </defs>
+
+  <rect x="0" y="0" width="512" height="512" rx="112" fill="url(#bg)"/>
+
+  <!-- The crosswalk: lanes, side by side, running toward the viewer. -->
+  <g clip-path="url(#tile)">
+    <polygon points="48,300 106,300 68,512 -4,512" fill="#1b8cfc"/>
+    <polygon points="137,300 195,300 180,512 108,512" fill="#15c19a"/>
+    <polygon points="227,300 285,300 292,512 220,512" fill="#f1c81a"/>
+    <polygon points="317,300 375,300 404,512 332,512" fill="#a13bc2"/>
+    <polygon points="406,300 464,300 516,512 444,512" fill="#62dcf5"/>
+  </g>
+
+  <!-- Its shadow on the stripes. -->
+  <ellipse cx="256" cy="372" rx="150" ry="24" fill="#000" opacity="0.28"/>
+
+  <!-- Legs, three a side, behind the body. -->
+  <g fill="none" stroke-linecap="round" stroke-linejoin="round">
+    <g stroke="#6e1a13" stroke-width="30">
+      <path d="M166 286 L114 300 L92 346"/>
+      <path d="M170 306 L128 338 L118 384"/>
+      <path d="M186 324 L158 362 L160 402"/>
+      <path d="M346 286 L398 300 L420 346"/>
+      <path d="M342 306 L384 338 L394 384"/>
+      <path d="M326 324 L354 362 L352 402"/>
+    </g>
+    <g stroke="#e2412f" stroke-width="18">
+      <path d="M166 286 L114 300 L92 346"/>
+      <path d="M170 306 L128 338 L118 384"/>
+      <path d="M186 324 L158 362 L160 402"/>
+      <path d="M346 286 L398 300 L420 346"/>
+      <path d="M342 306 L384 338 L394 384"/>
+      <path d="M326 324 L354 362 L352 402"/>
+    </g>
+  </g>
+
+  <!-- Arms up to the claws. -->
+  <g fill="none" stroke-linecap="round">
+    <path d="M178 252 Q140 236 126 196" stroke="#6e1a13" stroke-width="40"/>
+    <path d="M334 252 Q372 236 386 196" stroke="#6e1a13" stroke-width="40"/>
+    <path d="M178 252 Q140 236 126 196" stroke="#ef5240" stroke-width="26"/>
+    <path d="M334 252 Q372 236 386 196" stroke="#ef5240" stroke-width="26"/>
+  </g>
+
+  <!-- Claws, open. -->
+  <g stroke="#6e1a13" stroke-width="10" stroke-linejoin="round" fill="url(#shell)">
+    <path d="M118 168 L111.6 122.5 A46 46 0 1 1 81.7 139.7 Z"/>
+    <path d="M394 168 L430.3 139.7 A46 46 0 1 1 400.4 122.5 Z"/>
+  </g>
+
+  <!-- Eye stalks and eyes. -->
+  <g stroke-linecap="round">
+    <path d="M228 220 L216 170" stroke="#6e1a13" stroke-width="20"/>
+    <path d="M284 220 L296 170" stroke="#6e1a13" stroke-width="20"/>
+    <path d="M228 220 L216 170" stroke="#ef5240" stroke-width="10"/>
+    <path d="M284 220 L296 170" stroke="#ef5240" stroke-width="10"/>
+  </g>
+  <g stroke="#6e1a13" stroke-width="6">
+    <circle cx="214" cy="162" r="20" fill="#fff"/>
+    <circle cx="298" cy="162" r="20" fill="#fff"/>
+  </g>
+  <circle cx="219" cy="160" r="9" fill="#1b1d20"/>
+  <circle cx="303" cy="160" r="9" fill="#1b1d20"/>
+
+  <!-- The shell. -->
+  <ellipse cx="256" cy="276" rx="112" ry="70" fill="url(#shell)" stroke="#6e1a13" stroke-width="10"/>
+  <ellipse cx="232" cy="252" rx="52" ry="20" fill="#fff" opacity="0.18"/>
+  <path d="M232 300 Q256 316 280 300" fill="none" stroke="#6e1a13" stroke-width="8" stroke-linecap="round"/>
+</svg>

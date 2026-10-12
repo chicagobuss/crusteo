@@ -1,0 +1,1 @@
+disallowed-methods = [{ path = "gpui::AnimationExt::with_animation", reason = "Status visuals must settle between updates; see src/ui.rs." }]

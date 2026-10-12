@@ -1,0 +1,2 @@
+// GPUI loads icon resource 1 for its windows; Explorer and the taskbar use it too.
+1 ICON "crusteo.ico"

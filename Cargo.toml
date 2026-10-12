@@ -1,0 +1,63 @@
+[workspace]
+members = [".", "crates/*"]
+resolver = "3"
+# Patched dependencies, not workspace members.
+exclude = ["vendor"]
+
+[workspace.package]
+edition = "2024"
+license = "Apache-2.0"
+repository = "https://github.com/chicagobuss/crusteo"
+
+[workspace.dependencies]
+base64 = "0.22"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "tiff", "bmp", "ico", "pnm"] }
+mimalloc = "0.1.52"
+serde = { version = "1.0.229", features = ["derive", "rc"] }
+serde_json = "1.0.151"
+paseo-client = { path = "crates/paseo-client" }
+fleet = { path = "crates/fleet" }
+term = { path = "crates/term" }
+usage-source = { path = "crates/usage-source" }
+sampler = { path = "crates/sampler" }
+
+[package]
+name = "crusteo"
+version = "0.1.0-alpha.1"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Native multi-host desktop client for Paseo coding-agent daemons"
+
+[lib]
+# Doc comments hold Lua and shell examples, not Rust.
+doctest = false
+
+[dependencies]
+gpui-kit = "0.7"
+serde.workspace = true
+serde_json.workspace = true
+paseo-client.workspace = true
+fleet.workspace = true
+term.workspace = true
+usage-source.workspace = true
+sampler.workspace = true
+base64.workspace = true
+image.workspace = true
+# Scripted toolbar items. Vendored, so no system Lua is needed.
+mlua = { version = "0.10", features = ["lua54", "vendored", "serialize"] }
+flume = "0.12"
+ureq = "3"
+
+[build-dependencies]
+embed-resource = "3.0.11"
+
+[target.'cfg(windows)'.dependencies]
+mimalloc.workspace = true
+
+# GPUI with crusteo's performance fixes; see vendor/gpui-pre/PATCHES.md.
+[patch.crates-io]
+gpui-pre = { path = "vendor/gpui-pre" }
+
+[lints.clippy]
+disallowed_methods = "deny"

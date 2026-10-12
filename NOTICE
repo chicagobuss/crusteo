@@ -1,0 +1,66 @@
+Crusteo
+Copyright 2026 Joshua Buss
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+Crusteo is an independent, unofficial client for Paseo daemons. It is not
+affiliated with, sponsored by, or endorsed by the Paseo project or its authors.
+"Paseo" is used here only to describe what this software connects to.
+
+This product includes or derives from the following third-party work.
+
+-------------------------------------------------------------------------------
+Paseo
+https://github.com/getpaseo/paseo
+Copyright (c) 2025-present Mohamed Boudra
+Licensed under the Apache License, Version 2.0
+
+Portions of Crusteo are derived from Paseo: the conversation (agent timeline)
+reducer in crates/fleet/src/timeline.rs, the tool-call display rules in
+crates/fleet/src/display.rs, and the understanding of the daemon wire protocol
+documented in docs/protocol/ and implemented in crates/paseo-client. These
+were ported from Paseo's TypeScript sources to Rust and modified.
+
+-------------------------------------------------------------------------------
+GPUI (Zed)
+https://github.com/zed-industries/zed
+Copyright 2022 - 2025 Zed Industries, Inc.
+Licensed under the Apache License, Version 2.0
+
+vendor/gpui-pre is a patched copy of the gpui-pre crate, a published snapshot
+of Zed's GPUI framework. The modifications are described in
+vendor/gpui-pre/PATCHES.md and marked with "crusteo:" comments in the source.
+Its license is in vendor/gpui-pre/LICENSE-APACHE.
+
+-------------------------------------------------------------------------------
+gpui-kit / gpui-component
+https://github.com/longbridge/gpui-kit
+Copyright 2024 - 2026 Longbridge
+Licensed under the Apache License, Version 2.0
+
+Used as a library dependency (UI components, themes and bundled assets).
+
+-------------------------------------------------------------------------------
+Lucide icons (bundled via gpui-kit-assets)
+https://lucide.dev
+Copyright (c) 2026 Lucide Icons and Contributors
+Licensed under the ISC License:
+
+  Permission to use, copy, modify, and/or distribute this software for any
+  purpose with or without fee is hereby granted, provided that the above
+  copyright notice and this permission notice appear in all copies.
+
+  THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+  WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+  MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+  ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+  WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+  ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+  OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+
+Some Lucide icons are derived from Feather (https://feathericons.com),
+Copyright (c) 2013-present Cole Bemis, MIT License.
+
+-------------------------------------------------------------------------------
+Other Rust crate dependencies are used under their own licenses, as declared
+in their Cargo manifests (see Cargo.lock for the full list).
