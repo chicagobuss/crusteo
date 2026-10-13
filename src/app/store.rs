@@ -453,6 +453,34 @@ impl FleetStore {
     /// take, every 10ms for as long as the store lives.
     fn start_stress(&mut self, stress: crate::app::stress::Stress, cx: &mut Context<Self>) {
         let mut churn = stress.churn();
+        // A shell in every fifth workspace, so Lanes shows terminal rows.
+        // Stress hosts never connect, so nothing replaces these lists.
+        let shells: Vec<(String, String)> = (self.fleet.hosts.iter())
+            .flat_map(|host| {
+                (host.directory.workspaces.keys())
+                    .step_by(5)
+                    .map(|workspace| (host.name().to_string(), workspace.clone()))
+            })
+            .collect();
+        for (n, key) in shells.into_iter().enumerate() {
+            self.terminal_lists.insert(
+                key,
+                TerminalList {
+                    cwd: String::new(),
+                    loaded: true,
+                    terminals: vec![TerminalRecord {
+                        id: format!("stress-shell-{n}"),
+                        name: "zsh".into(),
+                        title: None,
+                    }],
+                    subscription: None,
+                    epoch: 0,
+                    request: 0,
+                    pending: false,
+                    revision: 0,
+                },
+            );
+        }
         cx.spawn(async move |this, cx| {
             let mut last = std::time::Instant::now();
             loop {

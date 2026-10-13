@@ -58,6 +58,24 @@ fn different_accounts_stay_apart() {
 }
 
 #[test]
+fn a_window_of_unknown_length_learns_it_from_the_same_window_elsewhere() {
+    // Paseo 0.10 names Codex's weekly window "session"; 0.11 says "weekly".
+    let mut old = window("session", 33., 1_000_000.);
+    old.window_seconds = 0.;
+    let mut weekly = window("weekly", 33., 1_000_000.);
+    weekly.label = "Weekly".into();
+    weekly.window_seconds = 604_800.;
+    let kept = dedupe_pools(vec![
+        pool("paseo:old:codex", "codex", vec![old]),
+        pool("paseo:new:codex", "codex", vec![weekly]),
+    ]);
+    assert_eq!(kept.len(), 1);
+    assert_eq!(kept[0].id, "paseo:old:codex", "the first is still kept");
+    assert_eq!(kept[0].windows[0].window_seconds, 604_800.);
+    assert_eq!(kept[0].windows[0].label, "Weekly");
+}
+
+#[test]
 fn windows_without_resets_match_on_key_and_use() {
     let a = pool("a", "claude", vec![window("weekly", 30., 0.)]);
     let b = pool("b", "claude", vec![window("weekly", 30., 0.)]);

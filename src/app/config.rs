@@ -31,7 +31,10 @@ pub fn data_dir() -> PathBuf {
 
 fn read<T: for<'de> Deserialize<'de>>(name: &str) -> Option<T> {
     let bytes = fs::read(data_dir().join(name)).ok()?;
-    serde_json::from_slice(&bytes).ok()
+    // Windows editors and PowerShell often save UTF-8 with a byte-order
+    // mark, which JSON parsers refuse.
+    let json = bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(&bytes);
+    serde_json::from_slice(json).ok()
 }
 
 pub fn write<T: Serialize>(name: &str, value: &T) {

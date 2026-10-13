@@ -7,6 +7,38 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.0-alpha.2] - 2026-10-13
+
+Windows fixes, checked against Paseo 0.10.1 through 0.11.2.
+
+### Added
+
+- About on Windows and Linux: the help panel (F1) shows the version and has an About button, and
+  the command center (Ctrl/Cmd+K) offers "About Crusteo" on every platform.
+- Lanes: an open card's or terminal's bottom edge can be dragged to make it shorter, leaving more of
+  the lane to the cards below it. Dragged back to the bottom, or double-clicked, it fills the lane
+  again.
+- Lanes: fades at the top and bottom of a lane with more cards to scroll to, and stronger fades at
+  the board's sides, with a shadow so they show against dark cards.
+
+### Fixed
+
+- About closed as soon as it opened on Windows.
+- `hosts.json`, `integrations.json` and `ui.json` saved with a UTF-8 byte-order mark, as PowerShell
+  and older Notepad save them, were ignored and the defaults used instead.
+- Terminals restored from a newer Paseo daemon shifted text after wide characters, such as CJK, one
+  column right.
+- The help panel's buttons fell below the fold when extensions added shortcuts.
+- A trackpad swipe over the Lanes header row moved the board by the swipe's drift up or down rather
+  than its sideways motion. Trackpads now scroll the board sideways only; a mouse wheel there still
+  turns into sideways scrolling.
+- Usage gauges fed by the daemons showed no pace for Claude, whose reset times carry an offset
+  (`+00:00`) rather than `Z`, and so merged different Claude accounts into one gauge.
+- A Codex gauge from a Paseo 0.10 daemon, which calls the weekly window "session", showed no pace;
+  it now takes the window's length from a newer daemon reporting the same account.
+- Two accounts of one provider whose labels start alike, such as `sam.lee@gmail.com` and
+  `sam@northwindtraders.com`, are told apart on their gauges ("gmail", "northwindt").
+
 ## [0.1.0-alpha.1] - 2026-10-11
 
 First alpha, for a few early testers. Early software: expect rough edges.
@@ -58,5 +90,6 @@ First alpha, for a few early testers. Early software: expect rough edges.
 - Patched GPUI (`vendor/gpui-pre`) that skips redraws on window moves and lets cached views be
   reused after they move.
 
-[Unreleased]: https://github.com/chicagobuss/crusteo/compare/v0.1.0-alpha.1...HEAD
+[Unreleased]: https://github.com/chicagobuss/crusteo/compare/v0.1.0-alpha.2...HEAD
+[0.1.0-alpha.2]: https://github.com/chicagobuss/crusteo/releases/tag/v0.1.0-alpha.2
 [0.1.0-alpha.1]: https://github.com/chicagobuss/crusteo/releases/tag/v0.1.0-alpha.1

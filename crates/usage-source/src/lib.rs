@@ -61,10 +61,26 @@ pub fn unix_now() -> i64 {
         .unwrap_or(0)
 }
 
-/// `YYYY-MM-DDTHH:MM:SSZ`, optional fractional seconds. Offset other than Z is rejected.
+/// `YYYY-MM-DDTHH:MM:SS` with optional fractional seconds and a zone: `Z`
+/// or an offset such as `+00:00`, as Claude's usage API writes its resets.
+/// A stamp without a zone is rejected.
 pub fn parse_unix(stamp: &str) -> Option<i64> {
-    let stamp = stamp.trim().strip_suffix('Z')?;
-    let (date, time) = stamp.split_once('T')?;
+    let (date, time) = stamp.trim().split_once('T')?;
+    let (time, offset) = match time.strip_suffix(['Z', 'z']) {
+        Some(time) => (time, 0),
+        None => {
+            let at = time.rfind(['+', '-'])?;
+            let (time, zone) = time.split_at(at);
+            let sign = if zone.starts_with('-') { -1 } else { 1 };
+            let zone = zone[1..].replace(':', "");
+            if zone.len() != 4 || !zone.bytes().all(|b| b.is_ascii_digit()) {
+                return None;
+            }
+            let hours: i64 = zone[..2].parse().ok()?;
+            let minutes: i64 = zone[2..].parse().ok()?;
+            (time, sign * (hours * 3_600 + minutes * 60))
+        }
+    };
     let mut date = date.split('-');
     let year: i32 = date.next()?.parse().ok()?;
     let month: u32 = date.next()?.parse().ok()?;
@@ -84,7 +100,8 @@ pub fn parse_unix(stamp: &str) -> Option<i64> {
         days_from_civil(year, month, day) * 86_400
             + hour as i64 * 3_600
             + minute as i64 * 60
-            + second as i64,
+            + second as i64
+            - offset,
     )
 }
 
@@ -320,12 +337,31 @@ pub fn same_account(a: &Pool, b: &Pool) -> bool {
 
 /// `pools` with each account once: of pools that are [`same_account`],
 /// the first is kept, so put the source that names accounts best first.
+/// What the others know about its windows' lengths it keeps too.
 pub fn dedupe_pools(pools: Vec<Pool>) -> Vec<Pool> {
     let mut kept: Vec<Pool> = Vec::with_capacity(pools.len());
     for pool in pools {
-        if !kept.iter().any(|seen| same_account(seen, &pool)) {
-            kept.push(pool);
+        match kept.iter_mut().find(|seen| same_account(seen, &pool)) {
+            Some(seen) => learn_lengths(seen, &pool),
+            None => kept.push(pool),
         }
     }
     kept
+}
+
+/// Each of `pool`'s windows whose length is unknown takes the length and
+/// name of the same window in `other`: one resetting at the same moment
+/// with the same use. Paseo 0.10 calls Codex's weekly window "session",
+/// for one, which a newer daemon on the same account names properly.
+fn learn_lengths(pool: &mut Pool, other: &Pool) {
+    for window in (pool.windows.iter_mut()).filter(|w| w.window_seconds <= 0. && w.resets_at > 0.) {
+        if let Some(known) = other.windows.iter().find(|o| {
+            o.window_seconds > 0.
+                && (o.resets_at - window.resets_at).abs() <= 300.
+                && (o.used_percent - window.used_percent).abs() <= 2.
+        }) {
+            window.window_seconds = known.window_seconds;
+            window.label = known.label.clone();
+        }
+    }
 }

@@ -503,6 +503,7 @@ impl Shell {
             ("Hosts", PaletteAction::Screen(Screen::Hosts)),
             ("Settings", PaletteAction::Screen(Screen::Settings)),
             ("Toggle sidebar", PaletteAction::ToggleSidebar),
+            ("About Crusteo", PaletteAction::About),
             (
                 "Toggle grouping (project / status)",
                 PaletteAction::ToggleGrouping,
@@ -564,6 +565,14 @@ impl Shell {
             self.run_command(&id, window, cx);
             return;
         }
+        if let Some(PaletteAction::About) = item.action {
+            self.core.nav.update(cx, |nav, cx| {
+                nav.command_open = false;
+                cx.notify();
+            });
+            crate::app_menu::about(&self.core, window, cx);
+            return;
+        }
         if let Some(action) = item.action {
             self.core.nav.update(cx, |nav, cx| {
                 nav.command_open = false;
@@ -580,7 +589,7 @@ impl Shell {
                             fleet::sidebar::Grouping::Status => fleet::sidebar::Grouping::Project,
                         }
                     }
-                    PaletteAction::Need(..) | PaletteAction::Command(_) => {}
+                    PaletteAction::Need(..) | PaletteAction::Command(_) | PaletteAction::About => {}
                 }
                 nav.save();
                 cx.notify();
@@ -1231,6 +1240,8 @@ enum PaletteAction {
     Need(usize, String),
     /// An extension's command, by id.
     Command(SharedString),
+    /// The version and each host's daemon version, as macOS's About does.
+    About,
 }
 
 #[derive(Clone)]

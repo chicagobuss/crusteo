@@ -28,12 +28,13 @@ use gpui_kit::component::scroll::{Scrollbar, ScrollbarMode};
 use gpui_kit::component::slider::{Slider, SliderEvent, SliderState};
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::gpui::{
-    Anchor, AnyElement, AnyView, App, AppContext, ClickEvent, Context, CursorStyle, DismissEvent,
-    Div, DragMoveEvent, Entity, FocusHandle, Focusable, Hsla, InteractiveElement, IntoElement,
-    KeyDownEvent, ListAlignment, ListState, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, ParentElement, Pixels, Point, Render, Rgba, ScrollDelta, ScrollHandle,
-    ScrollWheelEvent, SharedString, Stateful, StatefulInteractiveElement, StyleRefinement, Styled,
-    Subscription, WeakEntity, Window, anchored, canvas, deferred, div, list, point, px, rgb,
+    Anchor, AnyElement, AnyView, App, AppContext, Bounds, ClickEvent, Context, CursorStyle,
+    DismissEvent, Div, DragMoveEvent, Entity, FocusHandle, Focusable, Hsla, InteractiveElement,
+    IntoElement, KeyDownEvent, ListAlignment, ListState, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Point, Render, Rgba, ScrollDelta,
+    ScrollHandle, ScrollWheelEvent, SharedString, Stateful, StatefulInteractiveElement,
+    StyleRefinement, Styled, Subscription, WeakEntity, Window, anchored, canvas, deferred, div,
+    list, point, px, rgb,
 };
 
 use gpui_kit::prelude::FluentBuilder;
@@ -754,6 +755,37 @@ struct ColumnResize {
     start_width: Pixels,
 }
 
+/// A drag of an open card's bottom edge.
+struct HeightResize {
+    lane: String,
+    /// Pointer y and the open card's height when the drag began.
+    start_y: Pixels,
+    start_height: Pixels,
+    /// The shortest it can be: its conversation at its least, its box's
+    /// header and mates kept whole.
+    min_height: Pixels,
+    /// The tallest it can be: down to the lane's bottom, less a row for the
+    /// cards below it. Dragged there, it fills the lane again.
+    max_height: Pixels,
+}
+
+/// The key a lane's open terminal keeps its height under, apart from the
+/// lane's open card's.
+fn terminal_height_key(lane: &str) -> String {
+    format!("{lane}\u{1f}terminal")
+}
+
+/// Where a lane's body and its open card were last drawn, for a
+/// [`HeightResize`] to start from.
+#[derive(Clone, Copy, Default)]
+struct OpenBounds {
+    body: Option<Bounds<Pixels>>,
+    /// The open card with its workspace's box, when it has one.
+    open: Option<Bounds<Pixels>>,
+    /// The open card alone: only it gives way as the box gets shorter.
+    card: Option<Bounds<Pixels>>,
+}
+
 /// An open card context menu. Cards only carry a right-click listener; the
 /// board owns the single menu, as Zed's panels do. A `context_menu()` per
 /// card laid out and painted its own menu layer on every frame.
@@ -814,6 +846,14 @@ pub struct Lanes {
     expanded_widths: HashMap<String, Pixels>,
     /// An expanded column's right edge being dragged.
     resizing: Option<ColumnResize>,
+    /// Heights the user dragged open cards to, by lane, leaving the rest of
+    /// the lane to the cards below; open terminals' by
+    /// [`terminal_height_key`]. Without one, it fills the lane.
+    expanded_heights: HashMap<String, Pixels>,
+    /// An open card's bottom edge being dragged.
+    resizing_height: Option<HeightResize>,
+    /// Per lane, where its body and open card were last drawn.
+    open_bounds: Rc<RefCell<HashMap<String, OpenBounds>>>,
     /// Since a resize, the board keeps its length while the view is past
     /// its end, so narrowing a lane does not move the board under the
     /// pointer.
@@ -1374,6 +1414,9 @@ impl Lanes {
             card_menu: None,
             expanded_widths: HashMap::new(),
             resizing: None,
+            expanded_heights: HashMap::new(),
+            resizing_height: None,
+            open_bounds: Rc::default(),
             hold_board_length: false,
             reveal_column: None,
             renaming: None,
@@ -3454,6 +3497,21 @@ impl Lanes {
         if self.edge_hover() != was_hover {
             cx.notify();
         }
+        if let Some(resize) = &self.resizing_height {
+            let height = (resize.start_height + (position.y - resize.start_y))
+                .clamp(resize.min_height, resize.max_height.max(resize.min_height))
+                .round();
+            // Down to the bottom, the card fills the lane again.
+            let height = (height < resize.max_height - px(4.)).then_some(height);
+            if self.expanded_heights.get(&resize.lane).copied() != height {
+                match height {
+                    Some(height) => self.expanded_heights.insert(resize.lane.clone(), height),
+                    None => self.expanded_heights.remove(&resize.lane),
+                };
+                cx.notify();
+            }
+            return;
+        }
         if let Some(resize) = &self.resizing {
             let widest = (self.h_scroll.bounds().size.width - px(COLUMNS_PADDING * 2.))
                 .max(px(EXPANDED_RESIZE_MIN));
@@ -3489,7 +3547,7 @@ impl Lanes {
     }
 
     fn end_resize(&mut self, cx: &mut Context<Self>) {
-        if self.resizing.take().is_some() {
+        if self.resizing.take().is_some() | self.resizing_height.take().is_some() {
             cx.notify();
         }
     }
@@ -3666,6 +3724,11 @@ impl Render for Lanes {
                 let header_row = event.position.y >= board.top()
                     && event.position.y < board.top() + px(HEADER_HEIGHT);
                 if !event.modifiers.shift && !header_row {
+                    return;
+                }
+                // Only a mouse wheel turns sideways; a trackpad's swipe is
+                // left to the board, which takes its sideways part alone.
+                if !matches!(event.delta, ScrollDelta::Lines(_)) {
                     return;
                 }
                 let delta = event.delta.pixel_delta(px(16.));
@@ -3850,6 +3913,9 @@ impl Render for Lanes {
             .flex_col()
             .bg(p.surface0)
             .when(scrolling, |root| root.cursor(CursorStyle::ResizeLeftRight))
+            .when(self.resizing_height.is_some(), |root| {
+                root.cursor(CursorStyle::ResizeUpDown)
+            })
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 this.on_key(event, window, cx);
             }))
@@ -4747,6 +4813,11 @@ impl Lanes {
         }
         let expanded = self.expanded.get(key);
         expanded.hash(&mut hash);
+        for key in [key.to_string(), terminal_height_key(key)] {
+            (self.expanded_heights.get(&key))
+                .map(|height| height.as_f32().to_bits())
+                .hash(&mut hash);
+        }
         // Pins show on box headers even when nothing moved.
         self.core.nav.read(cx).ordering_revision.hash(&mut hash);
         // A card dragged inside its box shows where it would land.
@@ -4900,12 +4971,13 @@ impl Lanes {
                             lane,
                             &rows[..start],
                             "above",
+                            false,
                             style,
                             window,
                             cx,
                         ));
                     }
-                    body = body.child(self.terminal_box(
+                    let open = self.terminal_box(
                         lane,
                         &rows[start..end],
                         at - start,
@@ -4914,12 +4986,21 @@ impl Lanes {
                         style,
                         window,
                         cx,
-                    ));
-                    if end < rows.len() {
+                    );
+                    // A terminal keeps a height of its own, apart from the
+                    // lane's open card.
+                    let key = terminal_height_key(&lane.key);
+                    let height = self.expanded_heights.get(&key).copied();
+                    let below = end < rows.len();
+                    body = body
+                        .child(self.measure_body(&key))
+                        .child(self.sized_open(&key, open, height, below, cx));
+                    if below {
                         body = body.child(self.compact_strip(
                             lane,
                             &rows[end..],
                             "below",
+                            height.is_some(),
                             style,
                             window,
                             cx,
@@ -4964,23 +5045,35 @@ impl Lanes {
                     lane,
                     &rows[..start],
                     "above",
+                    false,
                     style,
                     window,
                     cx,
                 ));
             }
-            body = body.child(self.expanded_box(
-                lane,
-                &rows[start..end],
-                &host,
-                &agent,
-                style,
-                window,
-                cx,
-            ));
-            if end < rows.len() {
-                body =
-                    body.child(self.compact_strip(lane, &rows[end..], "below", style, window, cx));
+            let open = self.expanded_box(lane, &rows[start..end], &host, &agent, style, window, cx);
+            let below = end < rows.len();
+            // Its placeholder in focus mode keeps its own size.
+            let height = (!self.in_focus_mode(&lane.key, &host, &agent))
+                .then(|| self.expanded_heights.get(&lane.key).copied());
+            body = match height {
+                Some(height) => body
+                    .child(self.measure_body(&lane.key))
+                    .child(self.sized_open(&lane.key, open, height, below, cx)),
+                None => body.child(open),
+            };
+            if below {
+                // A card made shorter leaves the rest of the lane to these.
+                let fill = matches!(height, Some(Some(_)));
+                body = body.child(self.compact_strip(
+                    lane,
+                    &rows[end..],
+                    "below",
+                    fill,
+                    style,
+                    window,
+                    cx,
+                ));
             }
         } else {
             body = body.child(self.card_list(lanes, lane_ix, style, cx));
@@ -5384,11 +5477,17 @@ impl Lanes {
             .flex()
             .flex_col()
             .gap(px(HEADER_ROW_GAP))
-            // A plain wheel over a header scrolls across columns; over the
-            // cards it scrolls the lane.
+            // A plain mouse wheel over a header scrolls across columns; over
+            // the cards it scrolls the lane.
             .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _, cx| {
                 if this.wheel_resize(event, cx) {
                     cx.stop_propagation();
+                    return;
+                }
+                // A trackpad's swipe moves the board by its sideways part
+                // alone, which the board does itself: a swipe's drift up or
+                // down must not move it sideways as well.
+                if !matches!(event.delta, ScrollDelta::Lines(_)) {
                     return;
                 }
                 let dy = event.delta.pixel_delta(px(16.)).y / px(1.);
@@ -5501,7 +5600,8 @@ impl Lanes {
         let rows = entry.rows.clone();
         self.lists.insert(key.clone(), entry);
         let lanes = lanes.clone();
-        list(
+        let fades = edges::list_fades(state.clone());
+        let list = list(
             state,
             cx.processor(move |this, ix: usize, window, cx| {
                 let lane = &lanes[lane_ix];
@@ -5524,8 +5624,18 @@ impl Lanes {
         )
         .flex_1()
         .min_h(px(0.))
-        .w_full()
-        .into_any_element()
+        .w_full();
+        // Fades where the lane has more cards to scroll to.
+        div()
+            .flex_1()
+            .min_h(px(0.))
+            .w_full()
+            .flex()
+            .flex_col()
+            .relative()
+            .child(list)
+            .child(fades)
+            .into_any_element()
     }
 
     fn full_card(
@@ -5659,11 +5769,154 @@ impl Lanes {
 
     /// Rows of a lane with an expanded card, compact, in a short scrolling
     /// strip.
+    /// An open card, recording where it is drawn, for dragging its height.
+    fn measured_card(&self, lane: &str, card: AnyElement) -> AnyElement {
+        let bounds = self.open_bounds.clone();
+        let lane = lane.to_string();
+        div()
+            .flex_1()
+            .min_h(px(EXPANDED_MIN_HEIGHT))
+            .flex()
+            .flex_col()
+            .relative()
+            .child(card)
+            .child(
+                canvas(
+                    move |rect, _, _| {
+                        bounds.borrow_mut().entry(lane).or_default().card = Some(rect);
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .size_full(),
+            )
+            .into_any_element()
+    }
+
+    /// Records where a lane's body is drawn, for dragging its open card's
+    /// height.
+    fn measure_body(&self, lane: &str) -> AnyElement {
+        let bounds = self.open_bounds.clone();
+        let lane = lane.to_string();
+        canvas(
+            move |rect, _, _| {
+                bounds.borrow_mut().entry(lane).or_default().body = Some(rect);
+            },
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .size_full()
+        .into_any_element()
+    }
+
+    /// The open card `height` tall, or filling the lane when none, with an
+    /// edge along its bottom to drag. With cards `below` it, dragged as far
+    /// down as it goes it still leaves a row of them.
+    fn sized_open(
+        &self,
+        lane: &str,
+        open: AnyElement,
+        height: Option<Pixels>,
+        below: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let p = palette();
+        let measure = {
+            let bounds = self.open_bounds.clone();
+            let lane = lane.to_string();
+            canvas(
+                move |rect, _, _| {
+                    bounds.borrow_mut().entry(lane).or_default().open = Some(rect);
+                },
+                |_, _, _, _| {},
+            )
+            .absolute()
+            .size_full()
+        };
+        let start = {
+            let bounds = self.open_bounds.clone();
+            let lane = lane.to_string();
+            cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                let Some(OpenBounds {
+                    body: Some(body),
+                    open: Some(open),
+                    card,
+                }) = bounds.borrow().get(&lane).copied()
+                else {
+                    return;
+                };
+                // Only the conversation gives way, down to its least.
+                let give = card.map_or(px(0.), |card| {
+                    (card.size.height - px(EXPANDED_MIN_HEIGHT)).max(px(0.))
+                });
+                // The body's bottom padding stays, and a row of the cards below.
+                let reserve = px(6.)
+                    + if below {
+                        px(COMPACT_HEIGHT + CARD_GAP)
+                    } else {
+                        px(0.)
+                    };
+                this.resizing_height = Some(HeightResize {
+                    lane: lane.clone(),
+                    start_y: event.position.y,
+                    start_height: open.size.height,
+                    min_height: open.size.height - give,
+                    max_height: body.bottom() - open.top() - reserve,
+                });
+                cx.stop_propagation();
+                cx.notify();
+            })
+        };
+        let reset = {
+            let lane = lane.to_string();
+            cx.listener(move |this, event: &ClickEvent, _, cx| {
+                if event.click_count() == 2 && this.expanded_heights.remove(&lane).is_some() {
+                    cx.notify();
+                }
+            })
+        };
+        div()
+            .relative()
+            .flex()
+            .flex_col()
+            .map(|open| match height {
+                // It gives way in a lane too short for it, down to its least.
+                Some(height) => open.h(height).min_h(px(EXPANDED_MIN_HEIGHT)),
+                None => open.flex_1(),
+            })
+            .child(open)
+            .child(measure)
+            .child(
+                div()
+                    .id(eid("lane-open-resize", lane))
+                    .absolute()
+                    .left_0()
+                    .right_0()
+                    // Over the card's bottom edge and the gap under it.
+                    .bottom(px(-5.))
+                    .h(px(8.))
+                    .cursor(CursorStyle::ResizeUpDown)
+                    .hover(|style| style.bg(p.border))
+                    .on_mouse_down(MouseButton::Left, start)
+                    .on_click(reset)
+                    .tooltip(|window, cx| {
+                        Tooltip::new(
+                            "Drag to make it shorter or taller; \
+                             double-click to fill the lane again",
+                        )
+                        .build(window, cx)
+                    }),
+            )
+            .into_any_element()
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn compact_strip(
         &mut self,
         lane: &Rc<Lane>,
         rows: &[Row],
         which: &str,
+        fill: bool,
         style: LaneStyle,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -5671,9 +5924,10 @@ impl Lanes {
         let mut strip = div()
             .id(eid_parts("lane-strip-cards", &[&lane.key, which]))
             // In a short lane the strips give way to the open card, down to
-            // a row each.
+            // a row each. Under a card made shorter, one takes the rest.
             .min_h(px(COMPACT_HEIGHT))
-            .max_h(px(160.))
+            .when(fill, |strip| strip.flex_1())
+            .when(!fill, |strip| strip.max_h(px(160.)))
             .overflow_y_scroll()
             .flex()
             .flex_col();
@@ -6655,7 +6909,7 @@ impl Lanes {
             .overflow_hidden()
             .child(header)
             .children(before)
-            .child(panel)
+            .child(self.measured_card(&terminal_height_key(&lane.key), panel.into_any_element()))
             .children(after)
             .into_any_element()
     }
@@ -6679,7 +6933,8 @@ impl Lanes {
             if self.in_focus_mode(&lane.key, host, agent) {
                 return self.focus_placeholder(&lane.key, host, agent, true, cx);
             }
-            return self.expanded_card(lane, host, agent, style, true, window, cx);
+            let card = self.expanded_card(lane, host, agent, style, true, window, cx);
+            return self.measured_card(&lane.key, card);
         }
         let p = palette();
         let at = rows
@@ -6721,7 +6976,8 @@ impl Lanes {
         let card = if self.in_focus_mode(&lane.key, host, agent) {
             self.focus_placeholder(&lane.key, host, agent, false, cx)
         } else {
-            self.expanded_card(lane, host, agent, style, false, window, cx)
+            let card = self.expanded_card(lane, host, agent, style, false, window, cx);
+            self.measured_card(&lane.key, card)
         };
         let after = mates(self, &rows[(at + 1).min(rows.len())..], "after", window, cx);
         // While its card is in focus mode the box holds only a placeholder.

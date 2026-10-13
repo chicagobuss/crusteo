@@ -217,6 +217,7 @@ pub fn panel(actions: Actions) -> AnyElement {
     };
     let backdrop_close = close.clone();
     let done_close = close.clone();
+    let about_close = close.clone();
     div()
         .absolute()
         .inset_0()
@@ -252,9 +253,21 @@ pub fn panel(actions: Actions) -> AnyElement {
                         .justify_between()
                         .child(
                             div()
-                                .text_size(px(16.))
-                                .text_color(p.foreground)
-                                .child("Getting around crusteo"),
+                                .flex()
+                                .items_baseline()
+                                .gap(px(10.))
+                                .child(
+                                    div()
+                                        .text_size(px(16.))
+                                        .text_color(p.foreground)
+                                        .child("Getting around crusteo"),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(size::sm())
+                                        .text_color(p.muted)
+                                        .child(crate::app_menu::version()),
+                                ),
                         )
                         .child(
                             Button::new("help-close")
@@ -268,8 +281,10 @@ pub fn panel(actions: Actions) -> AnyElement {
                     div()
                         .flex()
                         .gap(px(28.))
-                        .child(column(&SECTIONS[..1], Some(&extra)))
-                        .child(column(&SECTIONS[1..], None)),
+                        // Extensions' rows go under the shorter column, so
+                        // the panel's buttons stay in view.
+                        .child(column(&SECTIONS[..1], None))
+                        .child(column(&SECTIONS[1..], Some(&extra))),
                 )
                 .child(
                     div()
@@ -303,6 +318,17 @@ pub fn panel(actions: Actions) -> AnyElement {
                                 .ghost()
                                 .small()
                                 .on_click(|_, _, cx| open_scripts_folder(cx)),
+                        )
+                        // Windows and Linux have no menu bar to hold About.
+                        .child(
+                            Button::new("help-about")
+                                .label("About Crusteo…")
+                                .ghost()
+                                .small()
+                                .on_click(move |_, window, cx| {
+                                    about_close(window, cx);
+                                    window.dispatch_action(Box::new(crate::app_menu::About), cx);
+                                }),
                         ),
                 ),
         )

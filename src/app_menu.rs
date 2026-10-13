@@ -47,8 +47,14 @@ pub fn about(core: &Core, window: &mut Window, cx: &mut App) {
         };
         detail.push_str(&format!("\n{}: {daemon}", host.name()));
     }
-    // Nothing to do with the answer; dropping it closes nothing.
-    drop(window.prompt(PromptLevel::Info, "Crusteo", Some(&detail), &["OK"], cx));
+    // Nothing to do with the answer, but it is awaited all the same: on
+    // Windows, dropping it closes the dialog as soon as it opens.
+    let answer = window.prompt(PromptLevel::Info, "Crusteo", Some(&detail), &["OK"], cx);
+    cx.foreground_executor()
+        .spawn(async move {
+            answer.await.ok();
+        })
+        .detach();
 }
 
 pub fn install(cx: &mut App) {

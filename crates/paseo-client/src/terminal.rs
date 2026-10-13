@@ -265,16 +265,17 @@ fn render_row(out: &mut String, row: &[Cell], pad_to: Option<usize>) {
     let mut previous = Style::default();
     for index in 0..length {
         let cell = row.get(index);
+        // An empty char marks a wide character's second column, which the
+        // glyph before it already covers: writing anything shifts the row.
+        if cell.is_some_and(|c| c.char.is_empty()) {
+            continue;
+        }
         let style = cell.map(Style::from).unwrap_or_default();
         if style != previous {
             out.push_str(&style.to_sgr());
             previous = style;
         }
-        let ch = cell
-            .map(|c| c.char.as_str())
-            .filter(|c| !c.is_empty())
-            .unwrap_or(" ");
-        out.push_str(ch);
+        out.push_str(cell.map_or(" ", |c| c.char.as_str()));
     }
     if previous != Style::default() {
         out.push_str("\u{1b}[0m");
@@ -412,6 +413,17 @@ mod tests {
             let bytes = encode_resize(&payload);
             assert_eq!(decode_resize(&bytes), Some(payload));
         }
+    }
+
+    #[test]
+    fn wide_characters_keep_the_row_in_place() {
+        let cell = |c: &str| Cell {
+            char: c.into(),
+            ..Cell::default()
+        };
+        let mut out = String::new();
+        render_row(&mut out, &[cell("日"), cell(""), cell("x")], None);
+        assert_eq!(out, "日x");
     }
 
     #[test]
