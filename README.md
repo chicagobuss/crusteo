@@ -21,8 +21,9 @@ the same data (Lanes, Fleet, Board) for keeping an eye on lots of agents across 
 | ![Paseo layout](docs/screenshots/paseo.png) | The **Paseo** layout: sidebar, workspace tabs, live conversation and composer. |
 | ![Lanes layout](docs/screenshots/lanes.png) | **Lanes**: workspaces as cards in lanes, grouped by label, project, host or workspace. |
 | ![Fleet layout](docs/screenshots/fleet.png) | **Fleet**: one column per host, most urgent agents first. |
+| ![Lanes with a window border](docs/screenshots/border.png) | An optional **window border** (Settings → Window), any width from 1 to 8 px and any color. |
 
-Lanes and Fleet show the synthetic `CRUSTEO_STRESS` fleet.
+All four show the synthetic `CRUSTEO_STRESS` fleet.
 
 ## Features
 
@@ -33,6 +34,7 @@ Lanes and Fleet show the synthetic `CRUSTEO_STRESS` fleet.
   Switching views never reconnects or loses your place.
 - **Live conversations.** Streamed assistant text, tool-call rows with Paseo's names, summaries,
   icons and expandable details, task lists from TodoWrite, and gap-free catch-up after reconnects.
+  Right-click selected text to copy it as shown, or as the Markdown the agent wrote.
 - **Permissions.** Allow or deny tool calls and approve or reject plans inline, or straight from
   Fleet and Lanes cards.
 - **Composer.** Send, **steer** a running turn (Enter), **queue** a message for when the turn ends
@@ -43,8 +45,13 @@ Lanes and Fleet show the synthetic `CRUSTEO_STRESS` fleet.
 - **Prompt scroll index.** Ticks along the conversation's edge mark each of your prompts; hover to
   preview, click to jump, loading older history as needed.
 - **Built-in terminals.** Open a terminal on the daemon's host next to your agents.
-- **Layouts.** Paseo, Lanes, Fleet and Board, all reading the same shared state.
+- **Layouts.** Paseo, Lanes, Fleet and Board, all reading the same shared state. Lanes can be
+  filtered, searched (Ctrl/Cmd+F), dragged, collapsed into tabs, and resized, open cards included.
+- **Usage gauges.** One pace dial per subscription account in the title bar, from the daemons' own
+  usage reports (Paseo 0.11 names each account), or from an extension's source.
 - **Command palette** (Ctrl/Cmd+K) over workspaces, agents and actions across every host.
+- **Yours to arrange.** Every toolbar can be rearranged, and Lua scripts add items of their own. An
+  optional window border (Settings → Window) sets crusteo apart from the windows beside it.
 
 ## Install
 
@@ -176,8 +183,9 @@ extension with no settings stays off and makes no requests.
 | Ctrl/Cmd+Enter | While the agent works, queue the message; it sends when the turn ends |
 | Escape | Interrupt the running turn |
 
-On macOS the menu bar also has Cmd+Q, Cmd+H, Cmd+Option+H and Cmd+M, and **Crusteo → About Crusteo**
-shows the version, the Paseo protocol and each host's daemon version.
+The title bar's menu (≡) has Settings, Keyboard shortcuts, Customize toolbars and **About**, which
+shows the version, the Paseo protocol and each host's daemon version. On macOS the menu bar also has
+About, Cmd+Q, Cmd+H, Cmd+Option+H and Cmd+M.
 
 In a terminal, copy and paste are Ctrl+Shift+C / Ctrl+Shift+V on Linux and Windows, Cmd+C / Cmd+V
 on macOS.
