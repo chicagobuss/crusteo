@@ -135,6 +135,10 @@ pub struct UiState {
     pub notification_corner: String,
     /// `in-app`, `system` or `both`; empty is the default.
     pub notification_route: String,
+    /// A solid border around the window this many pixels wide; 0 is none.
+    pub window_border: u8,
+    /// Its color as `#rrggbb`; empty is the default.
+    pub window_border_color: String,
 }
 
 pub fn load_ui() -> UiState {
@@ -181,6 +185,25 @@ pub unsafe fn integrations_to_env(pairs: &[(&str, &str)]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn window_border_is_off_by_default_and_survives_restart() {
+        use crate::app::nav::parse_hex;
+        let old: UiState = serde_json::from_str("{}").unwrap();
+        assert_eq!(old.window_border, 0);
+        let chosen = UiState {
+            window_border: 3,
+            window_border_color: "#ff9f0a".into(),
+            ..UiState::default()
+        };
+        let restored: UiState =
+            serde_json::from_value(serde_json::to_value(chosen).unwrap()).unwrap();
+        assert_eq!(restored.window_border, 3);
+        assert_eq!(parse_hex(&restored.window_border_color), Some(0xff9f0a));
+        assert_eq!(parse_hex("3b9eff"), Some(0x3b9eff));
+        assert_eq!(parse_hex("#fff"), None);
+        assert_eq!(parse_hex("#zzzzzz"), None);
+    }
 
     #[test]
     fn label_lane_mode_defaults_to_labels_and_each_choice_survives_restart() {

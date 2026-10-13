@@ -2,7 +2,7 @@
 
 use std::cell::Cell;
 use std::rc::Rc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use gpui_kit::gpui::{
     App, ClipboardItem, Context, Entity, FocusHandle, Focusable, Font, FontFeatures, FontStyle,
@@ -12,7 +12,7 @@ use gpui_kit::gpui::{
     div, fill, point, px, rgb,
 };
 use gpui_kit::prelude::FluentBuilder;
-use term::{BufferPoint, CursorShape, PaintColor, Snapshot, SnapshotCell};
+use term::{BufferPoint, PaintColor, Snapshot, SnapshotCell};
 
 use crate::app::{Core, TerminalSession};
 use crate::theme::{self, palette, size};
@@ -60,7 +60,17 @@ pub struct TerminalView {
     resize_gen: u64,
     selecting: bool,
     anchor: Option<BufferPoint>,
+    /// The cursor is in the lit half of its blink.
+    blink_on: bool,
+    /// The blink's timer is running, as it does while the terminal has focus.
+    blinking: bool,
+    /// When a key was last typed or output last came; the cursor stays lit
+    /// for a blink after either.
+    last_activity: Instant,
 }
+
+/// How long the cursor stays lit, then dark: a slow blink.
+const BLINK: Duration = Duration::from_millis(800);
 
 impl TerminalView {
     pub fn new(
@@ -73,7 +83,11 @@ impl TerminalView {
         let session = core
             .store
             .update(cx, |store, cx| store.open_terminal(host, terminal_id, cx));
-        cx.observe(&session, |_, _, cx| cx.notify()).detach();
+        cx.observe(&session, |this, _, cx| {
+            this.wake_cursor();
+            cx.notify();
+        })
+        .detach();
         let focus = cx.focus_handle();
         focus.focus(window, cx);
         Self {
@@ -92,11 +106,55 @@ impl TerminalView {
             resize_gen: 0,
             selecting: false,
             anchor: None,
+            blink_on: true,
+            blinking: false,
+            last_activity: Instant::now(),
         }
     }
 
     pub fn focus(&self, window: &mut Window, cx: &mut App) {
         self.focus.focus(window, cx);
+    }
+
+    /// Lights the cursor and holds it lit for a blink, as typing or output
+    /// does, so it never goes dark under the keys.
+    fn wake_cursor(&mut self) {
+        self.blink_on = true;
+        self.last_activity = Instant::now();
+    }
+
+    /// Blinks the cursor while the terminal has focus. The timer stops, the
+    /// cursor lit, once focus leaves; rendering starts it again on return.
+    fn start_blinking(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.blinking {
+            return;
+        }
+        self.blinking = true;
+        cx.spawn_in(window, async move |this, cx| {
+            loop {
+                cx.background_executor().timer(BLINK).await;
+                let going = this
+                    .update_in(cx, |view, window, cx| {
+                        if !view.focus.is_focused(window) {
+                            view.blinking = false;
+                            view.blink_on = true;
+                            cx.notify();
+                            return false;
+                        }
+                        let lit = view.last_activity.elapsed() < BLINK || !view.blink_on;
+                        if lit != view.blink_on {
+                            view.blink_on = lit;
+                            cx.notify();
+                        }
+                        true
+                    })
+                    .unwrap_or(false);
+                if !going {
+                    break;
+                }
+            }
+        })
+        .detach();
     }
 
     fn note_size(&mut self, rows: u32, cols: u32, cx: &mut Context<Self>) {
@@ -192,6 +250,7 @@ impl TerminalView {
     }
 
     fn on_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
+        self.wake_cursor();
         let stroke = &event.keystroke;
         if stroke.key == "escape" && self.core.nav.read(cx).command_open {
             return;
@@ -263,6 +322,11 @@ impl Render for TerminalView {
         let metrics = self.metrics.clone();
         let entity = cx.entity().clone();
         let focused = self.focus.is_focused(window);
+        // A slow blink while focused; a steady block otherwise.
+        if focused {
+            self.start_blinking(window, cx);
+        }
+        let show_cursor = !focused || self.blink_on;
         let grid = canvas(
             move |bounds, window, app| {
                 let (cell_w, cell_h) = cell_size(window);
@@ -277,13 +341,17 @@ impl Render for TerminalView {
                 app.defer(move |cx| {
                     entity.update(cx, |view, cx| view.note_size(rows, cols, cx));
                 });
-                shape_snapshot(&snapshot, selection, cell_w, window)
+                shape_snapshot(&snapshot, selection, show_cursor, window)
             },
             move |bounds, lines, window, app| {
                 window.paint_quad(fill(bounds, p.surface0));
                 let (_, cell_h) = cell_size(window);
                 for (index, line) in lines.into_iter().enumerate() {
                     let origin = point(bounds.origin.x, bounds.origin.y + cell_h * index as f32);
+                    // Backgrounds first: programs' colors, the selection and
+                    // the block cursor. `paint` draws only the glyphs.
+                    let _ =
+                        line.paint_background(origin, cell_h, TextAlign::Left, None, window, app);
                     let _ = line.paint(origin, cell_h, TextAlign::Left, None, window, app);
                 }
             },
@@ -398,10 +466,12 @@ fn mono_font(bold: bool, italic: bool) -> Font {
     }
 }
 
+/// The screen's lines, shaped to paint, with the cursor drawn when
+/// `show_cursor`, as it is in the lit half of its blink.
 fn shape_snapshot(
     snapshot: &Snapshot,
     selection: Option<(BufferPoint, BufferPoint)>,
-    _cell_w: Pixels,
+    show_cursor: bool,
     window: &mut Window,
 ) -> Vec<gpui_kit::gpui::ShapedLine> {
     snapshot
@@ -415,7 +485,7 @@ fn shape_snapshot(
                 .saturating_add(row);
             let selected = term::selection_cols(selection, buffer_line);
             let cursor_col = snapshot.cursor.and_then(|cursor| {
-                (cursor.row == row && !cursor.hidden).then_some((cursor.col, cursor.shape))
+                (show_cursor && cursor.row == row && !cursor.hidden).then_some(cursor.col)
             });
             let runs = style_runs(&line.cells, selected.as_ref(), cursor_col);
             let text: String = runs.iter().map(|run| run.text.as_str()).collect();
@@ -457,10 +527,13 @@ struct StyleRun {
     strike: bool,
 }
 
+/// `cells` as runs of one style each. The cursor, at column `cursor`, is
+/// always a block, its cell's colors swapped, whatever shape the program
+/// asked for: a bar or an underline is hard to find at a glance.
 fn style_runs(
     cells: &[SnapshotCell],
     selected: Option<&std::ops::RangeInclusive<usize>>,
-    cursor: Option<(usize, CursorShape)>,
+    cursor: Option<usize>,
 ) -> Vec<StyleRun> {
     let mut runs = Vec::new();
     let mut col = 0usize;
@@ -471,11 +544,8 @@ fn style_runs(
         if in_selection {
             style.1 = rgba_hsla(rgb(0xffffff), 0.2);
         }
-        let on_cursor = cursor.is_some_and(|(cursor_col, shape)| {
-            shape == CursorShape::Block
-                && cursor_col >= col
-                && cursor_col < col + cell.width as usize
-        });
+        let on_cursor = cursor
+            .is_some_and(|cursor_col| cursor_col >= col && cursor_col < col + cell.width as usize);
         if on_cursor {
             std::mem::swap(&mut style.0, &mut style.1);
         }

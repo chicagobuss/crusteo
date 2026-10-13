@@ -1,5 +1,6 @@
 //! The help panel: what the keys do, and where to make crusteo your own.
-//! The "?" item in the title bar opens it, as do F1 and Ctrl+/ (Cmd+/).
+//! "Keyboard shortcuts" in the title bar's menu opens it, as do F1 and
+//! Ctrl+/ (Cmd+/).
 
 use std::rc::Rc;
 

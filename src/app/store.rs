@@ -260,6 +260,9 @@ pub struct FleetStore {
     /// Providers each host offers, loaded on first need.
     pub providers: HashMap<String, Vec<fleet::providers::Provider>>,
     providers_loading: BTreeSet<String>,
+    /// The fleet is `CRUSTEO_STRESS`'s, so a conversation opened starts
+    /// with a short made-up exchange instead of asking a daemon.
+    stress: bool,
     next_generation: u64,
     /// Bumped on each directory change; cheap change detection for views.
     pub revision: u64,
@@ -310,6 +313,7 @@ impl FleetStore {
             client_id: crate::app::config::client_id(),
             providers: HashMap::new(),
             providers_loading: BTreeSet::new(),
+            stress: false,
             next_generation: 0,
             revision: 0,
             workspace_archives: Default::default(),
@@ -318,6 +322,7 @@ impl FleetStore {
         };
         if let Some(stress) = crate::app::stress::from_env() {
             store.fleet = stress.fleet(now_millis());
+            store.stress = true;
             store.start_stress(stress, cx);
             return store;
         }
@@ -1175,6 +1180,13 @@ impl FleetStore {
         if let Some(agent) = self.fleet.agent(host, agent_id) {
             let raw = agent.raw.clone();
             session.update(cx, |session, _| session.timeline.sync_snapshot(&raw));
+        }
+        if self.stress {
+            session.update(cx, |session, _| {
+                session
+                    .timeline
+                    .apply_page(&crate::app::stress::exchange(agent_id));
+            });
         }
         self.sessions.insert(key, session.clone());
         self.sessions_revision += 1;

@@ -36,7 +36,9 @@ pub fn items(core: &Core, layouts: Vec<(&'static str, &'static str)>) -> Vec<Rc<
     ]
 }
 
-/// "?": opens the help panel, for those still finding their way around.
+/// The app's menu: settings, the help panel, customizing the bars and
+/// About, which Windows and Linux have no menu bar for. Its id is the help
+/// button's it replaced, so it keeps that button's place in a saved bar.
 struct Help;
 
 impl ToolbarItem for Help {
@@ -44,7 +46,7 @@ impl ToolbarItem for Help {
         "help"
     }
     fn title(&self) -> SharedString {
-        "Help".into()
+        "Menu".into()
     }
     fn home(&self) -> (&'static str, Side) {
         (TITLE, Side::Right)
@@ -54,23 +56,22 @@ impl ToolbarItem for Help {
         90
     }
     fn render(&self, _: &mut Window, _: &mut App) -> Option<AnyElement> {
-        let p = palette();
+        use crate::shell::{CustomizeToolbars, OpenSettings, ShowHelp};
+        use gpui_kit::component::Sizable as _;
+        use gpui_kit::component::button::{Button, ButtonVariants as _};
+        use gpui_kit::component::menu::DropdownMenu as _;
         Some(
-            div()
-                .id("help-button")
-                .size(px(24.))
-                .rounded(px(6.))
-                .flex()
-                .items_center()
-                .justify_center()
-                .hover(|s| s.bg(p.sidebar_hover))
-                .tooltip(|window, cx| {
-                    gpui_kit::component::tooltip::Tooltip::new("Help and keyboard shortcuts (F1)")
-                        .build(window, cx)
-                })
-                .child(ui::icon("circle-question-mark", 15., p.extra_muted))
-                .on_click(|_: &ClickEvent, window, cx| {
-                    window.dispatch_action(Box::new(crate::shell::ShowHelp), cx);
+            Button::new("app-menu")
+                .icon(gpui_kit::component::Icon::empty().path("icons/menu.svg"))
+                .ghost()
+                .small()
+                .tooltip("Menu")
+                .dropdown_menu(|menu, _, _| {
+                    menu.menu("Settings…", Box::new(OpenSettings))
+                        .menu("Keyboard shortcuts", Box::new(ShowHelp))
+                        .menu("Customize toolbars…", Box::new(CustomizeToolbars))
+                        .separator()
+                        .menu("About Crusteo", Box::new(crate::app_menu::About))
                 })
                 .into_any_element(),
         )

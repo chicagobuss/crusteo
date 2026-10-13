@@ -3666,14 +3666,14 @@ impl Render for Lanes {
             }
         };
 
-        // A lane whose card collapsed returns to the shared width.
-        let expanded = &self.expanded;
+        // A lane whose card or terminal closed returns to the shared width.
+        let (expanded, terminals) = (&self.expanded, &self.expanded_terminals);
         self.expanded_widths
-            .retain(|lane, _| expanded.contains_key(lane));
+            .retain(|lane, _| expanded.contains_key(lane) || terminals.contains_key(lane));
         if self
             .resizing
             .as_ref()
-            .is_some_and(|resize| !self.expanded.contains_key(&resize.lane))
+            .is_some_and(|resize| !self.lane_open(&resize.lane))
         {
             self.resizing = None;
         }
@@ -4617,8 +4617,14 @@ impl Lanes {
             .into_any_element()
     }
 
+    /// Whether lane has a card or a terminal open in it, which makes it
+    /// wider than the rest and lets its width be dragged.
+    fn lane_open(&self, lane: &str) -> bool {
+        self.expanded.contains_key(lane) || self.expanded_terminals.contains_key(lane)
+    }
+
     fn lane_width(&self, lane: &Lane, expanded_width: Pixels) -> Pixels {
-        if self.expanded.contains_key(&lane.key) {
+        if self.lane_open(&lane.key) {
             self.expanded_widths
                 .get(&lane.key)
                 .copied()
@@ -4645,7 +4651,7 @@ impl Lanes {
         let mut fixed = px(0.);
         let mut ordinary = 0usize;
         for lane in lanes {
-            if self.expanded.contains_key(&lane.key) {
+            if self.lane_open(&lane.key) {
                 fixed += self.lane_width(lane, expanded_width);
             } else {
                 ordinary += 1;
@@ -5101,7 +5107,7 @@ impl Lanes {
             .lane_drag
             .as_ref()
             .is_some_and(|drag| drag.key == lane.key);
-        let resizable = self.expanded.contains_key(&lane.key);
+        let resizable = self.lane_open(&lane.key);
         let resize = {
             let key = lane.key.clone();
             cx.listener(move |this, event: &MouseDownEvent, _, cx| {
@@ -5161,8 +5167,10 @@ impl Lanes {
                         .hover(|style| style.bg(p.border))
                         .on_mouse_down(MouseButton::Left, resize)
                         .tooltip(|window, cx| {
-                            Tooltip::new("Drag to resize this lane while its card is expanded")
-                                .build(window, cx)
+                            Tooltip::new(
+                                "Drag to resize this lane while a card or terminal is open",
+                            )
+                            .build(window, cx)
                         }),
                 )
             })

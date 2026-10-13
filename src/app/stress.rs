@@ -411,6 +411,53 @@ impl Churn {
     }
 }
 
+/// A short exchange for a synthetic agent's conversation, as a daemon's
+/// timeline page: a prompt, and a reply in Markdown with the kinds of
+/// markup a copy as Markdown has to keep.
+pub fn exchange(agent_id: &str) -> Value {
+    let reply = "## What changed\n\n\
+        The parser now **streams** pages instead of buffering them, so \
+        memory stays flat:\n\n\
+        - `parse_page` yields rows as it reads\n\
+        - [the benchmark](https://example.com/bench) dropped from 1.4 s to 0.3 s\n\
+        - nothing else *moved*\n\n\
+        ```rust\nfn parse_page(input: &str) -> impl Iterator<Item = Row> {\n    input.lines().map(Row::from)\n}\n```\n\n\
+        Want me to open a pull request?";
+    let entry = |seq: u64, item: Value| {
+        json!({
+            "provider": "claude",
+            "item": item,
+            "timestamp": "2026-10-13T09:00:00.000Z",
+            "seqStart": seq,
+            "seqEnd": seq,
+            "turnId": "stress-turn-1",
+        })
+    };
+    json!({
+        "agentId": agent_id,
+        "direction": "tail",
+        "reset": true,
+        "epoch": "stress",
+        "window": { "maxSeq": 2 },
+        "startCursor": { "seq": 1 },
+        "endCursor": { "seq": 2 },
+        "hasOlder": false,
+        "hasNewer": false,
+        "entries": [
+            entry(1, json!({
+                "type": "user_message",
+                "text": "Make the parser stream its pages, then tell me what changed.",
+                "messageId": "stress-user-1",
+            })),
+            entry(2, json!({
+                "type": "assistant_message",
+                "text": reply,
+                "messageId": "stress-reply-1",
+            })),
+        ],
+    })
+}
+
 #[cfg(test)]
 mod edge_tests {
     use super::*;

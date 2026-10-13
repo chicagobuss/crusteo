@@ -78,6 +78,7 @@ gpui_kit::assets::icon_assets!(
         GripVertical,
         Aperture,
         Sparkle,
+        Menu,
     ]
 );
 

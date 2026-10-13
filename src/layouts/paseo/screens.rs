@@ -5,6 +5,7 @@ use fleet::{Connection, HostConfig};
 use gpui_kit::base::Selectable as _;
 use gpui_kit::component::Sizable;
 use gpui_kit::component::button::{Button, ButtonGroup, ButtonVariants};
+use gpui_kit::component::color_picker::{ColorPicker, ColorPickerEvent, ColorPickerState};
 use gpui_kit::component::input::{Input, InputState, Textarea, TextareaState};
 use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_kit::component::switch::Switch;
@@ -649,6 +650,15 @@ fn preference_choice(
     description: &'static str,
     group: ButtonGroup,
 ) -> gpui_kit::gpui::Div {
+    preference_row(title, description, group.small().compact())
+}
+
+/// A preference's title and description, with the control that sets it.
+fn preference_row(
+    title: &'static str,
+    description: &'static str,
+    control: impl IntoElement,
+) -> gpui_kit::gpui::Div {
     let p = palette();
     div()
         .p(px(16.))
@@ -670,18 +680,47 @@ fn preference_choice(
                         .child(description),
                 ),
         )
-        .child(group.flex_shrink_0().small().compact())
+        .child(div().flex_shrink_0().child(control))
 }
 
 pub struct SettingsScreen {
     core: Core,
+    /// The window border's color, chosen with a picker.
+    border_color: Entity<ColorPickerState>,
 }
 
+/// Bright colors offered first for the window border.
+const BORDER_COLORS: [u32; 10] = [
+    0x3b9eff, 0x00d4ff, 0x30d158, 0xffd60a, 0xff9f0a, 0xff453a, 0xff375f, 0xbf5af2, 0x5e5ce6,
+    0xffffff,
+];
+
 impl SettingsScreen {
-    pub fn new(core: Core, cx: &mut Context<Self>) -> Self {
+    pub fn new(core: Core, window: &mut Window, cx: &mut Context<Self>) -> Self {
         cx.observe(&core.store, |_, _, cx| cx.notify()).detach();
         cx.observe(&core.nav, |_, _, cx| cx.notify()).detach();
-        Self { core }
+        let current = crate::app::nav::parse_hex(&core.nav.read(cx).window_border_color)
+            .unwrap_or(BORDER_COLORS[0]);
+        let border_color = cx.new(|cx| {
+            ColorPickerState::new(window, cx).default_value(gpui_kit::gpui::rgb(current))
+        });
+        let nav = core.nav.clone();
+        cx.subscribe(&border_color, move |_, _, event: &ColorPickerEvent, cx| {
+            let ColorPickerEvent::Change(Some(color)) = event else {
+                return;
+            };
+            let rgba = gpui_kit::gpui::Rgba::from(*color);
+            let byte = |channel: f32| (channel.clamp(0., 1.) * 255.).round() as u8;
+            let hex = format!(
+                "#{:02x}{:02x}{:02x}",
+                byte(rgba.r),
+                byte(rgba.g),
+                byte(rgba.b)
+            );
+            nav.update(cx, |nav, cx| nav.set_window_border_color(&hex, cx));
+        })
+        .detach();
+        Self { core, border_color }
     }
 }
 
@@ -803,6 +842,40 @@ impl Render for SettingsScreen {
                         }
                     }),
             ));
+        let border = self.core.nav.read(cx).window_border;
+        let border_nav = self.core.nav.clone();
+        let window_card = card()
+            .child(preference_choice(
+                "Window border",
+                "A solid line around the window's edge, to tell it apart from the windows beside it.",
+                ButtonGroup::new("window-border")
+                    .children((0..=crate::app::nav::WINDOW_BORDER_MAX).map(|width| {
+                        Button::new(SharedString::from(format!("window-border-{width}")))
+                            .label(if width == 0 {
+                                "Off".to_string()
+                            } else {
+                                width.to_string()
+                            })
+                            .selected(width == border)
+                    }))
+                    .on_click(move |indices, _, cx| {
+                        if let Some(&width) = indices.first() {
+                            border_nav.update(cx, |nav, cx| nav.set_window_border(width as u8, cx));
+                        }
+                    }),
+            ))
+            .child(preference_row(
+                "Border color",
+                "Pick one, or enter any color as hex.",
+                ColorPicker::new(&self.border_color)
+                    .featured_colors(
+                        BORDER_COLORS
+                            .iter()
+                            .map(|&color| gpui_kit::gpui::rgb(color).into())
+                            .collect(),
+                    )
+                    .anchor(gpui_kit::gpui::Anchor::TopRight),
+            ));
         page("Settings").child(
             div()
                 .id("settings-content")
@@ -818,6 +891,8 @@ impl Render for SettingsScreen {
                 .child(preferences)
                 .child(div().text_color(p.muted).child("Notifications"))
                 .child(notifications)
+                .child(div().text_color(p.muted).child("Window"))
+                .child(window_card)
                 .child(
                     card()
                         .child(row("Crusteo", format!("v{}", env!("CARGO_PKG_VERSION"))))

@@ -16,6 +16,19 @@ use crate::app::notifications;
 pub const LANE_WIDTH_DEFAULT: f32 = 360.;
 pub const LANE_WIDTH_MIN: f32 = 200.;
 pub const LANE_WIDTH_MAX: f32 = 600.;
+/// The widest the window's border can be set.
+pub const WINDOW_BORDER_MAX: u8 = 8;
+/// The window border's color until one is chosen: a bright blue that
+/// stands out against the dark theme and against most apps beside it.
+pub const WINDOW_BORDER_COLOR: &str = "#3b9eff";
+
+/// `#rrggbb` (the `#` optional) as `0xrrggbb`.
+pub fn parse_hex(hex: &str) -> Option<u32> {
+    let digits = hex.trim().trim_start_matches('#');
+    (digits.len() == 6)
+        .then(|| u32::from_str_radix(digits, 16).ok())
+        .flatten()
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Tab {
@@ -224,6 +237,11 @@ pub struct Nav {
     pub pinned_terminals: BTreeSet<(String, String)>,
     pub notification_corner: notifications::Corner,
     pub notification_route: notifications::Route,
+    /// A solid border around the window this many pixels wide, 0 to
+    /// [`WINDOW_BORDER_MAX`]; 0 is none.
+    pub window_border: u8,
+    /// Its color, `#rrggbb`.
+    pub window_border_color: String,
     /// An agent Lanes should focus and expand, e.g. after a notification
     /// click. Lanes takes it. Not saved.
     pub reveal_agent: Option<(String, String)>,
@@ -310,6 +328,10 @@ impl Nav {
             pinned_terminals: BTreeSet::new(),
             notification_corner: notifications::Corner::parse(&ui.notification_corner),
             notification_route: notifications::Route::parse(&ui.notification_route),
+            window_border: ui.window_border.min(WINDOW_BORDER_MAX),
+            window_border_color: parse_hex(&ui.window_border_color)
+                .map(|_| ui.window_border_color.clone())
+                .unwrap_or_else(|| WINDOW_BORDER_COLOR.to_string()),
             reveal_agent: None,
             next_draft: 0,
         }
@@ -368,6 +390,8 @@ impl Nav {
             lane_color_choices: self.lane_color_choices.clone(),
             notification_corner: self.notification_corner.as_str().to_string(),
             notification_route: self.notification_route.as_str().to_string(),
+            window_border: self.window_border,
+            window_border_color: self.window_border_color.clone(),
         };
         config::save_ui(&ui);
     }
@@ -655,6 +679,23 @@ impl Nav {
 
     pub fn set_colored_lanes(&mut self, enabled: bool, cx: &mut Context<Self>) {
         self.colored_lanes = enabled;
+        self.save();
+        cx.notify();
+    }
+
+    pub fn set_window_border(&mut self, width: u8, cx: &mut Context<Self>) {
+        self.window_border = width.min(WINDOW_BORDER_MAX);
+        self.save();
+        cx.notify();
+    }
+
+    /// Sets the window border's color, given as `#rrggbb`; anything else
+    /// is ignored.
+    pub fn set_window_border_color(&mut self, hex: &str, cx: &mut Context<Self>) {
+        if parse_hex(hex).is_none() || self.window_border_color == hex {
+            return;
+        }
+        self.window_border_color = hex.to_string();
         self.save();
         cx.notify();
     }

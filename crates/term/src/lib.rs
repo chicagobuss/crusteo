@@ -475,6 +475,20 @@ mod tests {
     }
 
     #[test]
+    fn the_cursor_shows_after_a_prompt_whatever_its_shape() {
+        let mut term = Terminal::new(6, 20);
+        term.feed(b"~/src % ");
+        let cursor = term.snapshot().cursor.unwrap();
+        assert_eq!((cursor.row, cursor.col, cursor.hidden), (0, 8, false));
+        // A program asking for a bar still has a cursor to draw.
+        term.feed(b"\x1b[6 q");
+        assert!(!term.snapshot().cursor.unwrap().hidden);
+        // Hiding it hides it.
+        term.feed(b"\x1b[?25l");
+        assert!(term.snapshot().cursor.unwrap().hidden);
+    }
+
+    #[test]
     fn records_ansi_colour() {
         let mut term = Terminal::new(4, 20);
         term.feed(b"\x1b[31mRED\x1b[0m");

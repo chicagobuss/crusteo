@@ -109,7 +109,7 @@ impl Render for PaseoLayout {
             Screen::Settings => {
                 let core = self.core.clone();
                 self.settings
-                    .get_or_insert_with(|| cx.new(|cx| SettingsScreen::new(core, cx)))
+                    .get_or_insert_with(|| cx.new(|cx| SettingsScreen::new(core, window, cx)))
                     .clone()
                     .cached_fill()
             }

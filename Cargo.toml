@@ -23,7 +23,7 @@ sampler = { path = "crates/sampler" }
 
 [package]
 name = "crusteo"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -54,6 +54,9 @@ embed-resource = "3.0.11"
 
 [target.'cfg(windows)'.dependencies]
 mimalloc.workspace = true
+# The system's window border, colored to match crusteo's own.
+raw-window-handle = "0.6"
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Dwm"] }
 
 # GPUI with crusteo's performance fixes; see vendor/gpui-pre/PATCHES.md.
 [patch.crates-io]

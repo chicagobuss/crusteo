@@ -11,15 +11,17 @@ use fleet::Bucket;
 use fleet::display::{self, ToolDisplay};
 use fleet::prompt_index::{self, PromptMark};
 use fleet::timeline::{ItemKind, TaskActivity, ToolCall, Turn};
-use gpui_kit::base::Disableable as _;
+use gpui_kit::base::{Disableable as _, TextSelection};
 use gpui_kit::component::Sizable;
 use gpui_kit::component::button::{Button, ButtonVariants};
-use gpui_kit::component::text::TextView;
+use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
+use gpui_kit::component::text::{SelectionFormat, TextView, TextViewState};
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::gpui::{
-    AnyElement, App, AppContext, ClickEvent, Context, Entity, EventEmitter, FollowMode,
-    InteractiveElement, IntoElement, ListAlignment, ListOffset, ListState, ParentElement, Render,
-    SharedString, StatefulInteractiveElement, Styled, Window, div, list, px,
+    AnyElement, App, AppContext, ClickEvent, Context, DismissEvent, Entity, EventEmitter,
+    Focusable, FollowMode, InteractiveElement, IntoElement, ListAlignment, ListOffset, ListState,
+    MouseButton, MouseDownEvent, ParentElement, Pixels, Point, Render, SharedString,
+    StatefulInteractiveElement, Styled, Subscription, Window, anchored, deferred, div, list, px,
 };
 use gpui_kit::prelude::FluentBuilder;
 use serde_json::{Value, json};
@@ -89,6 +91,31 @@ pub struct Conversation {
     /// Fills its width instead of keeping to a column for reading, as in
     /// a Lanes card, whose lane sets how wide it is.
     wide: bool,
+    /// Each assistant reply's text, held here rather than by its view so a
+    /// selection can be copied as Markdown as well as plain text.
+    replies: Replies,
+    /// What a right-click on selected text opens: where, and the menu.
+    copy_menu: Option<(Point<Pixels>, Entity<PopupMenu>, Subscription)>,
+}
+
+/// Assistant replies' text states by timeline item id, with the text each
+/// was last given.
+type Replies = Rc<std::cell::RefCell<HashMap<String, (Entity<TextViewState>, String)>>>;
+
+/// The text state for the reply `id`, made on first sight and kept to its
+/// latest `text` as it streams in.
+fn reply_state(replies: &Replies, id: &str, text: &str, cx: &mut App) -> Entity<TextViewState> {
+    let mut replies = replies.borrow_mut();
+    if let Some((state, shown)) = replies.get_mut(id) {
+        if shown != text {
+            *shown = text.to_string();
+            state.update(cx, |state, cx| state.set_text(text, cx));
+        }
+        return state.clone();
+    }
+    let state = cx.new(|cx| TextViewState::markdown(text, cx));
+    replies.insert(id.to_string(), (state.clone(), text.to_string()));
+    state
 }
 
 /// Someone the conversation asks its owner to show.
@@ -233,6 +260,8 @@ impl Conversation {
             wide: false,
             archive_finished: ArchiveFinished::Idle,
             reveal: None,
+            replies: Rc::default(),
+            copy_menu: None,
         };
         let weak = cx.entity().downgrade();
         this.list.set_scroll_handler(move |event, _, cx| {
@@ -769,8 +798,10 @@ impl Conversation {
         self.fingerprints = prints;
         self.navigation.rows.clear();
         self.navigation.loaded.clear();
+        let ids: HashSet<&str> = items.iter().map(|item| item.id.as_str()).collect();
+        (self.replies.borrow_mut()).retain(|id, _| ids.contains(id.as_str()));
         let cache = Rc::make_mut(&mut self.images);
-        cache.retain(|id, _| items.iter().any(|item| &item.id == id));
+        cache.retain(|id, _| ids.contains(id.as_str()));
         for (row, entry) in rows.iter().enumerate() {
             if let Row::Item { index, .. } = entry
                 && let ItemKind::User {
@@ -850,6 +881,85 @@ impl Conversation {
         }
         cx.notify();
     }
+    /// On a right-click over selected text, opens a menu to copy it, as
+    /// shown or as the Markdown it was written in. Both are taken now, so the
+    /// menu copies what was selected whatever happens to the selection.
+    fn open_copy_menu(
+        &mut self,
+        position: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !TextSelection::has_selection(window, cx) {
+            return;
+        }
+        let plain = TextSelection::selected_text(window, cx);
+        if plain.trim().is_empty() {
+            return;
+        }
+        let markdown = self.selected_markdown(window, cx);
+        let store = self.core.store.clone();
+        let menu = PopupMenu::build(window, cx, move |menu, _, _| {
+            let copy = |label: &'static str, text: String, done: &'static str| {
+                let store = store.clone();
+                PopupMenuItem::new(label).on_click(move |_, _, cx| {
+                    cx.write_to_clipboard(gpui_kit::gpui::ClipboardItem::new_string(text.clone()));
+                    store.update(cx, |store, cx| store.toast(done.to_string(), cx));
+                })
+            };
+            menu.item(copy("Copy", plain.clone(), "Copied")).item(copy(
+                "Copy as Markdown",
+                markdown.clone(),
+                "Copied as Markdown",
+            ))
+        });
+        let dismiss = cx.subscribe_in(&menu, window, |this, _, _: &DismissEvent, _, cx| {
+            this.copy_menu = None;
+            cx.notify();
+        });
+        self.copy_menu = Some((position, menu, dismiss));
+        cx.stop_propagation();
+        cx.notify();
+    }
+
+    /// The selection with each reply in it written as its Markdown source:
+    /// the replies copy Markdown just for the moment it is read.
+    fn selected_markdown(&self, window: &mut Window, cx: &mut Context<Self>) -> String {
+        let states: Vec<Entity<TextViewState>> = (self.replies.borrow().values())
+            .map(|(state, _)| state.clone())
+            .collect();
+        for state in &states {
+            state.update(cx, |state, cx| {
+                state.set_selection_format(SelectionFormat::Source, cx)
+            });
+        }
+        let text = TextSelection::selected_text(window, cx);
+        for state in &states {
+            state.update(cx, |state, cx| {
+                state.set_selection_format(SelectionFormat::Plain, cx)
+            });
+        }
+        text
+    }
+
+    fn copy_menu_layer(&self, window: &mut Window, cx: &mut App) -> Option<AnyElement> {
+        let (position, menu, _) = self.copy_menu.as_ref()?;
+        let focus = menu.focus_handle(cx);
+        if !focus.contains_focused(window, cx) {
+            focus.focus(window, cx);
+        }
+        Some(
+            deferred(
+                anchored()
+                    .position(*position)
+                    .snap_to_window_with_margin(px(8.))
+                    .child(menu.clone()),
+            )
+            .with_priority(gpui_kit::base::POPUP_PRIORITY)
+            .into_any_element(),
+        )
+    }
+
     /// Scrolls to a timeline item, now or once its rows are built, as when
     /// find opens a card at a match.
     pub fn reveal_item(&mut self, id: String, cx: &mut Context<Self>) {
@@ -1070,12 +1180,13 @@ fn fingerprint(item: &fleet::timeline::Item, expanded: bool) -> u64 {
 }
 
 impl Render for Conversation {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if let Some((label, view)) = self.viewing.clone() {
             return self.subagent_view(&label, &view, cx);
         }
         let p = palette();
         let rows = self.rows.clone();
+        let replies = self.replies.clone();
         let wide = self.wide;
         let session = self.session.clone();
         let core = self.core.clone();
@@ -1093,7 +1204,7 @@ impl Render for Conversation {
             let Some(row) = rows.get(ix).cloned() else {
                 return div().into_any_element();
             };
-            let content = render_row(&row, &session, &core, &expanded, &this, &cwd, cx);
+            let content = render_row(&row, &session, &core, &expanded, &replies, &this, &cwd, cx);
             div()
                 .w_full()
                 .flex()
@@ -1133,6 +1244,12 @@ impl Render for Conversation {
                     .flex_1()
                     .min_h(px(0.))
                     .pt(px(12.))
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                            this.open_copy_menu(event.position, window, cx);
+                        }),
+                    )
                     .when(loading, |d| {
                         d.child(
                             div()
@@ -1170,15 +1287,18 @@ impl Render for Conversation {
             })
             .children(self.track_bar(cx))
             .children(self.composer.clone())
+            .children(self.copy_menu_layer(window, cx))
             .into_any_element()
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_row(
     row: &Row,
     session: &Entity<AgentSession>,
     core: &Core,
     expanded: &Rc<std::cell::RefCell<HashSet<String>>>,
+    replies: &Replies,
     view: &Entity<Conversation>,
     cwd: &str,
     cx: &mut App,
@@ -1364,15 +1484,18 @@ fn render_row(
                             ),
                     )
                     .into_any_element(),
-                ItemKind::Assistant { text, .. } => div()
-                    .w_full()
-                    .text_size(size::content())
-                    .text_color(p.foreground)
-                    .child(
-                        TextView::markdown(SharedString::from(item.id.clone()), text.clone())
-                            .selectable(true),
-                    )
-                    .into_any_element(),
+                ItemKind::Assistant { text, .. } => {
+                    // Owned, so the session is no longer borrowed when the
+                    // reply's state is brought up to date.
+                    let (id, text) = (item.id.clone(), text.clone());
+                    let state = reply_state(replies, &id, &text, cx);
+                    div()
+                        .w_full()
+                        .text_size(size::content())
+                        .text_color(p.foreground)
+                        .child(TextView::new(&state).selectable(true))
+                        .into_any_element()
+                }
                 ItemKind::Thought { text, loading } => {
                     let open = expanded.borrow().contains(&item.id);
                     let header = tool_header(

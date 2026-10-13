@@ -11,11 +11,11 @@ use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
 use gpui_kit::component::{TitleBar, WindowExt};
 use gpui_kit::gpui::{
-    AnyElement, AnyView, App, AppContext, ClickEvent, Context, Decorations, DismissEvent, Entity,
-    FocusHandle, Focusable, Image, ImageFormat, InteractiveElement, IntoElement, KeyBinding,
-    MouseButton, MouseDownEvent, ParentElement, Pixels, Point, Render, SharedString,
-    StatefulInteractiveElement, Styled, Subscription, Window, WindowBounds, WindowOptions,
-    anchored, deferred, div, img, point, px, size,
+    AbsoluteLength, AnyElement, AnyView, App, AppContext, ClickEvent, Context, Decorations,
+    DismissEvent, EdgesRefinement, Entity, FocusHandle, Focusable, Image, ImageFormat,
+    InteractiveElement, IntoElement, KeyBinding, MouseButton, MouseDownEvent, ParentElement,
+    Pixels, Point, Render, SharedString, StatefulInteractiveElement, Styled, Subscription, Window,
+    WindowBounds, WindowOptions, anchored, deferred, div, img, point, px, rgb, size,
 };
 use gpui_kit::prelude::FluentBuilder;
 
@@ -53,6 +53,7 @@ gpui_kit::actions!(
         ZoomOut,
         ZoomReset,
         ShowHelp,
+        CustomizeToolbars,
     ]
 );
 
@@ -142,13 +143,51 @@ pub struct Shell {
     bar_menu: Option<(Point<Pixels>, Entity<PopupMenu>, Subscription)>,
     /// The help panel is open: see [`crate::help`].
     help_open: bool,
+    /// The color last given the system's window border, and whether the
+    /// system took it: see [`color_system_border`].
+    system_border: (Option<u32>, bool),
 }
 
-/// Kept clear at the title bar's left, after the app icon, and at its
-/// right, so the window can be dragged from either end. On macOS the gap
-/// before the icon, after the window buttons, already drags it, so this is
-/// just spacing there.
-const TITLE_CLEAR_LEFT: f32 = if cfg!(target_os = "macos") { 10. } else { 28. };
+/// Gives the system's own window border `color` (`0xrrggbb`), or its
+/// default for none. Only Windows 11 draws such a border and lets it be
+/// colored; elsewhere this does nothing and returns false.
+#[cfg(windows)]
+fn color_system_border(window: &Window, color: Option<u32>) -> bool {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    use windows_sys::Win32::Graphics::Dwm::{
+        DWMWA_BORDER_COLOR, DWMWA_COLOR_DEFAULT, DwmSetWindowAttribute,
+    };
+    let Ok(handle) = HasWindowHandle::window_handle(window) else {
+        return false;
+    };
+    let RawWindowHandle::Win32(win32) = handle.as_raw() else {
+        return false;
+    };
+    // COLORREF is 0x00bbggrr.
+    let value: u32 = color.map_or(DWMWA_COLOR_DEFAULT, |rgb| {
+        ((rgb & 0xff) << 16) | (rgb & 0xff00) | ((rgb >> 16) & 0xff)
+    });
+    // Safe: a live window's handle, and a u32 the call only reads.
+    let result = unsafe {
+        DwmSetWindowAttribute(
+            win32.hwnd.get() as _,
+            DWMWA_BORDER_COLOR as u32,
+            (&value as *const u32).cast(),
+            std::mem::size_of::<u32>() as u32,
+        )
+    };
+    result == 0 && color.is_some()
+}
+
+#[cfg(not(windows))]
+fn color_system_border(_: &Window, _: Option<u32>) -> bool {
+    false
+}
+
+/// Spacing at the title bar's left, after the app icon, which drags the
+/// window as the empty bar does; and kept clear at its right, so the window
+/// can be dragged from that end too.
+const TITLE_CLEAR_LEFT: f32 = 10.;
 const TITLE_CLEAR_RIGHT: f32 = 20.;
 
 /// The app icon for the title bar, 18px. It is baked at 1x, 2x and 3x,
@@ -285,6 +324,7 @@ impl Shell {
             customizing: false,
             bar_menu: None,
             help_open: false,
+            system_border: (None, false),
         }
     }
 
@@ -884,6 +924,43 @@ impl Shell {
         cx.notify();
     }
 
+    /// A solid line around the window's edge, as wide and in the color
+    /// chosen in Settings, to tell the window apart from those beside it.
+    /// Drawn over everything but popups; with no hitbox, it takes no clicks
+    /// and leaves resizing at the edge alone.
+    fn window_edge(&mut self, window: &mut Window, cx: &App) -> Option<AnyElement> {
+        let nav = self.core.nav.read(cx);
+        let color = (nav.window_border > 0)
+            .then(|| {
+                crate::app::nav::parse_hex(&nav.window_border_color)
+                    .or_else(|| crate::app::nav::parse_hex(crate::app::nav::WINDOW_BORDER_COLOR))
+            })
+            .flatten();
+        let border = nav.window_border as f32;
+        // The system's own line takes the color too, where it can.
+        if self.system_border.0 != color {
+            self.system_border = (color, color_system_border(window, color));
+        }
+        let color = color?;
+        // Windows 11 draws a 1px line round a window that is not maximized:
+        // outside crusteo's content at the sides and bottom, but over its
+        // top row, as the content runs up to the window's top edge. Colored,
+        // it is the outer pixel of the border: crusteo draws one less at the
+        // sides and bottom, and at the top as many as asked, the first
+        // hidden under it.
+        let system_line = self.system_border.1 && !window.is_maximized();
+        let sides = if system_line { border - 1. } else { border };
+        let width = |w: f32| Some(AbsoluteLength::from(px(w.max(0.))));
+        let mut edge = div().absolute().inset_0().border_color(rgb(color));
+        edge.style().border_widths = EdgesRefinement {
+            top: width(border),
+            right: width(sides),
+            bottom: width(sides),
+            left: width(sides),
+        };
+        Some(edge.into_any_element())
+    }
+
     fn set_customizing(&mut self, customizing: bool, cx: &mut Context<Self>) {
         self.customizing = customizing;
         self.bar_menu = None;
@@ -1367,6 +1444,9 @@ impl Render for Shell {
                 this.help_open = !this.help_open;
                 cx.notify();
             }))
+            .on_action(cx.listener(|this, _: &CustomizeToolbars, _, cx| {
+                this.set_customizing(true, cx);
+            }))
             .on_action(cx.listener(Self::toggle_sidebar))
             .on_action(
                 cx.listener(|this, _: &CommandCenter, window, cx| this.open_palette(window, cx)),
@@ -1492,7 +1572,8 @@ impl Render for Shell {
                 }))
             })
             .children(self.bar_menu_layer(window, cx))
-            .children(self.zoom_badge(window));
+            .children(self.zoom_badge(window))
+            .children(self.window_edge(window, cx));
 
         if matches!(window.window_decorations(), Decorations::Client { .. }) {
             gpui_kit::component::window_border()

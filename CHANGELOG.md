@@ -7,6 +7,30 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.0-alpha.3] - 2026-10-13
+
+### Added
+
+- Right-clicking selected text in a conversation offers Copy, as shown, and Copy as Markdown, the
+  source the agent wrote, with its bold, code, links and lists.
+- A window border, off by default: Settings → Window sets a solid line around the window's edge,
+  1 to 8 px wide, in any color, to tell crusteo apart from the windows beside it.
+
+### Changed
+
+- The title bar's "?" is now a menu: Settings, Keyboard shortcuts, Customize toolbars and About.
+- Less space between the app icon and the title bar's first item on Windows and Linux; the icon
+  drags the window as the empty bar does.
+- Terminals show a block cursor that blinks slowly while the terminal has focus, whatever shape the
+  program asks for, and stays lit while you type or output arrives.
+
+### Fixed
+
+- Terminals drew no cell backgrounds: programs' background colors, the selection highlight and the
+  cursor were all missing.
+- A lane with a terminal open kept the ordinary lane width and could not be resized; it is as wide
+  as a lane with an open card, and its edge drags.
+
 ## [0.1.0-alpha.2] - 2026-10-13
 
 Windows fixes, checked against Paseo 0.10.1 through 0.11.2.
@@ -90,6 +114,7 @@ First alpha, for a few early testers. Early software: expect rough edges.
 - Patched GPUI (`vendor/gpui-pre`) that skips redraws on window moves and lets cached views be
   reused after they move.
 
-[Unreleased]: https://github.com/chicagobuss/crusteo/compare/v0.1.0-alpha.2...HEAD
+[Unreleased]: https://github.com/chicagobuss/crusteo/compare/v0.1.0-alpha.3...HEAD
+[0.1.0-alpha.3]: https://github.com/chicagobuss/crusteo/releases/tag/v0.1.0-alpha.3
 [0.1.0-alpha.2]: https://github.com/chicagobuss/crusteo/releases/tag/v0.1.0-alpha.2
 [0.1.0-alpha.1]: https://github.com/chicagobuss/crusteo/releases/tag/v0.1.0-alpha.1
