@@ -10,6 +10,7 @@ pub mod lanes;
 pub mod prompt;
 pub mod prompt_index;
 pub mod providers;
+pub mod questions;
 pub mod requests;
 pub mod sidebar;
 pub mod subagents;

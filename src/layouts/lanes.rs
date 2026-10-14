@@ -4198,6 +4198,66 @@ fn lane_title_tooltip(
 
 /// A menu item that copies `text`, greyed out when there is none, such as
 /// the resume command of an agent whose provider has not started a session.
+/// The longest a path shows in a menu; longer ones lose their middle.
+const MENU_PATH_CHARS: usize = 48;
+
+/// `path` as a menu shows it: a home folder as `~` (`/home/<user>`,
+/// `/Users/<user>` or `C:\Users\<user>`, on whichever host it is), and the
+/// middle of a long one cut to `…`.
+fn short_path(path: &str) -> String {
+    let home = ["/home/", "/Users/"]
+        .iter()
+        .find_map(|prefix| {
+            let rest = path.strip_prefix(prefix)?;
+            Some(match rest.split_once('/') {
+                Some((_, after)) if !after.is_empty() => format!("~/{after}"),
+                _ => "~".to_string(),
+            })
+        })
+        .or_else(|| {
+            let lower = path.to_ascii_lowercase();
+            let rest = (lower.get(1..9) == Some(":\\users\\")).then(|| &path[9..])?;
+            Some(match rest.split_once('\\') {
+                Some((_, after)) if !after.is_empty() => format!("~\\{after}"),
+                _ => "~".to_string(),
+            })
+        })
+        .unwrap_or_else(|| path.to_string());
+    let chars: Vec<char> = home.chars().collect();
+    if chars.len() <= MENU_PATH_CHARS {
+        return home;
+    }
+    // The end names the folder, so it keeps the most.
+    let head = MENU_PATH_CHARS / 3;
+    let tail = MENU_PATH_CHARS - head - 1;
+    let start: String = chars[..head].iter().collect();
+    let end: String = chars[chars.len() - tail..].iter().collect();
+    format!("{start}…{end}")
+}
+
+/// A menu's first line: where the workspace lives on its host, dimmed, as
+/// something to read rather than choose; the whole path on hover when it is
+/// cut short.
+fn path_item(path: Option<String>) -> PopupMenuItem {
+    let full = path
+        .filter(|path| !path.trim().is_empty())
+        .unwrap_or_else(|| "unknown path".to_string());
+    let shown = short_path(&full);
+    let cut = shown != full;
+    PopupMenuItem::element(move |_, _| {
+        let full = full.clone();
+        div()
+            .id("menu-workspace-path")
+            .text_size(size::sm())
+            .text_color(palette().muted)
+            .child(shown.clone())
+            .when(cut, |line| {
+                line.tooltip(move |window, cx| Tooltip::new(full.clone()).build(window, cx))
+            })
+    })
+    .disabled(true)
+}
+
 fn copy_item(menu: PopupMenu, core: &Core, label: &str, text: Option<String>) -> PopupMenu {
     let store = core.store.clone();
     let what = label.trim_start_matches("Copy ").to_string();
@@ -4228,9 +4288,17 @@ impl Lanes {
         let core = self.core.clone();
         let (host, agent) = (host.to_string(), agent.to_string());
         let menu = PopupMenu::build(window, cx, move |menu, _, cx| {
-            let record = core.store.read(cx).fleet.agent(&host, &agent);
+            let fleet = &core.store.read(cx).fleet;
+            let record = fleet.agent(&host, &agent);
             let resume = record.and_then(|record| record.resume_command());
             let workspace = record.and_then(|record| record.workspace_id.clone());
+            // Its workspace's folder, or failing that its own.
+            let path = (workspace.as_deref())
+                .and_then(|workspace| fleet.workspace(&host, workspace))
+                .map(|ws| ws.directory().to_string())
+                .filter(|path| !path.is_empty())
+                .or_else(|| record.map(|record| record.cwd.clone()));
+            let menu = menu.item(path_item(path)).separator();
             let menu = copy_item(menu, &core, "Copy Paseo agent id", Some(agent.clone()));
             let menu = copy_item(menu, &core, "Copy resume command", resume);
             let menu = copy_item(menu, &core, "Copy Paseo workspace id", workspace);
@@ -4265,6 +4333,9 @@ impl Lanes {
         let (host, workspace) = (host.to_string(), workspace.to_string());
         let menu = PopupMenu::build(window, cx, move |menu, _, cx| {
             let target = (host.clone(), workspace.clone());
+            let path = (core.store.read(cx).fleet.workspace(&host, &workspace))
+                .map(|ws| ws.directory().to_string());
+            let menu = menu.item(path_item(path)).separator();
             let menu = menu.item(PopupMenuItem::new("New agent in this workspace").on_click({
                 let (board, lane, target) = (board.clone(), lane.clone(), target.clone());
                 move |_, window, cx| {
@@ -8004,8 +8075,14 @@ fn blurb(store: &crate::app::FleetStore, card: &LaneCard, cx: &App) -> Option<St
             return text;
         }
     }
+    let asks = || {
+        (store.fleet.agent(&card.host, &card.agent_id))
+            .and_then(|agent| agent.pending_permissions.first())
+            .is_some_and(fleet::questions::is_question)
+    };
     match card.attention_reason.as_deref() {
         Some("finished") => Some("Finished".into()),
+        Some("permission") if asks() => Some("Has a question".into()),
         Some("permission") => Some("Needs permission".into()),
         Some("error") => Some("Error".into()),
         Some(other) if !other.is_empty() => Some(other.to_string()),
@@ -8731,6 +8808,27 @@ mod filter_tests {
             ..Default::default()
         };
         assert!(filter_lanes(&lanes, &both, labels).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod path_tests {
+    use super::short_path;
+
+    #[test]
+    fn home_folders_read_as_a_tilde_and_long_paths_lose_their_middle() {
+        assert_eq!(short_path("/home/sam/src/crusteo"), "~/src/crusteo");
+        assert_eq!(short_path("/Users/sam/code"), "~/code");
+        assert_eq!(short_path("/Users/sam"), "~");
+        assert_eq!(short_path(r"C:\Users\sam\src\app"), r"~\src\app");
+        assert_eq!(short_path("/srv/app"), "/srv/app");
+        assert_eq!(short_path("unknown path"), "unknown path");
+        let long =
+            "/home/sam/src/a-very-long-project-name/worktrees/feature-branch-with-a-long-name";
+        let shown = short_path(long);
+        assert_eq!(shown.chars().count(), super::MENU_PATH_CHARS);
+        assert!(shown.starts_with("~/src/") && shown.contains('…'));
+        assert!(shown.ends_with("feature-branch-with-a-long-name"));
     }
 }
 

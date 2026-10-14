@@ -28,6 +28,7 @@ use serde_json::{Value, json};
 
 use super::attachments;
 use super::composer::Composer;
+use super::question_form::QuestionForm;
 use crate::app::store::{now_millis, parse_iso};
 use crate::app::{AgentSession, Core};
 use crate::theme::{palette, size, with_alpha};
@@ -96,7 +97,12 @@ pub struct Conversation {
     replies: Replies,
     /// What a right-click on selected text opens: where, and the menu.
     copy_menu: Option<(Point<Pixels>, Entity<PopupMenu>, Subscription)>,
+    /// A form for each pending question, by permission id.
+    question_forms: QuestionForms,
 }
+
+/// Pending questions' forms by permission id.
+type QuestionForms = Rc<std::cell::RefCell<HashMap<String, Entity<QuestionForm>>>>;
 
 /// Assistant replies' text states by timeline item id, with the text each
 /// was last given.
@@ -262,6 +268,7 @@ impl Conversation {
             reveal: None,
             replies: Rc::default(),
             copy_menu: None,
+            question_forms: Rc::default(),
         };
         let weak = cx.entity().downgrade();
         this.list.set_scroll_handler(move |event, _, cx| {
@@ -942,6 +949,32 @@ impl Conversation {
         text
     }
 
+    /// Keeps a form for each pending question, made here because its text
+    /// boxes need the window, and drops those the daemon resolved. A
+    /// request whose questions don't parse gets none and shows as a
+    /// permission.
+    fn sync_question_forms(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let pending: Vec<(String, Value)> = (self.session.read(cx).timeline.permissions.iter())
+            .filter(|permission| fleet::questions::is_question(&permission.request))
+            .map(|permission| (permission.id.clone(), permission.request.clone()))
+            .collect();
+        let mut forms = self.question_forms.borrow_mut();
+        forms.retain(|id, _| pending.iter().any(|(pending, _)| pending == id));
+        for (id, request) in pending {
+            if forms.contains_key(&id) {
+                continue;
+            }
+            let Some(questions) = fleet::questions::parse(&request["input"]) else {
+                continue;
+            };
+            let (core, host, agent) = (self.core.clone(), self.host.clone(), self.agent_id.clone());
+            let form = cx.new(|cx| {
+                QuestionForm::new(core, &host, &agent, &id, request, questions, window, cx)
+            });
+            forms.insert(id, form);
+        }
+    }
+
     fn copy_menu_layer(&self, window: &mut Window, cx: &mut App) -> Option<AnyElement> {
         let (position, menu, _) = self.copy_menu.as_ref()?;
         let focus = menu.focus_handle(cx);
@@ -1185,8 +1218,10 @@ impl Render for Conversation {
             return self.subagent_view(&label, &view, cx);
         }
         let p = palette();
+        self.sync_question_forms(window, cx);
         let rows = self.rows.clone();
         let replies = self.replies.clone();
+        let forms = self.question_forms.clone();
         let wide = self.wide;
         let session = self.session.clone();
         let core = self.core.clone();
@@ -1204,7 +1239,9 @@ impl Render for Conversation {
             let Some(row) = rows.get(ix).cloned() else {
                 return div().into_any_element();
             };
-            let content = render_row(&row, &session, &core, &expanded, &replies, &this, &cwd, cx);
+            let content = render_row(
+                &row, &session, &core, &expanded, &replies, &forms, &this, &cwd, cx,
+            );
             div()
                 .w_full()
                 .flex()
@@ -1299,6 +1336,7 @@ fn render_row(
     core: &Core,
     expanded: &Rc<std::cell::RefCell<HashSet<String>>>,
     replies: &Replies,
+    forms: &QuestionForms,
     view: &Entity<Conversation>,
     cwd: &str,
     cx: &mut App,
@@ -1410,6 +1448,10 @@ fn render_row(
             let Some(permission) = timeline.permissions.get(*i) else {
                 return div().into_any_element();
             };
+            // A question the agent asks is a form to answer, not a yes or no.
+            if let Some(form) = forms.borrow().get(&permission.id) {
+                return form.clone().into_any_element();
+            }
             permission_card(
                 &permission.request,
                 &session_ref.host,

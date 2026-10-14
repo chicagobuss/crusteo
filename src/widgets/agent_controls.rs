@@ -12,9 +12,56 @@ use serde_json::json;
 use crate::app::Core;
 use crate::theme::{palette, size};
 
+/// What stands for the buttons when the agent asks a question: questions
+/// are answered in the conversation's form, as Accept here would send no
+/// answers.
+fn answer_in_conversation() -> AnyElement {
+    div()
+        .flex()
+        .justify_end()
+        .text_size(size::sm())
+        .text_color(palette().muted)
+        .child("Open to answer")
+        .into_any_element()
+}
+
 /// `scope` keeps element ids unique when the same agent is drawn in two columns.
 pub fn controls(core: &Core, host: &str, agent: &Agent, scope: &str) -> Option<AnyElement> {
     let p = palette();
+    if let Some(request) = agent.pending_permissions.first()
+        && fleet::questions::is_question(request)
+    {
+        let asked = fleet::questions::parse(&request["input"])
+            .and_then(|questions| questions.into_iter().next())
+            .map(|question| question.question);
+        return Some(
+            div()
+                .mt(px(4.))
+                .pt(px(6.))
+                .border_t_1()
+                .border_color(p.border)
+                .flex()
+                .flex_col()
+                .gap(px(6.))
+                .child(
+                    div()
+                        .text_size(size::sm())
+                        .text_color(p.status_warning)
+                        .child("Question"),
+                )
+                .when_some(asked, |this, asked| {
+                    this.child(
+                        div()
+                            .text_size(size::sm())
+                            .text_color(p.foreground)
+                            .line_clamp(3)
+                            .child(asked),
+                    )
+                })
+                .child(answer_in_conversation())
+                .into_any_element(),
+        );
+    }
     if let Some(request) = agent.pending_permissions.first() {
         let permission_id = request["id"].as_str()?.to_string();
         let title = request["title"]
@@ -155,6 +202,9 @@ pub fn permission_buttons(
     use serde_json::json;
 
     let request = agent.pending_permissions.first()?;
+    if fleet::questions::is_question(request) {
+        return Some(answer_in_conversation());
+    }
     let permission_id = request["id"].as_str()?.to_string();
     let mut actions: Vec<(String, String, bool)> = request["actions"]
         .as_array()

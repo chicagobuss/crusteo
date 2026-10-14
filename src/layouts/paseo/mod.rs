@@ -6,6 +6,7 @@ mod composer;
 mod conversation;
 mod draft;
 mod prompt_index;
+mod question_form;
 mod screens;
 mod sidebar;
 mod terminal;

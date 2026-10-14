@@ -338,7 +338,12 @@ impl Stress {
                 0..=2 => {
                     agent["requiresAttention"] = json!(true);
                     agent["attentionReason"] = json!("permission");
-                    agent["pendingPermissions"] = json!([{ "id": format!("perm_{h}_{w}_{a}") }]);
+                    // Every other one asks a question rather than leave.
+                    agent["pendingPermissions"] = if (h + w + a).is_multiple_of(2) {
+                        json!([question(&format!("perm_{h}_{w}_{a}"))])
+                    } else {
+                        json!([{ "id": format!("perm_{h}_{w}_{a}") }])
+                    };
                 }
                 3..=4 => {
                     agent["status"] = json!("error");
@@ -409,6 +414,38 @@ impl Churn {
             }));
         pushes
     }
+}
+
+/// A pending question, as Claude Code's AskUserQuestion asks one: a single
+/// choice that also takes a typed answer, and a multiple choice.
+fn question(id: &str) -> Value {
+    json!({
+        "id": id,
+        "kind": "question",
+        "name": "AskUserQuestion",
+        "title": "Question",
+        "input": {
+            "questions": [
+                {
+                    "id": "0",
+                    "header": "Scope",
+                    "question": "Do you want the full campaign resumed, or just a bounded compatibility pass?",
+                    "options": [
+                        { "label": "Bounded compatibility pass only" },
+                        { "label": "Resume the full campaign too", "description": "Every lane picks up where it stopped" }
+                    ],
+                    "isOther": true
+                },
+                {
+                    "id": "1",
+                    "header": "Platforms",
+                    "question": "Which platforms should it cover?",
+                    "multiSelect": true,
+                    "options": [{ "label": "macOS" }, { "label": "Linux" }, { "label": "Windows" }]
+                }
+            ]
+        }
+    })
 }
 
 /// A short exchange for a synthetic agent's conversation, as a daemon's

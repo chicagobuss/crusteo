@@ -7,6 +7,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.0-alpha.4] - 2026-10-14
+
+### Added
+
+- Lanes: a workspace's right-click menu, and an agent card's, start with the workspace's folder on
+  its host, dimmed, with a home folder as `~` and the full path on hover; "unknown path" when the
+  host doesn't say.
+
+### Fixed
+
+- A question an agent asks, such as Claude Code's AskUserQuestion, showed as a permission with Deny
+  and Accept, and Accept sent no answers. It is a form now, as in Paseo: each question's options,
+  single or multiple choice, a box for another answer where one is allowed, and Submit. Cards and
+  the Needs-you strip say the agent has a question, to be answered in its conversation.
+
 ## [0.1.0-alpha.3] - 2026-10-13
 
 ### Added
@@ -114,7 +129,8 @@ First alpha, for a few early testers. Early software: expect rough edges.
 - Patched GPUI (`vendor/gpui-pre`) that skips redraws on window moves and lets cached views be
   reused after they move.
 
-[Unreleased]: https://github.com/chicagobuss/crusteo/compare/v0.1.0-alpha.3...HEAD
+[Unreleased]: https://github.com/chicagobuss/crusteo/compare/v0.1.0-alpha.4...HEAD
+[0.1.0-alpha.4]: https://github.com/chicagobuss/crusteo/releases/tag/v0.1.0-alpha.4
 [0.1.0-alpha.3]: https://github.com/chicagobuss/crusteo/releases/tag/v0.1.0-alpha.3
 [0.1.0-alpha.2]: https://github.com/chicagobuss/crusteo/releases/tag/v0.1.0-alpha.2
 [0.1.0-alpha.1]: https://github.com/chicagobuss/crusteo/releases/tag/v0.1.0-alpha.1
