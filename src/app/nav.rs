@@ -16,6 +16,11 @@ use crate::app::notifications;
 pub const LANE_WIDTH_DEFAULT: f32 = 360.;
 pub const LANE_WIDTH_MIN: f32 = 200.;
 pub const LANE_WIDTH_MAX: f32 = 600.;
+/// Seconds a card opened from a notification blinks, until changed.
+pub const NOTIFICATION_FLASH_DEFAULT: u8 = 4;
+/// The choices Settings offers for it, 0 being off.
+pub const NOTIFICATION_FLASH_CHOICES: [u8; 4] = [0, 2, 4, 8];
+
 /// The widest the window's border can be set.
 pub const WINDOW_BORDER_MAX: u8 = 8;
 /// The window border's color until one is chosen: a bright blue that
@@ -237,6 +242,14 @@ pub struct Nav {
     pub pinned_terminals: BTreeSet<(String, String)>,
     pub notification_corner: notifications::Corner,
     pub notification_route: notifications::Route,
+    /// Seconds a card opened from a notification blinks its outline; 0 is
+    /// not at all.
+    pub notification_flash: u8,
+    /// Seconds an agent's notification stays up; 0 is until closed.
+    pub notification_seconds: f32,
+    pub notification_layout: notifications::Layout,
+    /// The most notifications kept at once.
+    pub notification_keep: u8,
     /// A solid border around the window this many pixels wide, 0 to
     /// [`WINDOW_BORDER_MAX`]; 0 is none.
     pub window_border: u8,
@@ -328,6 +341,12 @@ impl Nav {
             pinned_terminals: BTreeSet::new(),
             notification_corner: notifications::Corner::parse(&ui.notification_corner),
             notification_route: notifications::Route::parse(&ui.notification_route),
+            notification_flash: ui.notification_flash.unwrap_or(NOTIFICATION_FLASH_DEFAULT),
+            notification_seconds: (ui.notification_seconds)
+                .unwrap_or(notifications::SECONDS_DEFAULT)
+                .clamp(0., notifications::SECONDS_MAX),
+            notification_layout: notifications::Layout::parse(&ui.notification_layout),
+            notification_keep: ui.notification_keep.unwrap_or(notifications::KEEP_DEFAULT),
             window_border: ui.window_border.min(WINDOW_BORDER_MAX),
             window_border_color: parse_hex(&ui.window_border_color)
                 .map(|_| ui.window_border_color.clone())
@@ -390,6 +409,10 @@ impl Nav {
             lane_color_choices: self.lane_color_choices.clone(),
             notification_corner: self.notification_corner.as_str().to_string(),
             notification_route: self.notification_route.as_str().to_string(),
+            notification_flash: Some(self.notification_flash),
+            notification_seconds: Some(self.notification_seconds),
+            notification_layout: self.notification_layout.as_str().to_string(),
+            notification_keep: Some(self.notification_keep),
             window_border: self.window_border,
             window_border_color: self.window_border_color.clone(),
         };
@@ -679,6 +702,45 @@ impl Nav {
 
     pub fn set_colored_lanes(&mut self, enabled: bool, cx: &mut Context<Self>) {
         self.colored_lanes = enabled;
+        self.save();
+        cx.notify();
+    }
+
+    pub fn set_notification_flash(&mut self, seconds: u8, cx: &mut Context<Self>) {
+        self.notification_flash = seconds;
+        self.save();
+        cx.notify();
+    }
+
+    /// How long an agent's notification stays up. A slider calls this as it
+    /// moves; `persist` saves, as its release does.
+    pub fn set_notification_seconds(
+        &mut self,
+        seconds: f32,
+        persist: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.notification_seconds = seconds.clamp(0., notifications::SECONDS_MAX);
+        if persist {
+            self.save();
+        }
+        cx.notify();
+    }
+
+    pub fn set_notification_layout(
+        &mut self,
+        layout: notifications::Layout,
+        cx: &mut Context<Self>,
+    ) {
+        self.notification_layout = layout;
+        notifications::apply_layout(layout, self.notification_keep);
+        self.save();
+        cx.notify();
+    }
+
+    pub fn set_notification_keep(&mut self, keep: u8, cx: &mut Context<Self>) {
+        self.notification_keep = keep;
+        notifications::apply_layout(self.notification_layout, keep);
         self.save();
         cx.notify();
     }

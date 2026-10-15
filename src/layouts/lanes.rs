@@ -755,6 +755,18 @@ struct ColumnResize {
     start_width: Pixels,
 }
 
+/// An open card blinking its outline, as one opened from a notification
+/// does, so the eye finds it.
+struct CardFlash {
+    host: String,
+    agent: String,
+    /// In the lit half of a blink.
+    lit: bool,
+}
+
+/// How long each half of a card's blink lasts.
+const FLASH_STEP: Duration = Duration::from_millis(400);
+
 /// A drag of an open card's bottom edge.
 struct HeightResize {
     lane: String,
@@ -854,6 +866,10 @@ pub struct Lanes {
     resizing_height: Option<HeightResize>,
     /// Per lane, where its body and open card were last drawn.
     open_bounds: Rc<RefCell<HashMap<String, OpenBounds>>>,
+    /// The card blinking after a notification opened it, and which blink
+    /// it is, so a newer one stops an older one's timer.
+    flash: Option<CardFlash>,
+    flash_generation: u64,
     /// Since a resize, the board keeps its length while the view is past
     /// its end, so narrowing a lane does not move the board under the
     /// pointer.
@@ -1282,6 +1298,7 @@ impl Lanes {
             if let Some((host, agent)) = nav.read(cx).reveal_agent.clone() {
                 nav.update(cx, |nav, _| nav.reveal_agent = None);
                 this.reveal_agent(&host, &agent, window, cx);
+                this.flash_card(&host, &agent, cx);
             }
             // Width and other view settings don't change the lane model.
             if !this
@@ -1417,6 +1434,8 @@ impl Lanes {
             expanded_heights: HashMap::new(),
             resizing_height: None,
             open_bounds: Rc::default(),
+            flash: None,
+            flash_generation: 0,
             hold_board_length: false,
             reveal_column: None,
             renaming: None,
@@ -2720,6 +2739,53 @@ impl Lanes {
         } else {
             self.expand(&key, host, agent, window, cx);
         }
+    }
+
+    /// Blinks the open card's outline for as long as Settings says, after
+    /// a notification opened it.
+    fn flash_card(&mut self, host: &str, agent: &str, cx: &mut Context<Self>) {
+        let seconds = self.core.nav.read(cx).notification_flash;
+        if seconds == 0 {
+            return;
+        }
+        self.flash_generation += 1;
+        let generation = self.flash_generation;
+        self.flash = Some(CardFlash {
+            host: host.to_string(),
+            agent: agent.to_string(),
+            lit: true,
+        });
+        cx.notify();
+        let steps = (u128::from(seconds) * 1000 / FLASH_STEP.as_millis()) as usize;
+        cx.spawn(async move |this, cx| {
+            for step in 1..=steps {
+                cx.background_executor().timer(FLASH_STEP).await;
+                let going = this
+                    .update(cx, |this, cx| {
+                        if this.flash_generation != generation {
+                            return false;
+                        }
+                        if step == steps {
+                            this.flash = None;
+                        } else if let Some(flash) = &mut this.flash {
+                            flash.lit = !flash.lit;
+                        }
+                        cx.notify();
+                        true
+                    })
+                    .unwrap_or(false);
+                if !going {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// Whether the card for `host`/`agent` is in the lit half of a blink.
+    fn flash_lit(&self, host: &str, agent: &str) -> bool {
+        (self.flash.as_ref())
+            .is_some_and(|flash| flash.lit && flash.host == host && flash.agent == agent)
     }
 
     fn open_draft(&mut self, lane: &Lane, window: &mut Window, cx: &mut Context<Self>) {
@@ -4890,6 +4956,10 @@ impl Lanes {
         }
         let expanded = self.expanded.get(key);
         expanded.hash(&mut hash);
+        // Its open card blinking after a notification.
+        expanded
+            .is_some_and(|(host, agent)| self.flash_lit(host, agent))
+            .hash(&mut hash);
         for key in [key.to_string(), terminal_height_key(key)] {
             (self.expanded_heights.get(&key))
                 .map(|height| height.as_f32().to_bits())
@@ -5071,7 +5141,7 @@ impl Lanes {
                     let below = end < rows.len();
                     body = body
                         .child(self.measure_body(&key))
-                        .child(self.sized_open(&key, open, height, below, cx));
+                        .child(self.sized_open(&key, open, height, below, false, cx));
                     if below {
                         body = body.child(self.compact_strip(
                             lane,
@@ -5136,7 +5206,14 @@ impl Lanes {
             body = match height {
                 Some(height) => body
                     .child(self.measure_body(&lane.key))
-                    .child(self.sized_open(&lane.key, open, height, below, cx)),
+                    .child(self.sized_open(
+                        &lane.key,
+                        open,
+                        height,
+                        below,
+                        self.flash_lit(&host, &agent),
+                        cx,
+                    )),
                 None => body.child(open),
             };
             if below {
@@ -5890,13 +5967,15 @@ impl Lanes {
 
     /// The open card `height` tall, or filling the lane when none, with an
     /// edge along its bottom to drag. With cards `below` it, dragged as far
-    /// down as it goes it still leaves a row of them.
+    /// down as it goes it still leaves a row of them. `flashing` outlines it
+    /// brightly, in the lit half of a blink.
     fn sized_open(
         &self,
         lane: &str,
         open: AnyElement,
         height: Option<Pixels>,
         below: bool,
+        flashing: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let p = palette();
@@ -5965,6 +6044,18 @@ impl Lanes {
             })
             .child(open)
             .child(measure)
+            // Over the card's own outline, wider and in a color it never
+            // has, so the eye goes to it; with no hitbox, it takes no clicks.
+            .when(flashing, |open| {
+                open.child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .rounded(px(BOX_RADIUS))
+                        .border_3()
+                        .border_color(p.status_warning),
+                )
+            })
             .child(
                 div()
                     .id(eid("lane-open-resize", lane))

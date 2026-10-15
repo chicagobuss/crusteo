@@ -7,6 +7,24 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.0-alpha.5] - 2026-10-14
+
+### Added
+
+- Lanes: a card opened from a notification blinks a bright outline for a few seconds, so the eye
+  finds it. Settings → Notifications → Flash the card sets how long: off, 2, 4 or 8 seconds.
+- Settings → Notifications: how long an agent's notification stays up, 0 to 15 seconds or until
+  closed (hovering still pauses it); how several sit together, as a compact stack, a list that
+  never runs past the window, or only the newest; and how many to keep at once. "Dismiss all
+  notifications" is in the title bar's menu and the command center.
+
+### Fixed
+
+- In the message box, Home and End went to the ends of the whole paragraph rather than the line it
+  wraps onto, and Up and Down did nothing on the first or last line. Home and End now go to the
+  wrapped line's ends (the paragraph's on a second press), and Up and Down go to the start or end of
+  the text from the first or last line. A patched copy of `gpui-base` (`vendor/gpui-base`).
+
 ## [0.1.0-alpha.4] - 2026-10-14
 
 ### Added
@@ -129,7 +147,8 @@ First alpha, for a few early testers. Early software: expect rough edges.
 - Patched GPUI (`vendor/gpui-pre`) that skips redraws on window moves and lets cached views be
   reused after they move.
 
-[Unreleased]: https://github.com/chicagobuss/crusteo/compare/v0.1.0-alpha.4...HEAD
+[Unreleased]: https://github.com/chicagobuss/crusteo/compare/v0.1.0-alpha.5...HEAD
+[0.1.0-alpha.5]: https://github.com/chicagobuss/crusteo/releases/tag/v0.1.0-alpha.5
 [0.1.0-alpha.4]: https://github.com/chicagobuss/crusteo/releases/tag/v0.1.0-alpha.4
 [0.1.0-alpha.3]: https://github.com/chicagobuss/crusteo/releases/tag/v0.1.0-alpha.3
 [0.1.0-alpha.2]: https://github.com/chicagobuss/crusteo/releases/tag/v0.1.0-alpha.2

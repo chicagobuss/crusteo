@@ -135,6 +135,16 @@ pub struct UiState {
     pub notification_corner: String,
     /// `in-app`, `system` or `both`; empty is the default.
     pub notification_route: String,
+    /// Seconds a card opened from a notification blinks its outline; None
+    /// is the default, 0 none.
+    pub notification_flash: Option<u8>,
+    /// Seconds an agent's notification stays up, 0 until closed; None is
+    /// the default.
+    pub notification_seconds: Option<f32>,
+    /// `stack`, `list` or `newest`; empty is the default.
+    pub notification_layout: String,
+    /// The most notifications kept at once; None is the default.
+    pub notification_keep: Option<u8>,
     /// A solid border around the window this many pixels wide; 0 is none.
     pub window_border: u8,
     /// Its color as `#rrggbb`; empty is the default.

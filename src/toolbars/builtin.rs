@@ -56,7 +56,7 @@ impl ToolbarItem for Help {
         90
     }
     fn render(&self, _: &mut Window, _: &mut App) -> Option<AnyElement> {
-        use crate::shell::{CustomizeToolbars, OpenSettings, ShowHelp};
+        use crate::shell::{CustomizeToolbars, DismissNotifications, OpenSettings, ShowHelp};
         use gpui_kit::component::Sizable as _;
         use gpui_kit::component::button::{Button, ButtonVariants as _};
         use gpui_kit::component::menu::DropdownMenu as _;
@@ -70,6 +70,7 @@ impl ToolbarItem for Help {
                     menu.menu("Settings…", Box::new(OpenSettings))
                         .menu("Keyboard shortcuts", Box::new(ShowHelp))
                         .menu("Customize toolbars…", Box::new(CustomizeToolbars))
+                        .menu("Dismiss all notifications", Box::new(DismissNotifications))
                         .separator()
                         .menu("About Crusteo", Box::new(crate::app_menu::About))
                 })

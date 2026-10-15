@@ -54,6 +54,7 @@ gpui_kit::actions!(
         ZoomReset,
         ShowHelp,
         CustomizeToolbars,
+        DismissNotifications,
     ]
 );
 
@@ -216,6 +217,10 @@ fn app_icon(window: &Window) -> impl IntoElement {
 impl Shell {
     fn new(core: Core, window: &mut Window, cx: &mut Context<Self>) -> Self {
         window.set_zoom(core.nav.read(cx).zoom, cx);
+        {
+            let nav = core.nav.read(cx);
+            crate::app::notifications::apply_layout(nav.notification_layout, nav.notification_keep);
+        }
         cx.observe(&core.nav, |_, _, cx| cx.notify()).detach();
         cx.observe(&core.store, |_, _, cx| cx.notify()).detach();
         cx.observe(&core.usage, |_, _, cx| cx.notify()).detach();
@@ -545,6 +550,10 @@ impl Shell {
             ("Toggle sidebar", PaletteAction::ToggleSidebar),
             ("About Crusteo", PaletteAction::About),
             (
+                "Dismiss all notifications",
+                PaletteAction::DismissNotifications,
+            ),
+            (
                 "Toggle grouping (project / status)",
                 PaletteAction::ToggleGrouping,
             ),
@@ -613,6 +622,14 @@ impl Shell {
             crate::app_menu::about(&self.core, window, cx);
             return;
         }
+        if let Some(PaletteAction::DismissNotifications) = item.action {
+            self.core.nav.update(cx, |nav, cx| {
+                nav.command_open = false;
+                cx.notify();
+            });
+            window.clear_notifications(cx);
+            return;
+        }
         if let Some(action) = item.action {
             self.core.nav.update(cx, |nav, cx| {
                 nav.command_open = false;
@@ -629,7 +646,10 @@ impl Shell {
                             fleet::sidebar::Grouping::Status => fleet::sidebar::Grouping::Project,
                         }
                     }
-                    PaletteAction::Need(..) | PaletteAction::Command(_) | PaletteAction::About => {}
+                    PaletteAction::Need(..)
+                    | PaletteAction::Command(_)
+                    | PaletteAction::About
+                    | PaletteAction::DismissNotifications => {}
                 }
                 nav.save();
                 cx.notify();
@@ -1154,6 +1174,7 @@ impl Shell {
             body.lines().next().unwrap_or_default()
         );
         let (corner, route) = (nav.notification_corner, nav.notification_route);
+        let seconds = nav.notification_seconds;
         let mut note = gpui_kit::component::notification::Notification::new()
             .title(title.to_string())
             .message(message)
@@ -1188,7 +1209,11 @@ impl Shell {
                 });
             });
         }
+        // As long as Settings says, where crusteo's own short notices keep
+        // the usual few seconds.
+        gpui_kit::base::set_next_toast_timeout(crate::app::notifications::timeout(seconds));
         window.push_notification(note, cx);
+        gpui_kit::base::clear_next_toast_timeout();
     }
 
     /// Runs an extension's command. A panel it opens takes focus.
@@ -1319,6 +1344,8 @@ enum PaletteAction {
     Command(SharedString),
     /// The version and each host's daemon version, as macOS's About does.
     About,
+    /// Closes every notification on screen.
+    DismissNotifications,
 }
 
 #[derive(Clone)]
@@ -1447,6 +1474,7 @@ impl Render for Shell {
             .on_action(cx.listener(|this, _: &CustomizeToolbars, _, cx| {
                 this.set_customizing(true, cx);
             }))
+            .on_action(|_: &DismissNotifications, window, cx| window.clear_notifications(cx))
             .on_action(cx.listener(Self::toggle_sidebar))
             .on_action(
                 cx.listener(|this, _: &CommandCenter, window, cx| this.open_palette(window, cx)),

@@ -40,6 +40,11 @@ Licensed under the Apache License, Version 2.0
 
 Used as a library dependency (UI components, themes and bundled assets).
 
+vendor/gpui-base is a patched copy of the gpui-base crate 0.7.0, the core of
+gpui-component. The modifications are described in vendor/gpui-base/PATCHES.md
+and marked with "crusteo:" comments in the source. Its license is in
+vendor/gpui-base/LICENSE-APACHE.
+
 -------------------------------------------------------------------------------
 Lucide icons (bundled via gpui-kit-assets)
 https://lucide.dev

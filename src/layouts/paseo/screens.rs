@@ -2,12 +2,13 @@
 
 use fleet::providers::Provider;
 use fleet::{Connection, HostConfig};
-use gpui_kit::base::Selectable as _;
+use gpui_kit::base::{Disableable as _, Selectable as _};
 use gpui_kit::component::Sizable;
 use gpui_kit::component::button::{Button, ButtonGroup, ButtonVariants};
 use gpui_kit::component::color_picker::{ColorPicker, ColorPickerEvent, ColorPickerState};
 use gpui_kit::component::input::{Input, InputState, Textarea, TextareaState};
 use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
+use gpui_kit::component::slider::{Slider, SliderEvent, SliderState};
 use gpui_kit::component::switch::Switch;
 use gpui_kit::gpui::{
     App, AppContext, Context, Entity, InteractiveElement, IntoElement, ParentElement, Render,
@@ -687,6 +688,8 @@ pub struct SettingsScreen {
     core: Core,
     /// The window border's color, chosen with a picker.
     border_color: Entity<ColorPickerState>,
+    /// How long an agent's notification stays up, 0 until closed.
+    notification_seconds: Entity<SliderState>,
 }
 
 /// Bright colors offered first for the window border.
@@ -720,7 +723,34 @@ impl SettingsScreen {
             nav.update(cx, |nav, cx| nav.set_window_border_color(&hex, cx));
         })
         .detach();
-        Self { core, border_color }
+        let seconds = core.nav.read(cx).notification_seconds;
+        let notification_seconds = cx.new(|_| {
+            // Max first: `min` clamps against the current max.
+            SliderState::new()
+                .max(crate::app::notifications::SECONDS_MAX)
+                .min(0.)
+                .step(0.5)
+                .default_value(seconds)
+        });
+        let nav = core.nav.clone();
+        cx.subscribe(
+            &notification_seconds,
+            move |_, _, event: &SliderEvent, cx| {
+                let (value, persist) = match event {
+                    SliderEvent::Change(value) => (value.start(), false),
+                    SliderEvent::Release(value) => (value.start(), true),
+                };
+                nav.update(cx, |nav, cx| {
+                    nav.set_notification_seconds(value, persist, cx)
+                });
+            },
+        )
+        .detach();
+        Self {
+            core,
+            border_color,
+            notification_seconds,
+        }
     }
 }
 
@@ -810,6 +840,32 @@ impl Render for SettingsScreen {
         };
         let corner_nav = self.core.nav.clone();
         let route_nav = self.core.nav.clone();
+        let flash = self.core.nav.read(cx).notification_flash;
+        let flash_nav = self.core.nav.clone();
+        let (seconds, layout, keep) = {
+            let nav = self.core.nav.read(cx);
+            (
+                nav.notification_seconds,
+                nav.notification_layout,
+                nav.notification_keep,
+            )
+        };
+        let (layout_nav, keep_nav) = (self.core.nav.clone(), self.core.nav.clone());
+        let stay_open = div()
+            .flex()
+            .items_center()
+            .gap(px(12.))
+            .child(
+                div()
+                    .w(px(220.))
+                    .child(Slider::new(&self.notification_seconds)),
+            )
+            .child(
+                div()
+                    .w(px(90.))
+                    .text_color(p.foreground)
+                    .child(crate::app::notifications::seconds_label(seconds)),
+            );
         let notifications = card()
             .child(preference_choice(
                 "Show notifications",
@@ -839,6 +895,71 @@ impl Render for SettingsScreen {
                         if let Some(corner) = indices.first().and_then(|ix| Corner::ALL.get(*ix)) {
                             corner_nav
                                 .update(cx, |nav, cx| nav.set_notification_corner(*corner, cx));
+                        }
+                    }),
+            ))
+            .child(preference_row(
+                "Stay open",
+                "How long an agent's notification stays up, all the way down to until you close it. Hovering one pauses it.",
+                stay_open,
+            ))
+            .child(preference_choice(
+                "When several arrive",
+                "A compact stack that fans out on hover, a list of each in full that never runs past the window, or only the newest.",
+                ButtonGroup::new("notification-layout")
+                    .children(crate::app::notifications::Layout::ALL.into_iter().map(|option| {
+                        Button::new(SharedString::from(format!("notification-layout-{}", option.as_str())))
+                            .label(option.label())
+                            .selected(option == layout)
+                    }))
+                    .on_click(move |indices, _, cx| {
+                        if let Some(&layout) = indices
+                            .first()
+                            .and_then(|ix| crate::app::notifications::Layout::ALL.get(*ix))
+                        {
+                            layout_nav.update(cx, |nav, cx| nav.set_notification_layout(layout, cx));
+                        }
+                    }),
+            ))
+            .child(preference_choice(
+                "Keep at most",
+                "How many stay up at once; a new one past that closes the oldest.",
+                ButtonGroup::new("notification-keep")
+                    .children(crate::app::notifications::KEEP_CHOICES.into_iter().map(|count| {
+                        Button::new(SharedString::from(format!("notification-keep-{count}")))
+                            .label(count.to_string())
+                            .selected(count == keep)
+                            .disabled(layout == crate::app::notifications::Layout::Newest)
+                    }))
+                    .on_click(move |indices, _, cx| {
+                        if let Some(&count) =
+                            indices.first().and_then(|ix| crate::app::notifications::KEEP_CHOICES.get(*ix))
+                        {
+                            keep_nav.update(cx, |nav, cx| nav.set_notification_keep(count, cx));
+                        }
+                    }),
+            ))
+            .child(preference_choice(
+                "Flash the card",
+                "In Lanes, how long a card opened from a notification blinks its outline, so it's easy to find.",
+                ButtonGroup::new("notification-flash")
+                    .children(crate::app::nav::NOTIFICATION_FLASH_CHOICES.into_iter().map(
+                        |seconds| {
+                            Button::new(SharedString::from(format!("notification-flash-{seconds}")))
+                                .label(if seconds == 0 {
+                                    "Off".to_string()
+                                } else {
+                                    format!("{seconds} s")
+                                })
+                                .selected(seconds == flash)
+                        },
+                    ))
+                    .on_click(move |indices, _, cx| {
+                        if let Some(&seconds) = indices
+                            .first()
+                            .and_then(|ix| crate::app::nav::NOTIFICATION_FLASH_CHOICES.get(*ix))
+                        {
+                            flash_nav.update(cx, |nav, cx| nav.set_notification_flash(seconds, cx));
                         }
                     }),
             ));

@@ -23,7 +23,7 @@ sampler = { path = "crates/sampler" }
 
 [package]
 name = "crusteo"
-version = "0.1.0-alpha.4"
+version = "0.1.0-alpha.5"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -61,6 +61,7 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphic
 # GPUI with crusteo's performance fixes; see vendor/gpui-pre/PATCHES.md.
 [patch.crates-io]
 gpui-pre = { path = "vendor/gpui-pre" }
+gpui-base = { path = "vendor/gpui-base" }
 
 [lints.clippy]
 disallowed_methods = "deny"
