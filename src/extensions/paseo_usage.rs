@@ -136,7 +136,10 @@ pub fn parse_reports(updates: &[Value], now_unix: i64) -> Option<Reading> {
             })
         })
         .collect();
+    // Only reports that gave numbers say how fresh they are: an unavailable
+    // one can be as old as the provider's last answer.
     let oldest = (entries.iter())
+        .filter(|entry| entry["report"]["status"] == "available")
         .filter_map(|entry| entry["fetchedAt"].as_str())
         .min()
         .unwrap_or_default();
@@ -330,8 +333,8 @@ mod tests {
         assert_eq!(pools[1].windows[0].used_percent, 10.);
         assert_eq!(
             reading.snapshot.served_at_unix,
-            usage_source::parse_unix("2026-10-11T07:59:00Z").unwrap(),
-            "the oldest report's time"
+            usage_source::parse_unix("2026-10-11T08:00:00Z").unwrap(),
+            "the oldest available report's time; the unavailable one's older time doesn't count"
         );
     }
 

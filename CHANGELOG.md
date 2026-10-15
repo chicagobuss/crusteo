@@ -7,6 +7,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.0-alpha.6] - 2026-10-15
+
+### Fixed
+
+- One usage source falling behind, such as a host gone offline or a hub that stopped answering,
+  dimmed every usage gauge and hid their "use" hints. Each gauge now dims only when its own numbers
+  are over ten minutes old, an account being as fresh as the freshest source reporting it.
+
 ## [0.1.0-alpha.5] - 2026-10-14
 
 ### Added
@@ -147,7 +155,8 @@ First alpha, for a few early testers. Early software: expect rough edges.
 - Patched GPUI (`vendor/gpui-pre`) that skips redraws on window moves and lets cached views be
   reused after they move.
 
-[Unreleased]: https://github.com/chicagobuss/crusteo/compare/v0.1.0-alpha.5...HEAD
+[Unreleased]: https://github.com/chicagobuss/crusteo/compare/v0.1.0-alpha.6...HEAD
+[0.1.0-alpha.6]: https://github.com/chicagobuss/crusteo/releases/tag/v0.1.0-alpha.6
 [0.1.0-alpha.5]: https://github.com/chicagobuss/crusteo/releases/tag/v0.1.0-alpha.5
 [0.1.0-alpha.4]: https://github.com/chicagobuss/crusteo/releases/tag/v0.1.0-alpha.4
 [0.1.0-alpha.3]: https://github.com/chicagobuss/crusteo/releases/tag/v0.1.0-alpha.3

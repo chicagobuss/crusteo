@@ -15,15 +15,18 @@ use crate::theme::{palette, size as sz, with_alpha};
 use crate::ui;
 
 pub fn gauges(core: &Core, cx: &App) -> AnyElement {
-    let (snapshot, eligibility) = {
+    let (snapshot, eligibility, served) = {
         let hub = core.usage.read(cx);
-        (hub.snapshot.clone(), hub.eligibility.clone())
+        (
+            hub.snapshot.clone(),
+            hub.eligibility.clone(),
+            hub.pool_served.clone(),
+        )
     };
     let Some(snapshot) = snapshot else {
         return div().into_any_element();
     };
     let now = usage_source::unix_now();
-    let stale = usage_source::is_stale(snapshot.served_at_unix, now);
     let pools = snapshot.pools;
     div()
         .flex()
@@ -33,7 +36,15 @@ pub fn gauges(core: &Core, cx: &App) -> AnyElement {
             pools
                 .iter()
                 .filter(|pool| !pool.windows.is_empty())
-                .map(|pool| gauge(core, pool, &pools, &eligibility, now, stale)),
+                .map(|pool| {
+                    // Each gauge dims on its own numbers going stale.
+                    let served = served
+                        .get(&pool.id)
+                        .copied()
+                        .unwrap_or(snapshot.served_at_unix);
+                    let stale = usage_source::is_stale(served, now);
+                    gauge(core, pool, &pools, &eligibility, now, stale)
+                }),
         )
         .into_any_element()
 }
