@@ -1,0 +1,18 @@
+// An interrupt during a tool: the queue is cleared, the run aborted, and
+// the abort's answer cancels the turn.
+{"dir":"in","frame":{"type":"get_state"}}
+{"dir":"out","frame":{"id":"$REQ","type":"response","command":"get_state","success":true,"data":{"model":{"provider":"google","id":"gemini-2.5-flash-lite","name":"Gemini 2.5 Flash-Lite","reasoning":true,"input":["text","image"],"contextWindow":1048576},"thinkingLevel":"off","isStreaming":false,"isCompacting":false,"sessionFile":"/home/user/.pi/agent/sessions/--home-user-proj--/2026-10-19T00-00-00-000Z_sess-1.jsonl","sessionId":"sess-1","messageCount":0,"pendingMessageCount":0}}}
+{"cmd":{"prompt":{"turn":"foreground-turn-1","text":"Wait a while"}}}
+{"dir":"in","frame":{"type":"prompt","message":"Wait a while"}}
+{"dir":"out","frame":{"id":"$REQ","type":"response","command":"prompt","success":true,"data":{"disposition":"started"}}}
+{"dir":"out","frame":{"type":"agent_start"}}
+{"dir":"out","frame":{"type":"turn_start"}}
+{"dir":"out","frame":{"type":"tool_execution_start","toolCallId":"bash_1","toolName":"bash","args":{"command":"sleep 30"}}}
+{"cmd":{"interrupt":null}}
+{"dir":"in","frame":{"type":"clear_queue"}}
+{"dir":"out","frame":{"id":"$REQ","type":"response","command":"clear_queue","success":true,"data":{"steering":[],"followUp":[]}}}
+{"dir":"in","frame":{"type":"abort"}}
+{"dir":"out","frame":{"type":"message_end","message":{"role":"assistant","content":[],"stopReason":"aborted","errorMessage":"Request was aborted"}}}
+{"dir":"out","frame":{"type":"agent_end","messages":[{"role":"assistant","content":[],"stopReason":"aborted","errorMessage":"Request was aborted"}],"willRetry":false}}
+{"dir":"out","frame":{"type":"agent_settled"}}
+{"dir":"out","frame":{"id":"$REQ","type":"response","command":"abort","success":true}}

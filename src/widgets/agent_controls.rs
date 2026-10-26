@@ -1,8 +1,7 @@
 //! Answer a permission or stop a turn without opening the conversation.
 //! Fleet cards and Lanes cards both use this.
 
-use fleet::timeline::ToolCall;
-use fleet::{Agent, Bucket};
+use fleet::{Agent, Bucket, HostId};
 use gpui_kit::component::Sizable;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::gpui::{AnyElement, IntoElement, ParentElement, SharedString, Styled, div, px};
@@ -26,7 +25,7 @@ fn answer_in_conversation() -> AnyElement {
 }
 
 /// `scope` keeps element ids unique when the same agent is drawn in two columns.
-pub fn controls(core: &Core, host: &str, agent: &Agent, scope: &str) -> Option<AnyElement> {
+pub fn controls(core: &Core, host: &HostId, agent: &Agent, scope: &str) -> Option<AnyElement> {
     let p = palette();
     if let Some(request) = agent.pending_permissions.first()
         && fleet::questions::is_question(request)
@@ -69,19 +68,7 @@ pub fn controls(core: &Core, host: &str, agent: &Agent, scope: &str) -> Option<A
             .or(request["name"].as_str())
             .unwrap_or("Permission")
             .to_string();
-        let detail = ToolCall {
-            identity: permission_id.clone(),
-            call_id: permission_id.clone(),
-            name: request["name"].as_str().unwrap_or_default().to_string(),
-            status: "completed".into(),
-            error: None,
-            detail: if request["detail"].is_object() {
-                request["detail"].clone()
-            } else {
-                json!({"type": "unknown", "input": request["input"].clone(), "output": null})
-            },
-            metadata: Default::default(),
-        };
+        let detail = fleet::display::permission_call(request);
         let summary = fleet::display::tool_display(&detail, &agent.cwd).summary;
         let mut actions: Vec<(String, String, bool)> = request["actions"]
             .as_array()
@@ -107,7 +94,7 @@ pub fn controls(core: &Core, host: &str, agent: &Agent, scope: &str) -> Option<A
         let mut row = div().flex().gap(px(6.)).justify_end();
         for (action_id, label, allow) in actions {
             let core = core.clone();
-            let host = host.to_string();
+            let host = host.clone();
             let agent_id = agent.id.clone();
             let permission = permission_id.clone();
             let mut button = Button::new(SharedString::from(format!(
@@ -166,7 +153,7 @@ pub fn controls(core: &Core, host: &str, agent: &Agent, scope: &str) -> Option<A
     }
     if agent.bucket() == Bucket::Running {
         let core = core.clone();
-        let host = host.to_string();
+        let host = host.clone();
         let agent_id = agent.id.clone();
         return Some(
             div()
@@ -193,7 +180,7 @@ pub fn controls(core: &Core, host: &str, agent: &Agent, scope: &str) -> Option<A
 /// element ids unique when Fleet cards and the Needs-you strip both draw it.
 pub fn permission_buttons(
     core: &Core,
-    host: &str,
+    host: &HostId,
     agent: &Agent,
     id_prefix: &str,
 ) -> Option<gpui_kit::gpui::AnyElement> {
@@ -230,7 +217,7 @@ pub fn permission_buttons(
     let mut row = div().flex().gap(px(6.)).justify_end();
     for (action_id, label, allow) in actions {
         let core = core.clone();
-        let host = host.to_string();
+        let host = host.clone();
         let agent_id = agent.id.clone();
         let permission = permission_id.clone();
         let mut button = Button::new(SharedString::from(format!(

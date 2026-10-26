@@ -10,7 +10,9 @@ pub mod fuel;
 pub mod help;
 pub mod layouts;
 pub mod needs_you;
+pub mod popout;
 pub mod shell;
+pub mod state_list;
 pub mod theme;
 pub mod toolbars;
 pub mod ui;
@@ -23,6 +25,20 @@ pub mod workspace_archive;
 #[cfg(target_os = "windows")]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+/// `crusteo --version`. A Windows release build has no console of its own,
+/// so it writes to the one it was started from.
+fn print_version() {
+    #[cfg(windows)]
+    // Safe: no arguments to check; it fails harmlessly when there is no
+    // parent console or the output is already redirected.
+    unsafe {
+        windows_sys::Win32::System::Console::AttachConsole(
+            windows_sys::Win32::System::Console::ATTACH_PARENT_PROCESS,
+        );
+    }
+    println!("crusteo {}", app_menu::version());
+}
+
 /// Runs the app until it quits.
 pub fn run() {
     run_with(Vec::new());
@@ -30,6 +46,15 @@ pub fn run() {
 
 /// [`run`], with `extensions` beside the [`extensions::builtin`] ones.
 pub fn run_with(extensions: Vec<Box<dyn extensions::Extension>>) {
+    if std::env::args()
+        .skip(1)
+        .any(|arg| arg == "--version" || arg == "-V")
+    {
+        print_version();
+        return;
+    }
+    eprintln!("crusteo {} starting", app_menu::version());
+
     // CRUSTEO_PROFILE=<file> samples this, the UI thread, into folded stacks.
     sampler::from_env();
 
@@ -76,10 +101,14 @@ pub fn run_with(extensions: Vec<Box<dyn extensions::Extension>>) {
             gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, cx);
             theme::apply(cx);
             shell::bind_keys(cx);
+            popout::bind_keys(cx);
             app_menu::install(cx);
             layouts::paseo::bind_keys(cx);
             layouts::paseo::bind_terminal_keys(cx);
             widgets::label_picker::bind_keys(cx);
+            widgets::add_project::bind_keys(cx);
+            widgets::workspace_form::bind_keys(cx);
+            widgets::new_agent::bind_keys(cx);
             shell::open(cx);
         });
 }

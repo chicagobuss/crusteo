@@ -1,5 +1,5 @@
 //! The affected live agents and worktree risks for a workspace archive.
-use crate::{Bucket, Fleet, Host, Workspace};
+use crate::{Bucket, Fleet, Host, HostId, Workspace};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArchiveAgent {
@@ -23,7 +23,9 @@ pub struct WorktreeRisks {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArchivePlan {
-    pub host: String,
+    pub host: HostId,
+    /// The host's name, for the confirmation.
+    pub host_name: String,
     pub workspace: String,
     pub name: String,
     pub source_agent: Option<String>,
@@ -36,30 +38,30 @@ pub struct ArchivePlan {
 /// from a newer request for the same workspace.
 #[derive(Default)]
 pub struct PendingArchives {
-    attempts: std::collections::BTreeMap<(String, String), u64>,
+    attempts: std::collections::BTreeMap<(HostId, String), u64>,
     next: u64,
 }
 
 impl PendingArchives {
-    pub fn contains(&self, host: &str, workspace: &str) -> bool {
+    pub fn contains(&self, host: &HostId, workspace: &str) -> bool {
         self.attempts
             .keys()
             .any(|(h, w)| h == host && w == workspace)
     }
 
-    pub fn begin(&mut self, host: &str, workspace: &str) -> Option<u64> {
+    pub fn begin(&mut self, host: &HostId, workspace: &str) -> Option<u64> {
         if self.contains(host, workspace) {
             return None;
         }
         self.next += 1;
         self.attempts
-            .insert((host.into(), workspace.into()), self.next);
+            .insert((host.clone(), workspace.into()), self.next);
         Some(self.next)
     }
 
     /// Used by both failure and deadline; only the owning attempt can release.
-    pub fn release(&mut self, host: &str, workspace: &str, attempt: u64) -> bool {
-        let key = (host.into(), workspace.into());
+    pub fn release(&mut self, host: &HostId, workspace: &str, attempt: u64) -> bool {
+        let key = (host.clone(), workspace.to_string());
         if self.attempts.get(&key) != Some(&attempt) {
             return false;
         }
@@ -75,7 +77,7 @@ impl PendingArchives {
 
 /// Whether a configured host's authoritative directory has observed the archive.
 /// Removing the host also releases client-local bookkeeping.
-pub fn archive_settled(fleet: &Fleet, host: &str, workspace: &str) -> bool {
+pub fn archive_settled(fleet: &Fleet, host: &HostId, workspace: &str) -> bool {
     fleet.host(host).is_none_or(|host| {
         host.connection.is_online()
             && host.directory.hydrated
@@ -90,7 +92,7 @@ pub fn archive_settled(fleet: &Fleet, host: &str, workspace: &str) -> bool {
 /// Validate without scanning members; safe to use while rendering an action.
 pub fn archive_target<'a>(
     fleet: &'a Fleet,
-    host: &str,
+    host: &HostId,
     workspace: &str,
     source_agent: Option<&str>,
 ) -> Result<(&'a Host, &'a Workspace), &'static str> {
@@ -124,7 +126,7 @@ pub fn archive_target<'a>(
 impl ArchivePlan {
     pub fn build(
         fleet: &Fleet,
-        host: &str,
+        host: &HostId,
         workspace: &str,
         source_agent: Option<&str>,
     ) -> Result<Self, &'static str> {
@@ -164,7 +166,8 @@ impl ArchivePlan {
             .filter(|title| !title.trim().is_empty())
             .unwrap_or(&workspace.name);
         Ok(Self {
-            host: host.into(),
+            host: host.clone(),
+            host_name: target_host.name().to_string(),
             workspace: workspace.id.clone(),
             name: if name.trim().is_empty() {
                 workspace.id.clone()
@@ -212,6 +215,10 @@ mod tests {
     use serde_json::json;
     use std::collections::{BTreeMap, HashMap};
 
+    fn h(id: &str) -> HostId {
+        HostId::new(id)
+    }
+
     fn agent(id: &str, workspace: &str, running: bool) -> Agent {
         Agent::from_value(json!({
             "id": id, "workspaceId": workspace, "title": id,
@@ -247,6 +254,7 @@ mod tests {
         };
         let host = Host {
             config: HostConfig {
+                id: h("mac"),
                 name: "mac".into(),
                 ..Default::default()
             },
@@ -255,12 +263,14 @@ mod tests {
             ..Default::default()
         };
         let mut foreign_host = host.clone();
+        foreign_host.config.id = h("windows");
         foreign_host.config.name = "windows".into();
         foreign_host.directory.agents.insert(
             "unique-foreign-host".into(),
             agent("unique-foreign-host", "w", true),
         );
         Fleet {
+            labels: None,
             hosts: vec![host, foreign_host],
         }
     }
@@ -268,7 +278,7 @@ mod tests {
     #[test]
     fn includes_every_live_member_on_only_the_target_host_and_preserves_worktree_risks() {
         let fleet = fixture();
-        let plan = ArchivePlan::build(&fleet, "mac", "w", Some("current")).unwrap();
+        let plan = ArchivePlan::build(&fleet, &h("mac"), "w", Some("current")).unwrap();
         assert_eq!(
             plan.agents
                 .iter()
@@ -292,7 +302,7 @@ mod tests {
                 unpushed: 2
             }
         );
-        assert_eq!(plan.host, "mac");
+        assert_eq!(plan.host, h("mac"));
         assert_eq!(plan.workspace, "w");
         assert_eq!(plan.source_agent.as_deref(), Some("current"));
         let mut plain = fleet;
@@ -302,7 +312,7 @@ mod tests {
             .get_mut("w")
             .unwrap()
             .workspace_kind = "directory".into();
-        let plan = ArchivePlan::build(&plain, "mac", "w", None).unwrap();
+        let plan = ArchivePlan::build(&plain, &h("mac"), "w", None).unwrap();
         assert!(!plan.deletes_worktree);
         assert_eq!(plan.worktree_risks, WorktreeRisks::default());
         assert!(plan.source_agent.is_none());
@@ -311,7 +321,7 @@ mod tests {
     #[test]
     fn confirmation_changes_for_new_members_and_git_risks_not_timestamp_noise() {
         let mut fleet = fixture();
-        let original = ArchivePlan::build(&fleet, "mac", "w", Some("current")).unwrap();
+        let original = ArchivePlan::build(&fleet, &h("mac"), "w", Some("current")).unwrap();
         fleet.hosts[0]
             .directory
             .agents
@@ -319,17 +329,16 @@ mod tests {
             .unwrap()
             .updated_at = Some("2026-10-04T12:00:00Z".into());
         assert_eq!(
-            ArchivePlan::build(&fleet, "mac", "w", Some("current")).unwrap(),
+            ArchivePlan::build(&fleet, &h("mac"), "w", Some("current")).unwrap(),
             original
         );
         fleet.hosts[0]
             .directory
             .agents
             .insert("new".into(), agent("new", "w", false));
-        assert!(
-            original
-                .needs_reconfirm(&ArchivePlan::build(&fleet, "mac", "w", Some("current")).unwrap())
-        );
+        assert!(original.needs_reconfirm(
+            &ArchivePlan::build(&fleet, &h("mac"), "w", Some("current")).unwrap()
+        ));
         fleet.hosts[0].directory.agents.remove("new");
         fleet.hosts[0]
             .directory
@@ -340,15 +349,14 @@ mod tests {
             .as_mut()
             .unwrap()
             .ahead_of_origin = Some(3);
-        assert!(
-            original
-                .needs_reconfirm(&ArchivePlan::build(&fleet, "mac", "w", Some("current")).unwrap())
-        );
+        assert!(original.needs_reconfirm(
+            &ArchivePlan::build(&fleet, &h("mac"), "w", Some("current")).unwrap()
+        ));
     }
 
     #[test]
     fn safer_changes_do_not_repeat_confirmation_but_new_active_risks_do() {
-        let original = ArchivePlan::build(&fixture(), "mac", "w", Some("current")).unwrap();
+        let original = ArchivePlan::build(&fixture(), &h("mac"), "w", Some("current")).unwrap();
         let mut safer = original.clone();
         safer.agents.retain(|agent| agent.id != "child");
         for agent in &mut safer.agents {
@@ -370,64 +378,64 @@ mod tests {
     #[test]
     fn pending_requests_deduplicate_and_old_failure_or_deadline_cannot_release_new_attempt() {
         let mut pending = PendingArchives::default();
-        let first = pending.begin("mac", "w").unwrap();
-        assert!(pending.begin("mac", "w").is_none());
-        assert!(pending.begin("windows", "w").is_some());
+        let first = pending.begin(&h("mac"), "w").unwrap();
+        assert!(pending.begin(&h("mac"), "w").is_none());
+        assert!(pending.begin(&h("windows"), "w").is_some());
         pending.retain_unsettled(&fixture());
-        assert!(pending.contains("mac", "w"));
-        assert!(pending.release("mac", "w", first));
-        assert!(!pending.release("mac", "w", first));
-        let second = pending.begin("mac", "w").unwrap();
+        assert!(pending.contains(&h("mac"), "w"));
+        assert!(pending.release(&h("mac"), "w", first));
+        assert!(!pending.release(&h("mac"), "w", first));
+        let second = pending.begin(&h("mac"), "w").unwrap();
         assert_ne!(first, second);
-        assert!(!pending.release("mac", "w", first));
-        assert!(pending.contains("mac", "w"));
+        assert!(!pending.release(&h("mac"), "w", first));
+        assert!(pending.contains(&h("mac"), "w"));
         let mut fleet = fixture();
         fleet.hosts[0].directory.workspaces.remove("w");
         pending.retain_unsettled(&fleet);
-        assert!(!pending.contains("mac", "w"));
-        assert!(pending.contains("windows", "w"));
+        assert!(!pending.contains(&h("mac"), "w"));
+        assert!(pending.contains(&h("windows"), "w"));
         fleet.hosts.clear();
         pending.retain_unsettled(&fleet);
-        assert!(!pending.contains("windows", "w"));
+        assert!(!pending.contains(&h("windows"), "w"));
     }
 
     #[test]
     fn guard_settles_only_on_authoritative_archive_or_removed_host() {
         let mut fleet = fixture();
-        assert!(!archive_settled(&fleet, "mac", "w"));
-        assert!(archive_settled(&fleet, "removed", "w"));
+        assert!(!archive_settled(&fleet, &h("mac"), "w"));
+        assert!(archive_settled(&fleet, &h("removed"), "w"));
         fleet.hosts[0]
             .directory
             .workspaces
             .get_mut("w")
             .unwrap()
             .archiving_at = Some("now".into());
-        assert!(archive_settled(&fleet, "mac", "w"));
+        assert!(archive_settled(&fleet, &h("mac"), "w"));
         fleet.hosts[0].directory.workspaces.remove("w");
-        assert!(archive_settled(&fleet, "mac", "w"));
+        assert!(archive_settled(&fleet, &h("mac"), "w"));
         fleet.hosts[0].directory.hydrated = false;
-        assert!(!archive_settled(&fleet, "mac", "w"));
+        assert!(!archive_settled(&fleet, &h("mac"), "w"));
         fleet.hosts[0].directory.hydrated = true;
         fleet.hosts[0].connection = Connection::Offline("offline".into());
-        assert!(!archive_settled(&fleet, "mac", "w"));
+        assert!(!archive_settled(&fleet, &h("mac"), "w"));
     }
 
     #[test]
     fn refuses_stale_source_incomplete_directory_disconnected_and_archiving_targets() {
         let fleet = fixture();
-        assert!(archive_target(&fleet, "mac", "w", Some("foreign")).is_err());
-        assert!(archive_target(&fleet, "mac", "w", Some("archived")).is_err());
-        assert!(archive_target(&fleet, "missing", "w", None).is_err());
-        assert!(archive_target(&fleet, "mac", "missing", None).is_err());
+        assert!(archive_target(&fleet, &h("mac"), "w", Some("foreign")).is_err());
+        assert!(archive_target(&fleet, &h("mac"), "w", Some("archived")).is_err());
+        assert!(archive_target(&fleet, &h("missing"), "w", None).is_err());
+        assert!(archive_target(&fleet, &h("mac"), "missing", None).is_err());
         let mut changed = fleet.clone();
         changed.hosts[0].directory.agents_hydrated = false;
-        assert!(archive_target(&changed, "mac", "w", None).is_err());
+        assert!(archive_target(&changed, &h("mac"), "w", None).is_err());
         changed.hosts[0].directory.agents_hydrated = true;
         changed.hosts[0].directory.hydrated = false;
-        assert!(archive_target(&changed, "mac", "w", None).is_err());
+        assert!(archive_target(&changed, &h("mac"), "w", None).is_err());
         changed.hosts[0].directory.hydrated = true;
         changed.hosts[0].connection = Connection::Offline("disconnected".into());
-        assert!(archive_target(&changed, "mac", "w", None).is_err());
+        assert!(archive_target(&changed, &h("mac"), "w", None).is_err());
         changed.hosts[0].connection = Connection::Online;
         changed.hosts[0]
             .directory
@@ -435,6 +443,6 @@ mod tests {
             .get_mut("w")
             .unwrap()
             .archiving_at = Some("now".into());
-        assert!(archive_target(&changed, "mac", "w", None).is_err());
+        assert!(archive_target(&changed, &h("mac"), "w", None).is_err());
     }
 }

@@ -26,7 +26,7 @@ pub struct NeedsYou {
     collapsed: bool,
     /// Agents with a pending permission, sorted, and a hash of what their
     /// chips show. Most store changes leave both alone and skip the render.
-    pending: Vec<(String, String)>,
+    pending: Vec<(fleet::HostId, String)>,
     pending_key: u64,
 }
 
@@ -62,13 +62,13 @@ impl NeedsYou {
     fn refresh_pending(&mut self, cx: &App) -> bool {
         use std::hash::{Hash, Hasher};
         let store = self.core.store.read(cx);
-        let mut pending: Vec<(String, String)> = store
+        let mut pending: Vec<(fleet::HostId, String)> = store
             .fleet
             .agents()
             .filter(|(host, agent)| {
                 host.connection.is_online() && !agent.pending_permissions.is_empty()
             })
-            .map(|(host, agent)| (host.name().to_string(), agent.id.clone()))
+            .map(|(host, agent)| (host.id().clone(), agent.id.clone()))
             .collect();
         pending.sort();
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -135,13 +135,14 @@ impl Render for NeedsYou {
                     .child("Nothing waiting"),
             );
         }
-        for (host_name, agent_id) in pending.iter().take(MAX_CHIPS) {
-            let Some(agent) = store.fleet.agent(host_name, agent_id) else {
+        for (host, agent_id) in pending.iter().take(MAX_CHIPS) {
+            let Some(agent) = store.fleet.agent(host, agent_id) else {
                 continue;
             };
-            let Some(buttons) = permission_buttons(&self.core, host_name, agent, "ny") else {
+            let Some(buttons) = permission_buttons(&self.core, host, agent, "ny") else {
                 continue;
             };
+            let host_name = store.fleet.host_name(host);
             let label = format!("{host_name} · {}", agent.display_title());
             let title = permission_title(agent);
             items = items.child(

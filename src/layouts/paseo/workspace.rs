@@ -3,7 +3,7 @@
 use crate::ui::CachedExt as _;
 use std::collections::HashMap;
 
-use fleet::{Bucket, requests};
+use fleet::{Bucket, HostId, requests};
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::menu::{ContextMenuExt, DropdownMenu, PopupMenu, PopupMenuItem};
 use gpui_kit::component::{Icon, Sizable};
@@ -15,7 +15,6 @@ use gpui_kit::gpui::{
 use gpui_kit::prelude::FluentBuilder;
 
 use super::conversation::{Conversation, ConversationEvent};
-use super::draft::Draft;
 use super::terminal::TerminalView;
 use crate::app::{Closed, Core, FleetEvent, Tab};
 use crate::theme::{palette, size};
@@ -25,9 +24,9 @@ use gpui_kit::component::tooltip::Tooltip;
 
 pub struct WorkspaceView {
     core: Core,
-    conversations: HashMap<(String, String), Entity<Conversation>>,
-    drafts: HashMap<(String, String), Entity<Draft>>,
-    terminals: HashMap<(String, String), Entity<TerminalView>>,
+    conversations: HashMap<(HostId, String), Entity<Conversation>>,
+    /// By workspace key and draft id.
+    terminals: HashMap<(HostId, String), Entity<TerminalView>>,
     /// The active agent tab's title being edited in place.
     renaming: Option<(Entity<AgentRename>, Subscription)>,
 }
@@ -47,7 +46,6 @@ impl WorkspaceView {
         Self {
             core,
             conversations: HashMap::new(),
-            drafts: HashMap::new(),
             terminals: HashMap::new(),
             renaming: None,
         }
@@ -56,7 +54,7 @@ impl WorkspaceView {
     /// Edits an agent tab's title in place.
     fn start_rename(
         &mut self,
-        host: &str,
+        host: &HostId,
         agent: &str,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -73,12 +71,12 @@ impl WorkspaceView {
 
     fn conversation(
         &mut self,
-        host: &str,
+        host: &HostId,
         agent: &str,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Entity<Conversation> {
-        let key = (host.to_string(), agent.to_string());
+        let key = (host.clone(), agent.to_string());
         if let Some(view) = self.conversations.get(&key) {
             return view.clone();
         }
@@ -118,24 +116,6 @@ impl WorkspaceView {
         view
     }
 
-    fn draft(
-        &mut self,
-        host: &str,
-        workspace: &str,
-        draft: &str,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Entity<Draft> {
-        let key = (format!("{host}:{workspace}"), draft.to_string());
-        if let Some(view) = self.drafts.get(&key) {
-            return view.clone();
-        }
-        let core = self.core.clone();
-        let view = cx.new(|cx| Draft::new(core, host, workspace, draft, window, cx));
-        self.drafts.insert(key, view.clone());
-        view
-    }
-
     pub fn focus_active(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(selection) = self.core.nav.read(cx).selection.clone() else {
             return;
@@ -156,12 +136,12 @@ impl WorkspaceView {
 
     fn terminal(
         &mut self,
-        host: &str,
+        host: &HostId,
         id: &str,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Entity<TerminalView> {
-        let key = (host.to_string(), id.to_string());
+        let key = (host.clone(), id.to_string());
         if let Some(view) = self.terminals.get(&key) {
             return view.clone();
         }
@@ -230,7 +210,6 @@ impl Render for WorkspaceView {
                     Some(agent) => (agent.display_title(), agent.bucket()),
                     None => ("Agent".to_string(), Bucket::Done),
                 },
-                Tab::Draft(_) => ("New Agent".to_string(), Bucket::Done),
                 Tab::Terminal(id) => (store.terminal_label(&selection.host, id, cx), Bucket::Done),
             })
             .collect();
@@ -283,7 +262,7 @@ impl Render for WorkspaceView {
                     .text_size(size::sm())
                     .text_color(p.extra_muted)
                     .child(ui::icon("server", 12., p.extra_muted))
-                    .child(selection.host.clone()),
+                    .child(store.fleet.host_name(&selection.host).to_string()),
             )
             .when(!host_online, |d| {
                 d.child(
@@ -361,7 +340,6 @@ impl Render for WorkspaceView {
             let key_click = key.clone();
             let key_close = key.clone();
             let leading: AnyElement = match tab {
-                Tab::Draft(_) => ui::icon("square-pen", 14., p.muted).into_any_element(),
                 Tab::Terminal(_) => ui::icon("square-terminal", 14., p.muted).into_any_element(),
                 Tab::Agent(_) => ui::agent_dot(bucket).into_any_element(),
             };
@@ -458,7 +436,6 @@ impl Render for WorkspaceView {
                     }),
             );
         }
-        let key_new = key.clone();
         let core_new = self.core.clone();
         tab_row = tab_row.child(
             Button::new("new-tab")
@@ -467,13 +444,11 @@ impl Render for WorkspaceView {
                 .xsmall()
                 .tooltip("New")
                 .dropdown_menu(move |menu, _, _| {
-                    let key_new = key_new.clone();
                     let core_new = core_new.clone();
                     menu.item({
-                        let nav = core_new.nav.clone();
-                        PopupMenuItem::new("New agent").on_click(move |_, _, cx| {
-                            let key = key_new.clone();
-                            nav.update(cx, |nav, cx| nav.new_draft(&key, cx));
+                        let core_new = core_new.clone();
+                        PopupMenuItem::new("New agent").on_click(move |_, window, cx| {
+                            open_new_agent(&core_new, None, window, cx);
                         })
                     })
                     .item({
@@ -492,11 +467,8 @@ impl Render for WorkspaceView {
             Some(Tab::Terminal(id)) => self
                 .terminal(&selection.host, &id, window, cx)
                 .cached_fill(),
-            Some(Tab::Draft(draft)) => self
-                .draft(&selection.host, &selection.workspace, &draft, window, cx)
-                .cached_fill(),
             None => {
-                let key = key.clone();
+                let core = self.core.clone();
                 div()
                     .size_full()
                     .flex()
@@ -511,12 +483,9 @@ impl Render for WorkspaceView {
                             .label("New agent")
                             .primary()
                             .small()
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                let key = key.clone();
-                                this.core.nav.update(cx, |nav, cx| {
-                                    nav.new_draft(&key, cx);
-                                });
-                            })),
+                            .on_click(move |_, window, cx| {
+                                open_new_agent(&core, None, window, cx);
+                            }),
                     )
                     .into_any_element()
             }
@@ -564,9 +533,8 @@ pub fn close_tab(
     window: &mut Window,
     cx: &mut gpui_kit::gpui::App,
 ) {
-    let host = key
-        .rsplit_once(':')
-        .map(|(h, _)| h.to_string())
+    let host = crate::app::nav::parse_workspace_key(key)
+        .map(|(host, _)| host)
         .unwrap_or_default();
     if let Tab::Agent(agent) = tab {
         crate::workspace_archive::close_agent_tab(
@@ -602,6 +570,30 @@ pub fn close_tab(
     } else {
         close(cx);
     }
+}
+
+/// Opens New agent in the selected workspace, else wherever it starts,
+/// with `provider` as its tool when given; the agent made opens in its tab.
+pub fn open_new_agent(
+    core: &Core,
+    provider: Option<String>,
+    window: &mut gpui_kit::gpui::Window,
+    cx: &mut gpui_kit::gpui::App,
+) {
+    use crate::widgets::new_agent::{self, Place};
+    let selection = core.nav.read(cx).selection.clone();
+    let start = new_agent::Start {
+        place: selection.map(|s| Place::Workspace(s.host, s.workspace)),
+        provider,
+        ..Default::default()
+    };
+    let nav = core.nav.clone();
+    new_agent::open(core, start, window, cx, move |made, _, cx| {
+        nav.update(cx, |nav, cx| match &made.agent {
+            Some(agent) => nav.open_agent(&made.host, &made.workspace, agent, cx),
+            None => nav.select(&made.host, &made.workspace, cx),
+        });
+    });
 }
 
 /// Creates a terminal in the selected workspace and focuses its tab.
@@ -645,7 +637,7 @@ pub fn open_new_terminal(core: &Core, cx: &mut gpui_kit::gpui::App) {
 fn tab_menu(
     menu: PopupMenu,
     core: &Core,
-    host: &str,
+    host: &HostId,
     key: &str,
     tab: &Tab,
     cx: &mut gpui_kit::gpui::App,
@@ -661,7 +653,7 @@ fn tab_menu(
             .unwrap_or_default();
         {
             let core = core.clone();
-            let host = host.to_string();
+            let host = host.clone();
             let agent_id = agent_id.clone();
             menu = menu.item(PopupMenuItem::new("Rename").on_click(move |_, window, cx| {
                 let core = core.clone();
@@ -696,7 +688,7 @@ fn tab_menu(
         }
         {
             let core = core.clone();
-            let host = host.to_string();
+            let host = host.clone();
             let agent_id = agent_id.clone();
             menu = menu.item(
                 PopupMenuItem::new("Reload agent").on_click(move |_, _, cx| {
@@ -716,7 +708,6 @@ fn tab_menu(
         PopupMenuItem::new(match tab {
             Tab::Agent(_) => "Close (archives agent)",
             Tab::Terminal(_) => "Close terminal",
-            Tab::Draft(_) => "Close",
         })
         .on_click(move |_, window, cx| close_tab(&core, &key, &tab, window, cx)),
     )

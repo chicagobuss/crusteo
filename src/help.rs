@@ -39,7 +39,7 @@ const SECTIONS: &[Section] = &[
         &[
             (&["Mod", "K"], "Command center: find any agent or workspace"),
             (&["Mod", "Shift", "L"], "Next layout"),
-            (&["Mod", "T"], "New agent tab"),
+            (&["Mod", "T"], "New agent"),
             (&["Mod", "Shift", "T"], "New terminal"),
             (&["Mod", "W"], "Close tab"),
             (&["Mod", "N"], "New workspace"),

@@ -1,0 +1,21 @@
+// Resuming a thread Codex archived: Paseo unarchives it and resumes again.
+{"dir":"in","frame":{"method":"initialize"}}
+{"dir":"out","frame":{"id":"$ID","result":{"userAgent":"codex_cli_rs/0.162.1"}}}
+{"dir":"in","frame":{"method":"initialized"}}
+{"dir":"in","frame":{"id":2,"method":"model/list"}}
+{"dir":"in","frame":{"id":3,"method":"config/read"}}
+{"dir":"in","frame":{"id":4,"method":"collaborationMode/list"}}
+{"dir":"out","frame":{"id":2,"result":{"data":[{"id":"gpt-6-luna","isDefault":true,"defaultReasoningEffort":"low"}]}}}
+{"dir":"out","frame":{"id":3,"error":{"code":-32603,"message":"config unavailable"}}}
+{"dir":"out","frame":{"id":4,"result":{"data":[]}}}
+{"dir":"in","frame":{"method":"thread/resume","params":{"threadId":"thr-old"}}}
+{"dir":"out","frame":{"id":"$ID","error":{"code":-32600,"message":"session thr-old is archived. Run `codex unarchive thr-old` to unarchive it first."}}}
+{"dir":"in","frame":{"method":"thread/unarchive","params":{"threadId":"thr-old"}}}
+{"dir":"out","frame":{"id":"$ID","result":{}}}
+{"dir":"in","frame":{"method":"thread/resume","params":{"threadId":"thr-old"}}}
+{"dir":"out","frame":{"id":"$ID","result":{"thread":{"id":"thr-old"}}}}
+{"cmd":{"prompt":{"turn":"codex-turn-1","text":"Hi"}}}
+{"dir":"in","frame":{"method":"turn/start","params":{"threadId":"thr-old","model":"gpt-6-luna","effort":"low"}}}
+{"dir":"out","frame":{"id":"$ID","result":{"turn":{"id":"turn-a","status":"inProgress"}}}}
+{"dir":"out","frame":{"method":"turn/started","params":{"threadId":"thr-old","turn":{"id":"turn-a","status":"inProgress"}}}}
+{"dir":"out","frame":{"method":"turn/completed","params":{"threadId":"thr-old","turn":{"id":"turn-a","status":"completed","error":null}}}}

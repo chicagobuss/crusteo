@@ -3,17 +3,23 @@ use crate::app::nav::Selection;
 use crate::app::{Closed, Core, Tab};
 use crate::ui;
 use fleet::workspace_archive::{ArchiveActivity, ArchivePlan, archive_target};
-use fleet::{Bucket, requests};
+use fleet::{Bucket, HostId, requests};
 use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
 use gpui_kit::gpui::{App, Window};
 
-pub fn available(core: &Core, host: &str, workspace: &str, source: Option<&str>, cx: &App) -> bool {
+pub fn available(
+    core: &Core,
+    host: &HostId,
+    workspace: &str,
+    source: Option<&str>,
+    cx: &App,
+) -> bool {
     let store = core.store.read(cx);
     !store.workspace_archive_pending(host, workspace)
         && archive_target(&store.fleet, host, workspace, source).is_ok()
 }
 
-pub fn agent_menu(menu: PopupMenu, core: &Core, host: &str, agent: &str, cx: &App) -> PopupMenu {
+pub fn agent_menu(menu: PopupMenu, core: &Core, host: &HostId, agent: &str, cx: &App) -> PopupMenu {
     let exists = can_close_agent(core, host, agent, cx);
     if is_subagent(core, host, agent, cx) {
         let detach = core
@@ -23,7 +29,7 @@ pub fn agent_menu(menu: PopupMenu, core: &Core, host: &str, agent: &str, cx: &Ap
             .host(host)
             .is_some_and(|record| record.has("agentDetach"));
         let archive = {
-            let (core, host, agent) = (core.clone(), host.to_string(), agent.to_string());
+            let (core, host, agent) = (core.clone(), host.clone(), agent.to_string());
             PopupMenuItem::new("Archive subagent…")
                 .disabled(!exists)
                 .on_click(move |_, window, cx| archive_subagent(&core, &host, &agent, window, cx))
@@ -32,14 +38,14 @@ pub fn agent_menu(menu: PopupMenu, core: &Core, host: &str, agent: &str, cx: &Ap
         if !detach {
             return menu;
         }
-        let (core, host, agent) = (core.clone(), host.to_string(), agent.to_string());
+        let (core, host, agent) = (core.clone(), host.clone(), agent.to_string());
         return menu.item(
             PopupMenuItem::new("Detach subagent…")
                 .disabled(!exists)
                 .on_click(move |_, window, cx| detach_subagent(&core, &host, &agent, window, cx)),
         );
     }
-    let (core, host, agent) = (core.clone(), host.to_string(), agent.to_string());
+    let (core, host, agent) = (core.clone(), host.clone(), agent.to_string());
     menu.item(
         PopupMenuItem::new("Close agent tab")
             .disabled(!exists)
@@ -49,26 +55,32 @@ pub fn agent_menu(menu: PopupMenu, core: &Core, host: &str, agent: &str, cx: &Ap
 
 /// Whether `agent` was started by another agent. Paseo keeps such an agent
 /// with its parent: closing its tab hides it rather than archiving it.
-pub fn is_subagent(core: &Core, host: &str, agent: &str, cx: &App) -> bool {
+pub fn is_subagent(core: &Core, host: &HostId, agent: &str, cx: &App) -> bool {
     live_agent(&core.store.read(cx).fleet, host, agent)
         .is_some_and(|record| record.parent_agent_id.is_some())
 }
 
-fn agent_title(core: &Core, host: &str, agent: &str, cx: &App) -> String {
+fn agent_title(core: &Core, host: &HostId, agent: &str, cx: &App) -> String {
     live_agent(&core.store.read(cx).fleet, host, agent)
         .map(|record| short_name(&record.display_title()))
         .unwrap_or_default()
 }
 
 /// Archives a subagent once the user confirms, as Paseo's track does.
-pub fn archive_subagent(core: &Core, host: &str, agent: &str, window: &mut Window, cx: &mut App) {
+pub fn archive_subagent(
+    core: &Core,
+    host: &HostId,
+    agent: &str,
+    window: &mut Window,
+    cx: &mut App,
+) {
     let Some(running) = live_agent(&core.store.read(cx).fleet, host, agent)
         .map(|record| matches!(record.bucket(), Bucket::Running | Bucket::NeedsInput))
     else {
         return;
     };
     let title = agent_title(core, host, agent, cx);
-    let (core, host, agent) = (core.clone(), host.to_string(), agent.to_string());
+    let (core, host, agent) = (core.clone(), host.clone(), agent.to_string());
     ui::confirm(
         window,
         cx,
@@ -92,14 +104,14 @@ pub fn archive_subagent(core: &Core, host: &str, agent: &str, window: &mut Windo
 }
 
 /// Makes a subagent a standalone agent once the user confirms.
-pub fn detach_subagent(core: &Core, host: &str, agent: &str, window: &mut Window, cx: &mut App) {
+pub fn detach_subagent(core: &Core, host: &HostId, agent: &str, window: &mut Window, cx: &mut App) {
     let title = agent_title(core, host, agent, cx);
     let name = if title.is_empty() {
         "This subagent".to_string()
     } else {
         format!("\"{title}\"")
     };
-    let (core, host, agent) = (core.clone(), host.to_string(), agent.to_string());
+    let (core, host, agent) = (core.clone(), host.clone(), agent.to_string());
     ui::confirm(
         window,
         cx,
@@ -114,13 +126,13 @@ pub fn detach_subagent(core: &Core, host: &str, agent: &str, window: &mut Window
     );
 }
 
-fn live_agent<'a>(fleet: &'a fleet::Fleet, host: &str, agent: &str) -> Option<&'a fleet::Agent> {
+fn live_agent<'a>(fleet: &'a fleet::Fleet, host: &HostId, agent: &str) -> Option<&'a fleet::Agent> {
     fleet
         .agent(host, agent)
         .filter(|record| record.archived_at.is_none())
 }
 
-pub fn can_close_agent(core: &Core, host: &str, agent: &str, cx: &App) -> bool {
+pub fn can_close_agent(core: &Core, host: &HostId, agent: &str, cx: &App) -> bool {
     live_agent(&core.store.read(cx).fleet, host, agent).is_some()
 }
 
@@ -133,12 +145,12 @@ pub enum AgentCloseOrigin {
 }
 
 impl AgentCloseOrigin {
-    fn tab_key(&self, host: &str, workspace: Option<&str>) -> Option<String> {
+    fn tab_key(&self, host: &HostId, workspace: Option<&str>) -> Option<String> {
         match self {
             Self::Tab(key) => Some(key.clone()),
             Self::Card => workspace.map(|workspace| {
                 Selection {
-                    host: host.to_string(),
+                    host: host.clone(),
                     workspace: workspace.to_string(),
                 }
                 .key()
@@ -165,7 +177,7 @@ struct AgentCloseState {
 }
 
 impl AgentCloseState {
-    fn read(fleet: &fleet::Fleet, host: &str, agent: &str) -> Option<Self> {
+    fn read(fleet: &fleet::Fleet, host: &HostId, agent: &str) -> Option<Self> {
         let record = live_agent(fleet, host, agent)?;
         let workspace = record.workspace_id.clone();
         let last = workspace.as_deref().is_some_and(|workspace| {
@@ -186,7 +198,7 @@ impl AgentCloseState {
 }
 
 /// Card actions archive the agent even when it has no locally open tab.
-pub fn close_agent(core: &Core, host: &str, agent: &str, window: &mut Window, cx: &mut App) {
+pub fn close_agent(core: &Core, host: &HostId, agent: &str, window: &mut Window, cx: &mut App) {
     close_agent_tab(core, host, agent, AgentCloseOrigin::Card, window, cx);
 }
 
@@ -194,7 +206,7 @@ pub fn close_agent(core: &Core, host: &str, agent: &str, window: &mut Window, cx
 /// agents ask first; the last agent offers a workspace archive instead.
 pub fn close_agent_tab(
     core: &Core,
-    host: &str,
+    host: &HostId,
     agent: &str,
     origin: AgentCloseOrigin,
     window: &mut Window,
@@ -232,7 +244,7 @@ pub fn close_agent_tab(
         .unwrap_or_default();
 
     let close = {
-        let (core, host, agent) = (core.clone(), host.to_string(), agent.to_string());
+        let (core, host, agent) = (core.clone(), host.clone(), agent.to_string());
         let (state, origin) = (state.clone(), origin.clone());
         let handle = window.window_handle();
         move |cx: &mut App| {
@@ -260,7 +272,7 @@ pub fn close_agent_tab(
     match state.workspace {
         Some(workspace) if state.last && available(core, host, &workspace, Some(agent), cx) => {
             let archive = {
-                let (core, host, agent) = (core.clone(), host.to_string(), agent.to_string());
+                let (core, host, agent) = (core.clone(), host.clone(), agent.to_string());
                 move |window: &mut Window, cx: &mut App| {
                     let (core, host, agent, workspace) =
                         (core.clone(), host.clone(), agent.clone(), workspace.clone());
@@ -303,7 +315,7 @@ pub fn close_agent_tab(
 
 fn finish_agent_close(
     core: &Core,
-    host: &str,
+    host: &HostId,
     agent: &str,
     expected: &AgentCloseState,
     origin: &AgentCloseOrigin,
@@ -334,12 +346,12 @@ fn finish_agent_close(
 pub fn workspace_menu(
     menu: PopupMenu,
     core: &Core,
-    host: &str,
+    host: &HostId,
     workspace: &str,
     cx: &App,
 ) -> PopupMenu {
     let enabled = available(core, host, workspace, None, cx);
-    let (core, host, workspace) = (core.clone(), host.to_string(), workspace.to_string());
+    let (core, host, workspace) = (core.clone(), host.clone(), workspace.to_string());
     menu.item(
         PopupMenuItem::new("Archive workspace…")
             .disabled(!enabled)
@@ -349,7 +361,7 @@ pub fn workspace_menu(
 
 pub fn show(
     core: &Core,
-    host: &str,
+    host: &HostId,
     workspace: &str,
     source: Option<&str>,
     window: &mut Window,
@@ -426,7 +438,7 @@ fn short_name(name: &str) -> String {
 fn confirmation_body(plan: &ArchivePlan) -> String {
     let count = plan.agents.len();
     let mut lines = vec![
-        format!("Host: {}", plan.host),
+        format!("Host: {}", plan.host_name),
         match count {
             0 => "This archives the workspace.".into(),
             1 => "This archives the workspace and its agent.".into(),
@@ -511,22 +523,28 @@ mod tests {
     #[test]
     fn tab_origin_preserves_the_exact_key_and_card_origin_uses_selection_keys() {
         let tab = AgentCloseOrigin::Tab("original:key".into());
-        assert_eq!(tab.tab_key("mac", None).as_deref(), Some("original:key"));
         assert_eq!(
-            tab.tab_key("mac", Some("changed")).as_deref(),
+            tab.tab_key(&HostId::new("mac"), None).as_deref(),
             Some("original:key")
         );
         assert_eq!(
-            AgentCloseOrigin::Card.tab_key("mac", Some("w")),
+            tab.tab_key(&HostId::new("mac"), Some("changed")).as_deref(),
+            Some("original:key")
+        );
+        assert_eq!(
+            AgentCloseOrigin::Card.tab_key(&HostId::new("mac"), Some("w")),
             Some(
                 Selection {
-                    host: "mac".into(),
+                    host: HostId::new("mac"),
                     workspace: "w".into(),
                 }
                 .key()
             )
         );
-        assert_eq!(AgentCloseOrigin::Card.tab_key("mac", None), None);
+        assert_eq!(
+            AgentCloseOrigin::Card.tab_key(&HostId::new("mac"), None),
+            None
+        );
     }
 
     fn close_fixture() -> fleet::Fleet {
@@ -535,7 +553,7 @@ mod tests {
             ..Default::default()
         }]);
         fleet
-            .host_mut("mac")
+            .host_mut(&HostId::new("mac"))
             .unwrap()
             .directory
             .agents
@@ -553,66 +571,77 @@ mod tests {
     #[test]
     fn close_confirmation_detects_new_activity_and_workspace_changes() {
         let mut fleet = close_fixture();
-        let shown = AgentCloseState::read(&fleet, "mac", "a").unwrap();
+        let shown = AgentCloseState::read(&fleet, &HostId::new("mac"), "a").unwrap();
         assert!(!shown.running);
-        let directory = &mut fleet.host_mut("mac").unwrap().directory;
+        let directory = &mut fleet.host_mut(&HostId::new("mac")).unwrap().directory;
         directory
             .agents
             .insert("a".into(), close_record("a", "w", true));
-        let working = AgentCloseState::read(&fleet, "mac", "a").unwrap();
+        let working = AgentCloseState::read(&fleet, &HostId::new("mac"), "a").unwrap();
         assert!(working.running);
         assert_ne!(shown, working);
         fleet
-            .host_mut("mac")
+            .host_mut(&HostId::new("mac"))
             .unwrap()
             .directory
             .agents
             .insert("a".into(), close_record("a", "other", false));
-        assert_ne!(shown, AgentCloseState::read(&fleet, "mac", "a").unwrap());
+        assert_ne!(
+            shown,
+            AgentCloseState::read(&fleet, &HostId::new("mac"), "a").unwrap()
+        );
     }
 
     #[test]
     fn close_confirmation_counts_live_siblings_including_child_agents() {
         let mut fleet = close_fixture();
-        let shown = AgentCloseState::read(&fleet, "mac", "a").unwrap();
+        let shown = AgentCloseState::read(&fleet, &HostId::new("mac"), "a").unwrap();
         assert!(shown.last);
         let mut child = close_record("child", "w", false);
         child.parent_agent_id = Some("a".into());
         fleet
-            .host_mut("mac")
+            .host_mut(&HostId::new("mac"))
             .unwrap()
             .directory
             .agents
             .insert("child".into(), child);
-        let changed = AgentCloseState::read(&fleet, "mac", "a").unwrap();
+        let changed = AgentCloseState::read(&fleet, &HostId::new("mac"), "a").unwrap();
         assert!(!changed.last);
         assert_ne!(shown, changed);
         fleet
-            .host_mut("mac")
+            .host_mut(&HostId::new("mac"))
             .unwrap()
             .directory
             .agents
             .get_mut("child")
             .unwrap()
             .archived_at = Some("archived".into());
-        assert_eq!(shown, AgentCloseState::read(&fleet, "mac", "a").unwrap());
+        assert_eq!(
+            shown,
+            AgentCloseState::read(&fleet, &HostId::new("mac"), "a").unwrap()
+        );
     }
 
     #[test]
     fn already_archived_and_missing_agents_have_no_remote_close_target() {
         let mut fleet = close_fixture();
         fleet
-            .host_mut("mac")
+            .host_mut(&HostId::new("mac"))
             .unwrap()
             .directory
             .agents
             .get_mut("a")
             .unwrap()
             .archived_at = Some("archived".into());
-        assert!(AgentCloseState::read(&fleet, "mac", "a").is_none());
-        fleet.host_mut("mac").unwrap().directory.agents.remove("a");
-        assert!(AgentCloseState::read(&fleet, "mac", "a").is_none());
-        assert!(AgentCloseState::read(&fleet, "missing-host", "a").is_none());
+        assert!(AgentCloseState::read(&fleet, &HostId::new("mac"), "a").is_none());
+        fleet
+            .host_mut(&HostId::new("mac"))
+            .unwrap()
+            .directory
+            .agents
+            .remove("a");
+        assert!(AgentCloseState::read(&fleet, &HostId::new("mac"), "a").is_none());
+        assert!(AgentCloseState::read(&fleet, &HostId::new("missing-host"), "a").is_none());
     }
 
     #[test]
@@ -628,7 +657,8 @@ mod tests {
             activity: Some(ArchiveActivity::Running),
         }));
         let plan = ArchivePlan {
-            host: "mac".into(),
+            host: HostId::new("mac"),
+            host_name: "mac".into(),
             workspace: "w".into(),
             name: "Workspace".into(),
             source_agent: Some("source".into()),
@@ -662,7 +692,8 @@ mod tests {
     #[test]
     fn empty_single_agent_and_long_multiline_titles_remain_clear() {
         let mut plan = ArchivePlan {
-            host: "mac".into(),
+            host: HostId::new("mac"),
+            host_name: "mac".into(),
             workspace: "w".into(),
             name: "Workspace".into(),
             source_agent: None,

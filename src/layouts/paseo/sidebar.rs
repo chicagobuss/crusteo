@@ -6,14 +6,15 @@
 //! workspaces the fleet has.
 
 use fleet::sidebar::{Grouping, SidebarRow, SidebarView};
-use fleet::{Bucket, requests};
+use fleet::{Bucket, HostId, requests};
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::menu::{DropdownMenu, PopupMenu, PopupMenuItem};
 use gpui_kit::component::{Icon, Sizable};
 use gpui_kit::gpui::{
     AnyElement, App, ClickEvent, Context, DismissEvent, Entity, Focusable, InteractiveElement,
-    IntoElement, ListAlignment, ListState, ParentElement, Pixels, Point, Render, SharedString,
-    StatefulInteractiveElement, Styled, Subscription, Window, anchored, deferred, div, list, px,
+    IntoElement, ListAlignment, ListState, MouseButton, MouseDownEvent, ParentElement, Pixels,
+    Point, Render, SharedString, StatefulInteractiveElement, Styled, Subscription, Window,
+    anchored, deferred, div, list, px,
 };
 use gpui_kit::prelude::FluentBuilder;
 
@@ -54,7 +55,9 @@ enum Item {
         collapsed: bool,
         aggregate: Bucket,
         /// (host, projectId) to create a workspace in.
-        creatable: Option<(String, String)>,
+        creatable: Option<(HostId, String)>,
+        /// (host, projectId) of each host's project merged here.
+        projects: Vec<(HostId, String)>,
     },
     Row {
         row: Box<SidebarRow>,
@@ -70,7 +73,7 @@ enum Item {
     /// "New workspace" in a project that has none.
     Ghost {
         key: String,
-        host: String,
+        host: HostId,
         project_id: String,
     },
     /// Space below an expanded project.
@@ -123,10 +126,10 @@ impl Sidebar {
     }
 
     /// Rows in visual order, for keyboard jumps.
-    pub fn visible_rows(&self, cx: &App) -> Vec<(String, String)> {
+    pub fn visible_rows(&self, cx: &App) -> Vec<(HostId, String)> {
         let nav = self.core.nav.read(cx);
         let collapsed = |key: &str| nav.is_collapsed(key);
-        let mut rows: Vec<(String, String)> = Vec::new();
+        let mut rows: Vec<(HostId, String)> = Vec::new();
         if !nav.collapsed_pinned {
             rows.extend(
                 self.view
@@ -190,6 +193,9 @@ impl Sidebar {
                         collapsed,
                         aggregate: project.aggregate(),
                         creatable: creatable.clone(),
+                        projects: (project.placements.iter())
+                            .map(|(host, id, _, _)| (host.clone(), id.clone()))
+                            .collect(),
                     });
                     if collapsed {
                         continue;
@@ -250,7 +256,16 @@ impl Sidebar {
                 collapsed,
                 aggregate,
                 creatable,
-            } => self.project_header(key, name, *collapsed, *aggregate, creatable.clone(), cx),
+                projects,
+            } => self.project_header(
+                key,
+                name,
+                *collapsed,
+                *aggregate,
+                creatable.clone(),
+                projects,
+                cx,
+            ),
             Item::Row {
                 row,
                 selected,
@@ -351,7 +366,7 @@ impl Sidebar {
     #[allow(clippy::too_many_arguments)]
     fn open_row_menu(
         &mut self,
-        host: &str,
+        host: &HostId,
         workspace: &str,
         pinned: bool,
         bucket: Bucket,
@@ -360,7 +375,7 @@ impl Sidebar {
         cx: &mut Context<Self>,
     ) {
         let core = self.core.clone();
-        let (host, workspace) = (host.to_string(), workspace.to_string());
+        let (host, workspace) = (host.clone(), workspace.to_string());
         let menu = PopupMenu::build(window, cx, move |menu, _, cx| {
             row_menu(menu, &core, &host, &workspace, pinned, bucket, cx)
         });
@@ -425,7 +440,20 @@ impl Sidebar {
                     .dropdown_menu(move |menu, _, cx| {
                         let nav_a = nav.clone();
                         let nav_b = nav.clone();
+                        let nav_bg = nav.clone();
+                        let show_background = nav.read(cx).show_background();
                         let mut menu = menu
+                            // First, as in Paseo's display menu.
+                            .item(
+                                PopupMenuItem::new("Show background")
+                                    .checked(show_background)
+                                    .on_click(move |_, _, cx| {
+                                        nav_bg.update(cx, |nav, cx| {
+                                            nav.set_show_background(!show_background, cx)
+                                        })
+                                    }),
+                            )
+                            .separator()
                             .label("Grouping")
                             .item(
                                 PopupMenuItem::new("Project")
@@ -449,7 +477,7 @@ impl Sidebar {
                                         })
                                     }),
                             );
-                        let hosts = store.read(cx).host_names();
+                        let hosts = store.read(cx).host_labels();
                         if hosts.len() > 1 {
                             let filter = nav.read(cx).filters.hosts.clone();
                             let nav_all = nav.clone();
@@ -464,12 +492,12 @@ impl Sidebar {
                                         })
                                     }),
                             );
-                            for host in hosts {
+                            for (host, label) in hosts {
                                 let nav = nav.clone();
                                 let checked = filter.contains(&host);
                                 let name = host.clone();
                                 menu =
-                                    menu.item(PopupMenuItem::new(host).checked(checked).on_click(
+                                    menu.item(PopupMenuItem::new(label).checked(checked).on_click(
                                         move |_, _, cx| {
                                             let name = name.clone();
                                             nav.update(cx, |nav, cx| {
@@ -495,19 +523,44 @@ impl Sidebar {
             )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn project_header(
         &self,
         key: &str,
         name: &str,
         collapsed: bool,
         aggregate: Bucket,
-        creatable: Option<(String, String)>,
+        creatable: Option<(HostId, String)>,
+        projects: &[(HostId, String)],
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let p = palette();
         let group: SharedString = format!("project-{key}").into();
         let core = self.core.clone();
         let toggle = key.to_string();
+        // A menu where a host can remove its project.
+        let has_menu = projects.iter().any(|(host, _)| {
+            (core.store.read(cx).fleet.host(host)).is_some_and(fleet::project_remove::supported)
+        });
+        let menu = {
+            let projects = projects.to_vec();
+            Button::new(SharedString::from(format!("project-menu-{key}")))
+                .icon(Icon::empty().path("icons/ellipsis-vertical.svg"))
+                .ghost()
+                .xsmall()
+                .tooltip("Project actions")
+                .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                    cx.stop_propagation();
+                    this.open_project_menu(&projects, event.position(), window, cx);
+                }))
+        };
+        let right_click = {
+            let projects = projects.to_vec();
+            cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                cx.stop_propagation();
+                this.open_project_menu(&projects, event.position, window, cx);
+            })
+        };
 
         div()
             .id(SharedString::from(format!("project-row-{key}")))
@@ -593,6 +646,9 @@ impl Sidebar {
                                 .xsmall()
                                 .tooltip("New workspace")
                                 .on_click(move |_, _, cx| {
+                                    // Not also a click on the row, which
+                                    // would fold the project away.
+                                    cx.stop_propagation();
                                     let screen = Screen::NewWorkspace {
                                         host: Some(host.clone()),
                                         project: Some(project_id.clone()),
@@ -600,14 +656,43 @@ impl Sidebar {
                                     nav.update(cx, |nav, cx| nav.show(screen, cx));
                                 }),
                         )
-                    }),
+                    })
+                    .when(has_menu, |row| row.child(menu)),
             )
             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                 this.core
                     .nav
                     .update(cx, |nav, cx| nav.toggle_collapsed(&toggle, cx));
             }))
+            .when(has_menu, |row| {
+                row.on_mouse_down(MouseButton::Right, right_click)
+            })
             .into_any_element()
+    }
+
+    /// Opens a project's menu at `position`, replacing any menu open.
+    fn open_project_menu(
+        &mut self,
+        projects: &[(HostId, String)],
+        position: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let core = self.core.clone();
+        let projects = projects.to_vec();
+        let menu = PopupMenu::build(window, cx, move |menu, _, cx| {
+            crate::widgets::remove_project::menu_items(menu, &core, &projects, cx)
+        });
+        let _dismiss = cx.subscribe_in(&menu, window, |this, _, _: &DismissEvent, _, cx| {
+            this.menu = None;
+            cx.notify();
+        });
+        self.menu = Some(RowMenu {
+            position,
+            menu,
+            _dismiss,
+        });
+        cx.notify();
     }
 
     fn status_header(&self, bucket: Bucket, count: usize, cx: &mut Context<Self>) -> AnyElement {
@@ -658,6 +743,7 @@ impl Sidebar {
         let id = format!("{}:{}", row.host, row.workspace_id);
         let group: SharedString = format!("ws-{id}").into();
         let host = row.host.clone();
+        let host_name = self.core.store.read(cx).fleet.host_name(&host).to_string();
         let workspace = row.workspace_id.clone();
 
         let leading: AnyElement = if with_project {
@@ -699,7 +785,8 @@ impl Sidebar {
         let multi_host = self.view.multi_host;
         let mut meta: Vec<AnyElement> = Vec::new();
         if multi_host {
-            let host_color = crate::theme::identity_for(&row.host).1;
+            // Coloured by id, so a renamed host keeps its colour.
+            let host_color = crate::theme::identity_for(row.host.as_str()).1;
             meta.push(
                 div()
                     .flex()
@@ -710,7 +797,7 @@ impl Sidebar {
                         div()
                             .text_size(size::sm())
                             .text_color(gpui_kit::gpui::rgb(host_color))
-                            .child(row.host.clone()),
+                            .child(host_name),
                     )
                     .into_any_element(),
             );
@@ -865,6 +952,7 @@ impl Sidebar {
                                         .id(SharedString::from(format!("{group}-title")))
                                         .child(row.title.clone()),
                                 )
+                                .when(row.background, |line| line.child(ui::background_tag()))
                                 .child(trailing),
                         )
                         .when(meta_row_has_children(multi_host, row), |col| {
@@ -896,7 +984,7 @@ impl Sidebar {
 fn row_menu(
     menu: PopupMenu,
     core: &Core,
-    host: &str,
+    host: &HostId,
     workspace: &str,
     pinned: bool,
     bucket: Bucket,
@@ -926,7 +1014,7 @@ fn row_menu(
     }
     let act = |label: &str, message: serde_json::Value| {
         let store = store.clone();
-        let host = host.to_string();
+        let host = host.clone();
         PopupMenuItem::new(label.to_string()).on_click(move |_, _, cx| {
             let message = message.clone();
             let host = host.clone();
@@ -945,7 +1033,7 @@ fn row_menu(
     ));
     {
         let store = store.clone();
-        let host = host.to_string();
+        let host = host.clone();
         let workspace = workspace.to_string();
         let current = store
             .read(cx)
@@ -1008,7 +1096,7 @@ fn row_menu(
             );
         }
         let store = store.clone();
-        let host = host.to_string();
+        let host = host.clone();
         let workspace = workspace.to_string();
         menu = menu.item(
             PopupMenuItem::new("New label…").on_click(move |_, window, cx| {
@@ -1029,10 +1117,10 @@ fn row_menu(
 }
 
 /// "New workspace" in a project that has none yet.
-fn ghost_row(core: &Core, key: &str, host: &str, project_id: &str) -> AnyElement {
+fn ghost_row(core: &Core, key: &str, host: &HostId, project_id: &str) -> AnyElement {
     let p = palette();
     let nav = core.nav.clone();
-    let (host, project_id) = (host.to_string(), project_id.to_string());
+    let (host, project_id) = (host.clone(), project_id.to_string());
     div()
         .id(SharedString::from(format!("ghost-{key}")))
         .min_h(px(size::ROW_MIN_HEIGHT))
@@ -1182,6 +1270,31 @@ fn empty_state(core: &Core, cx: &mut Context<Sidebar>) -> impl IntoElement {
                 .child(title),
         )
         .child(div().text_size(size::sm()).text_color(p.muted).child(body))
+        .when(online > 0, |d| {
+            d.child(
+                Button::new("empty-add-project")
+                    .label("Add project")
+                    .ghost()
+                    .small()
+                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                        add_project(&this.core, window, cx);
+                    })),
+            )
+        })
+}
+
+/// Add project, on the selected workspace's host if any; the new project
+/// then opens in New workspace, as in Paseo.
+pub fn add_project(core: &Core, window: &mut Window, cx: &mut App) {
+    let host = core.nav.read(cx).selection.as_ref().map(|s| s.host.clone());
+    let nav = core.nav.clone();
+    crate::widgets::add_project::open(core, host, window, cx, move |host, project, _, cx| {
+        let screen = Screen::NewWorkspace {
+            host: Some(host.clone()),
+            project: Some(project.to_string()),
+        };
+        nav.update(cx, |nav, cx| nav.show(screen, cx));
+    });
 }
 
 fn footer(core: &Core, cx: &mut Context<Sidebar>) -> impl IntoElement {
@@ -1230,6 +1343,15 @@ fn footer(core: &Core, cx: &mut Context<Sidebar>) -> impl IntoElement {
                     this.core
                         .nav
                         .update(cx, |nav, cx| nav.show(Screen::Hosts, cx));
+                })),
+        )
+        .child(
+            icon_button("footer-add-project", "folder-plus")
+                .tooltip(|window, cx| {
+                    gpui_kit::component::tooltip::Tooltip::new("Add project").build(window, cx)
+                })
+                .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                    add_project(&this.core, window, cx);
                 })),
         )
         .child(

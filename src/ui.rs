@@ -51,6 +51,12 @@ pub fn tool_icon_name(icon: ToolIcon) -> &'static str {
         ToolIcon::Sparkles => "sparkles",
         ToolIcon::Mic => "mic-vocal",
         ToolIcon::Paseo => "layers",
+        ToolIcon::Message => "bot-message-square",
+        ToolIcon::Send => "send",
+        ToolIcon::Finished => "circle-check",
+        ToolIcon::Failed => "circle-alert",
+        ToolIcon::Permission => "hand",
+        ToolIcon::Closed => "circle-x",
     }
 }
 
@@ -152,6 +158,22 @@ pub fn agent_dot(bucket: Bucket) -> impl IntoElement {
         .justify_center()
         .flex_shrink_0()
         .child(bucket_glyph(bucket))
+}
+
+/// The muted "background" tag beside a background workspace's name, in
+/// Paseo's word for them. It never takes a line of its own.
+pub fn background_tag() -> impl IntoElement {
+    let p = palette();
+    div()
+        .flex_shrink_0()
+        .px(px(4.))
+        .rounded(px(3.))
+        .border_1()
+        .border_color(crate::theme::with_alpha(p.extra_muted, 0.4))
+        .text_size(px(10.))
+        .line_height(px(14.))
+        .text_color(p.extra_muted)
+        .child("background")
 }
 
 /// Project icon fallback: identity-coloured square with a white initial.

@@ -1,6 +1,7 @@
 //! One agent's conversation: the stream of rows, permission cards, the
 //! working indicator, and the composer.
 
+use fleet::HostId;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -8,10 +9,12 @@ use std::time::Duration;
 
 use super::prompt_index::{PromptNavigation, magnification};
 use fleet::Bucket;
-use fleet::display::{self, ToolDisplay};
+use fleet::display::{self, AgentLink, ToolDisplay};
 use fleet::prompt_index::{self, PromptMark};
 use fleet::timeline::{ItemKind, TaskActivity, ToolCall, Turn};
-use gpui_kit::base::{Disableable as _, TextSelection};
+use gpui_kit::base::{
+    Disableable as _, ElementExt as _, SelectableText, TextSelection, TextSelectionGroupId,
+};
 use gpui_kit::component::Sizable;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
@@ -21,7 +24,8 @@ use gpui_kit::gpui::{
     AnyElement, App, AppContext, ClickEvent, Context, DismissEvent, Entity, EventEmitter,
     Focusable, FollowMode, InteractiveElement, IntoElement, ListAlignment, ListOffset, ListState,
     MouseButton, MouseDownEvent, ParentElement, Pixels, Point, Render, SharedString,
-    StatefulInteractiveElement, Styled, Subscription, Window, anchored, deferred, div, list, px,
+    StatefulInteractiveElement, Styled, Subscription, WeakEntity, Window, anchored, deferred, div,
+    list, px, relative, svg,
 };
 use gpui_kit::prelude::FluentBuilder;
 use serde_json::{Value, json};
@@ -29,18 +33,26 @@ use serde_json::{Value, json};
 use super::attachments;
 use super::composer::Composer;
 use super::question_form::QuestionForm;
+use crate::app::images::Shown;
 use crate::app::store::{now_millis, parse_iso};
 use crate::app::{AgentSession, Core};
+use crate::layouts::columns::edges;
 use crate::theme::{palette, size, with_alpha};
 use crate::ui;
+use fleet::images::ImageFile;
+use fleet::prompt::ImageAttachment;
+use gpui_kit::gpui::{ImageSource, SharedUri};
 
 #[derive(Clone)]
 enum Row {
     Item {
         index: usize,
         gap: f32,
+        /// The first item of the item's turn, whose text a selection
+        /// started in it stays within.
+        turn: usize,
     },
-    /// After a finished turn: items `start..=end` (start is the user message).
+    /// After a finished turn: items `start..=end`.
     TurnFooter {
         start: usize,
         end: usize,
@@ -57,9 +69,21 @@ struct CachedImages {
     decoded: Vec<Arc<gpui_kit::gpui::Image>>,
 }
 
+/// The images an item has its daemon keep, read when its row is drawn: a
+/// prompt's kept files, or the files a reply's Markdown images name.
+struct RowImages {
+    files: Vec<ImageFile>,
+    /// For a reply, each Markdown image's destination and its file in `files`.
+    sources: Vec<(String, usize)>,
+}
+
+/// Each item's [`RowImages`] by item id, with the text length it was found
+/// in, so a reply still streaming is looked at again.
+type RemoteImages = Rc<std::cell::RefCell<HashMap<String, (usize, Rc<RowImages>)>>>;
+
 pub struct Conversation {
     core: Core,
-    pub host: String,
+    pub host: HostId,
     pub agent_id: String,
     session: Entity<AgentSession>,
     /// None for a provider subagent, which is read-only.
@@ -76,6 +100,9 @@ pub struct Conversation {
     track: Rc<Vec<TrackRow>>,
     track_revision: (u64, u64),
     list: ListState,
+    /// Whether the list was following its end when last scrolled, to
+    /// redraw the arrow back to it when that changes.
+    following: bool,
     rows: Rc<Vec<Row>>,
     fingerprints: Vec<u64>,
     revision: u64,
@@ -84,6 +111,10 @@ pub struct Conversation {
     agent_marker: Option<String>,
     navigation: PromptNavigation,
     images: Rc<HashMap<String, Rc<CachedImages>>>,
+    /// Images its daemon keeps, for the items drawn so far.
+    remote_images: RemoteImages,
+    /// The store's image revision last seen, to redraw rows when one lands.
+    images_revision: u64,
     presentation: Option<(bool, Option<String>, u64)>,
     /// Where "Archive finished" is.
     archive_finished: ArchiveFinished,
@@ -127,7 +158,7 @@ fn reply_state(replies: &Replies, id: &str, text: &str, cx: &mut App) -> Entity<
 /// Someone the conversation asks its owner to show.
 pub enum ConversationEvent {
     /// A Paseo subagent, opened from the track: a full agent of its own.
-    OpenAgent { host: String, agent: String },
+    OpenAgent { host: HostId, agent: String },
 }
 
 impl EventEmitter<ConversationEvent> for Conversation {}
@@ -159,7 +190,7 @@ struct TrackRow {
 impl Conversation {
     pub fn new(
         core: Core,
-        host: &str,
+        host: &HostId,
         agent_id: &str,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -174,7 +205,7 @@ impl Conversation {
     /// A provider subagent's conversation: read-only, streaming.
     fn new_subagent(
         core: Core,
-        host: &str,
+        host: &HostId,
         parent: &str,
         subagent: &str,
         cx: &mut Context<Self>,
@@ -185,7 +216,7 @@ impl Conversation {
         cx.on_release({
             let (store, host, parent, subagent) = (
                 core.store.clone(),
-                host.to_string(),
+                host.clone(),
                 parent.to_string(),
                 subagent.to_string(),
             );
@@ -202,7 +233,7 @@ impl Conversation {
 
     fn build(
         core: Core,
-        host: &str,
+        host: &HostId,
         agent_id: &str,
         session: Entity<AgentSession>,
         composer: Option<Entity<Composer>>,
@@ -238,13 +269,18 @@ impl Conversation {
                 this.track = track;
                 cx.notify();
             }
+            let images = store.read(cx).images.revision;
+            if images != this.images_revision {
+                this.images_revision = images;
+                this.remeasure_image_rows(cx);
+            }
         })
         .detach();
         let list = ListState::new(0, ListAlignment::Bottom, px(800.));
         list.set_follow_mode(FollowMode::Tail);
         let mut this = Self {
             core,
-            host: host.to_string(),
+            host: host.clone(),
             agent_id: agent_id.to_string(),
             session,
             composer,
@@ -254,6 +290,7 @@ impl Conversation {
             track: Rc::new(Vec::new()),
             track_revision: (u64::MAX, u64::MAX),
             list,
+            following: true,
             rows: Rc::new(Vec::new()),
             fingerprints: Vec::new(),
             revision: u64::MAX,
@@ -262,6 +299,8 @@ impl Conversation {
             agent_marker: None,
             navigation: PromptNavigation::default(),
             images: Rc::new(HashMap::new()),
+            remote_images: Rc::default(),
+            images_revision: 0,
             presentation: None,
             wide: false,
             archive_finished: ArchiveFinished::Idle,
@@ -274,7 +313,9 @@ impl Conversation {
         this.list.set_scroll_handler(move |event, _, cx| {
             let _ = weak.update(cx, |this, cx| {
                 let row = (!event.is_following_tail).then_some(event.visible_range.start);
-                if this.navigation.set_reading_row(row) {
+                let changed = event.is_following_tail != this.following;
+                this.following = event.is_following_tail;
+                if this.navigation.set_reading_row(row) || changed {
                     cx.notify();
                 }
             });
@@ -288,9 +329,93 @@ impl Conversation {
         this
     }
 
+    /// Measures again the replies showing images their daemon keeps, once
+    /// the store has read one: an image is not its placeholder's size. A
+    /// prompt's thumbnails are, so its row only needs drawing again.
+    fn remeasure_image_rows(&mut self, cx: &mut Context<Self>) {
+        let remote = self.remote_images.borrow();
+        if remote.values().all(|(_, images)| images.files.is_empty()) {
+            return;
+        }
+        if remote
+            .values()
+            .any(|(_, images)| !images.sources.is_empty())
+        {
+            let ids: Vec<&str> = (self.session.read(cx).timeline.items())
+                .map(|item| item.id.as_str())
+                .collect();
+            for (row, entry) in self.rows.iter().enumerate() {
+                if let Row::Item { index, .. } = entry
+                    && (ids.get(*index).and_then(|id| remote.get(*id)))
+                        .is_some_and(|(_, images)| !images.sources.is_empty())
+                {
+                    self.list.splice(row..row + 1, 1);
+                }
+            }
+        }
+        drop(remote);
+        cx.notify();
+    }
+
+    /// A round arrow over the bottom of the conversation that scrolls to its
+    /// end and follows it again.
+    fn jump_to_latest(&self, cx: &mut Context<Self>) -> AnyElement {
+        let p = palette();
+        div()
+            .absolute()
+            .bottom(px(12.))
+            .left_0()
+            .right_0()
+            .flex()
+            .justify_center()
+            .child(
+                div()
+                    .id(SharedString::from(format!("jump-latest-{}", self.agent_id)))
+                    .size(px(28.))
+                    .rounded_full()
+                    .border_1()
+                    // Over the fade and whatever text is under it.
+                    .border_color(p.muted)
+                    .bg(p.surface2)
+                    .shadow_md()
+                    .hover(|s| s.border_color(p.foreground))
+                    .cursor_pointer()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(ui::icon("arrow-down", 14., p.foreground))
+                    .tooltip(|window, cx| Tooltip::new("Jump to latest").build(window, cx))
+                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                        this.list.set_follow_mode(FollowMode::Tail);
+                        this.following = true;
+                        this.navigation.set_reading_row(None);
+                        cx.notify();
+                    })),
+            )
+            .into_any_element()
+    }
+
     pub fn focus_composer(&self, window: &mut Window, cx: &mut App) {
         if let Some(composer) = &self.composer {
             composer.update(cx, |composer, cx| composer.focus(window, cx));
+        }
+    }
+
+    pub fn draft(&self, cx: &App) -> Option<fleet::prompt::Prompt> {
+        self.composer
+            .as_ref()
+            .map(|composer| composer.read(cx).draft(cx))
+    }
+
+    pub fn preparing_attachment(&self, cx: &App) -> bool {
+        self.composer
+            .as_ref()
+            .is_some_and(|composer| composer.read(cx).preparing_attachment())
+    }
+
+    pub fn restore_draft(&self, draft: fleet::prompt::Prompt, window: &mut Window, cx: &mut App) {
+        if let Some(composer) = &self.composer {
+            composer.update(cx, |composer, cx| composer.restore_draft(draft, window, cx));
         }
     }
 
@@ -741,39 +866,30 @@ impl Conversation {
                 ItemKind::Tool(_) | ItemKind::Thought { .. } | ItemKind::Todo { .. }
             )
         };
-        let mut turn_start: Option<usize> = None;
+        // Each finished turn ends in a footer, including the turns an agent
+        // runs on its own between messages.
+        let mut turns = fleet::timeline::finished_turns(&items, timeline.is_running())
+            .into_iter()
+            .peekable();
+        let turn_starts = fleet::timeline::turn_starts(&items);
         for (index, item) in items.iter().enumerate() {
-            if matches!(item.kind, ItemKind::User { .. }) {
-                if let Some(start) = turn_start.take()
-                    && index > start + 1
-                {
-                    rows.push(Row::TurnFooter {
-                        start,
-                        end: index - 1,
-                    });
-                    prints.push(hash_str(&format!("footer-{start}-{}", index - 1)));
-                }
-                turn_start = Some(index);
+            if !is_hidden(&item.kind) {
+                let next_toolish = items.get(index + 1).is_some_and(|next| toolish(&next.kind));
+                // A turn's footer sits in its last item's gap.
+                let ends_turn = turns.peek().is_some_and(|(_, end)| *end == index);
+                let gap = if toolish(&item.kind) && next_toolish && !ends_turn {
+                    4.
+                } else {
+                    16.
+                };
+                let turn = turn_starts[index];
+                rows.push(Row::Item { index, gap, turn });
+                prints.push(fingerprint(item, self.expanded.borrow().contains(&item.id)));
             }
-            if is_hidden(&item.kind) {
-                continue;
+            if let Some((start, end)) = turns.next_if(|(_, end)| *end == index) {
+                rows.push(Row::TurnFooter { start, end });
+                prints.push(hash_str(&format!("footer-{start}-{end}")));
             }
-            let next_toolish = items.get(index + 1).is_some_and(|next| toolish(&next.kind));
-            let gap = if toolish(&item.kind) && next_toolish {
-                4.
-            } else {
-                16.
-            };
-            rows.push(Row::Item { index, gap });
-            prints.push(fingerprint(item, self.expanded.borrow().contains(&item.id)));
-        }
-        if let Some(start) = turn_start
-            && !timeline.is_running()
-            && items.len() > start + 1
-        {
-            let end = items.len() - 1;
-            rows.push(Row::TurnFooter { start, end });
-            prints.push(hash_str(&format!("footer-{start}-{end}")));
         }
         if items.is_empty() && !session.loading {
             rows.push(Row::Empty);
@@ -807,19 +923,27 @@ impl Conversation {
         self.navigation.loaded.clear();
         let ids: HashSet<&str> = items.iter().map(|item| item.id.as_str()).collect();
         (self.replies.borrow_mut()).retain(|id, _| ids.contains(id.as_str()));
+        (self.remote_images.borrow_mut()).retain(|id, _| ids.contains(id.as_str()));
         let cache = Rc::make_mut(&mut self.images);
         cache.retain(|id, _| ids.contains(id.as_str()));
         for (row, entry) in rows.iter().enumerate() {
             if let Row::Item { index, .. } = entry
                 && let ItemKind::User {
-                    text, images, seq, ..
+                    text,
+                    images,
+                    image_files,
+                    seq,
+                    ..
                 } = &items[*index].kind
             {
                 if let Some(seq) = seq {
                     self.navigation.rows.insert(*seq, row);
                     self.navigation.loaded.push(PromptMark {
                         seq: *seq,
-                        preview: prompt_index::preview(text, !images.is_empty()),
+                        preview: prompt_index::preview(
+                            text,
+                            !images.is_empty() || !image_files.is_empty(),
+                        ),
                     });
                 }
                 let keys: Vec<_> = images.iter().map(|image| image.content_key()).collect();
@@ -889,24 +1013,25 @@ impl Conversation {
         cx.notify();
     }
     /// On a right-click over selected text, opens a menu to copy it, as
-    /// shown or as the Markdown it was written in. Both are taken now, so the
-    /// menu copies what was selected whatever happens to the selection.
+    /// shown or as the Markdown it was written in; over a `link` in a reply,
+    /// to open it or copy its address. The text is taken now, so the menu
+    /// copies what was selected whatever happens to the selection.
     fn open_copy_menu(
         &mut self,
         position: Point<Pixels>,
+        link: Option<SharedString>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !TextSelection::has_selection(window, cx) {
+        let plain = (TextSelection::has_selection(window, cx))
+            .then(|| TextSelection::selected_text(window, cx))
+            .filter(|text| !text.trim().is_empty());
+        if plain.is_none() && link.is_none() {
             return;
         }
-        let plain = TextSelection::selected_text(window, cx);
-        if plain.trim().is_empty() {
-            return;
-        }
-        let markdown = self.selected_markdown(window, cx);
+        let selected = plain.map(|plain| (plain, self.selected_markdown(window, cx)));
         let store = self.core.store.clone();
-        let menu = PopupMenu::build(window, cx, move |menu, _, _| {
+        let menu = PopupMenu::build(window, cx, move |mut menu, _, _| {
             let copy = |label: &'static str, text: String, done: &'static str| {
                 let store = store.clone();
                 PopupMenuItem::new(label).on_click(move |_, _, cx| {
@@ -914,11 +1039,30 @@ impl Conversation {
                     store.update(cx, |store, cx| store.toast(done.to_string(), cx));
                 })
             };
-            menu.item(copy("Copy", plain.clone(), "Copied")).item(copy(
-                "Copy as Markdown",
-                markdown.clone(),
-                "Copied as Markdown",
-            ))
+            if let Some(url) = &link {
+                let open = url.clone();
+                menu = menu
+                    .item(
+                        PopupMenuItem::new("Open link")
+                            .on_click(move |_, _, cx| cx.open_url(&open)),
+                    )
+                    .item(copy(
+                        "Copy link address",
+                        url.to_string(),
+                        "Copied link address",
+                    ));
+            }
+            if let Some((plain, markdown)) = &selected {
+                if link.is_some() {
+                    menu = menu.separator();
+                }
+                menu = menu.item(copy("Copy", plain.clone(), "Copied")).item(copy(
+                    "Copy as Markdown",
+                    markdown.clone(),
+                    "Copied as Markdown",
+                ));
+            }
+            menu
         });
         let dismiss = cx.subscribe_in(&menu, window, |this, _, _: &DismissEvent, _, cx| {
             this.copy_menu = None;
@@ -1081,11 +1225,14 @@ impl Conversation {
             .navigation
             .hovered
             .and_then(|seq| prompts.iter().position(|mark| mark.seq == seq));
+        // Centred in the space it has, up to 400px, never past its edges:
+        // a short conversation, such as an open Lanes card's, scrolls it.
         div()
             .absolute()
             .left(px(0.))
             .top(px(0.))
             .h_full()
+            .py(px(8.))
             .w(px(size::PROMPT_INDEX_WIDTH))
             .flex()
             .items_center()
@@ -1093,72 +1240,267 @@ impl Conversation {
                 div()
                     .id("prompt-index")
                     .w(px(size::PROMPT_INDEX_WIDTH))
-                    .max_h(px(400.))
-                    .overflow_y_scroll()
+                    .max_h(gpui_kit::gpui::relative(1.))
                     .flex()
                     .flex_col()
-                    .children(prompts.iter().enumerate().map(|(i, mark)| {
-                        let scale = hovered.map(|h| magnification(i.abs_diff(h))).unwrap_or(0.);
-                        let width = if active == Some(i) { 18. } else { 10. };
-                        let target = mark.clone();
-                        let seq = mark.seq;
-                        let preview = mark.preview.clone();
+                    .child(
                         div()
-                            .id(SharedString::from(format!("prompt-tick-{}", mark.seq)))
+                            .id("prompt-index-ticks")
                             .w(px(size::PROMPT_INDEX_WIDTH))
-                            .h(px(10.))
-                            .flex_shrink_0()
+                            .max_h(px(400.))
+                            .min_h(px(0.))
+                            .flex_shrink(1.)
+                            .overflow_y_scroll()
                             .flex()
-                            .items_center()
-                            .justify_center()
-                            .cursor_pointer()
-                            .tooltip(move |window, cx| {
-                                Tooltip::new(preview.clone())
-                                    .max_w(px(260.))
-                                    .build(window, cx)
-                            })
-                            .tooltip_show_delay(Duration::from_millis(100))
-                            .on_hover(cx.listener(move |this, hovering, _, cx| {
-                                let hovered = if *hovering { Some(seq) } else { None };
-                                if this.navigation.hovered != hovered {
-                                    this.navigation.hovered = hovered;
-                                    cx.notify();
-                                }
-                            }))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.navigation.pending = Some(target.seq);
-                                this.list.pause_following_tail();
-                                this.core.store.update(cx, |store, cx| {
-                                    store.load_prompt(&this.host, &this.agent_id, target.seq, cx)
-                                });
-                                this.scroll_pending(cx);
-                                cx.notify();
-                            }))
-                            .child(
+                            .flex_col()
+                            .children(prompts.iter().enumerate().map(|(i, mark)| {
+                                let scale =
+                                    hovered.map(|h| magnification(i.abs_diff(h))).unwrap_or(0.);
+                                let width = if active == Some(i) { 18. } else { 10. };
+                                let target = mark.clone();
+                                let seq = mark.seq;
+                                let preview = mark.preview.clone();
                                 div()
-                                    .w(px(width + scale * (size::PROMPT_TICK_MAX_WIDTH - width)))
-                                    .h(px(2. + scale * 2.))
-                                    .rounded(px(2.))
-                                    .bg(if active == Some(i) || hovered == Some(i) {
-                                        p.foreground
-                                    } else {
-                                        p.extra_muted
-                                    }),
-                            )
-                    })),
+                                    .id(SharedString::from(format!("prompt-tick-{}", mark.seq)))
+                                    .w(px(size::PROMPT_INDEX_WIDTH))
+                                    .h(px(10.))
+                                    .flex_shrink_0()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .cursor_pointer()
+                                    .tooltip(move |window, cx| {
+                                        Tooltip::new(preview.clone())
+                                            .max_w(px(260.))
+                                            .build(window, cx)
+                                    })
+                                    .tooltip_show_delay(Duration::from_millis(100))
+                                    .on_hover(cx.listener(move |this, hovering, _, cx| {
+                                        let hovered = if *hovering { Some(seq) } else { None };
+                                        if this.navigation.hovered != hovered {
+                                            this.navigation.hovered = hovered;
+                                            cx.notify();
+                                        }
+                                    }))
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.navigation.pending = Some(target.seq);
+                                        this.list.pause_following_tail();
+                                        this.core.store.update(cx, |store, cx| {
+                                            store.load_prompt(
+                                                &this.host,
+                                                &this.agent_id,
+                                                target.seq,
+                                                cx,
+                                            )
+                                        });
+                                        this.scroll_pending(cx);
+                                        cx.notify();
+                                    }))
+                                    .child(
+                                        div()
+                                            .w(px(width
+                                                + scale * (size::PROMPT_TICK_MAX_WIDTH - width)))
+                                            .h(px(2. + scale * 2.))
+                                            .rounded(px(2.))
+                                            .bg(if active == Some(i) || hovered == Some(i) {
+                                                p.foreground
+                                            } else {
+                                                p.extra_muted
+                                            }),
+                                    )
+                            })),
+                    ),
             )
             .into_any_element()
     }
 }
 
 fn is_hidden(kind: &ItemKind) -> bool {
-    match kind {
-        ItemKind::Tool(tool) => {
-            let name = tool.name.as_str();
-            name == "ExitPlanMode" || (name == "plan_approval" && tool.running())
-        }
-        _ => false,
+    fleet::display::hidden_in_stream(kind)
+}
+
+/// The images `row`'s item has its daemon keep, found the first time the
+/// row is drawn and again when the item changes. `None` when it has none.
+fn row_images(
+    row: &Row,
+    session: &Entity<AgentSession>,
+    cwd: &str,
+    memo: &RemoteImages,
+    cx: &App,
+) -> Option<Rc<RowImages>> {
+    let Row::Item { index, .. } = row else {
+        return None;
+    };
+    let item = session.read(cx).timeline.items().nth(*index)?;
+    let stamp = match &item.kind {
+        ItemKind::User {
+            images,
+            image_files,
+            ..
+        } => image_files.len() * 2 + usize::from(!images.is_empty()),
+        ItemKind::Assistant { text, .. } => text.len(),
+        _ => return None,
+    };
+    if let Some((seen, found)) = memo.borrow().get(&item.id)
+        && *seen == stamp
+    {
+        return (!found.files.is_empty()).then(|| found.clone());
     }
+    let found = Rc::new(match &item.kind {
+        // Sent from here, the bytes are already in hand.
+        ItemKind::User {
+            images,
+            image_files,
+            ..
+        } if images.is_empty() => RowImages {
+            files: image_files.clone(),
+            sources: Vec::new(),
+        },
+        ItemKind::Assistant { text, .. } => {
+            let cwd = Some(cwd).filter(|cwd| !cwd.is_empty());
+            let (files, sources) = fleet::images::markdown_files(text, cwd);
+            RowImages { files, sources }
+        }
+        _ => RowImages {
+            files: Vec::new(),
+            sources: Vec::new(),
+        },
+    });
+    memo.borrow_mut()
+        .insert(item.id.clone(), (stamp, found.clone()));
+    (!found.files.is_empty()).then_some(found)
+}
+
+/// A prompt's images as thumbnails: those sent from here, else those its
+/// daemon keeps, as they arrive. A click opens one full size.
+fn prompt_images(
+    item_id: &str,
+    decoded: Option<&[Arc<gpui_kit::gpui::Image>]>,
+    remote: Option<&(Rc<RowImages>, Vec<Shown>)>,
+    host: &HostId,
+    core: &Core,
+) -> Vec<AnyElement> {
+    if let Some(decoded) = decoded.filter(|decoded| !decoded.is_empty()) {
+        return (decoded.iter().enumerate())
+            .map(|(i, image)| {
+                let copy = image.clone();
+                thumbnail(
+                    format!("prompt-image-{item_id}-{i}"),
+                    Shown::Ready(image.clone()),
+                    move |cx| {
+                        crate::app::images::open_copy(
+                            &format!("prompt-image-{:016x}", copy.id),
+                            copy.format.mime_type(),
+                            copy.bytes.clone(),
+                            cx,
+                        )
+                    },
+                )
+            })
+            .collect();
+    }
+    let Some((images, shown)) = remote else {
+        return Vec::new();
+    };
+    (images.files.iter().zip(shown).enumerate())
+        .map(|(i, (file, shown))| {
+            let (core, host, file) = (core.clone(), host.clone(), file.clone());
+            thumbnail(
+                format!("prompt-image-{item_id}-{i}"),
+                shown.clone(),
+                move |cx| open_kept_image(&core, &host, &file, cx),
+            )
+        })
+        .collect()
+}
+
+/// One prompt image, the size of the composer's own once sent, or a box
+/// that size while it loads or when its host cannot send it.
+fn thumbnail(id: String, shown: Shown, open: impl Fn(&mut App) + 'static) -> AnyElement {
+    let p = palette();
+    let frame = div()
+        .id(SharedString::from(id))
+        .flex_shrink_0()
+        .w(px(180.))
+        .h(px(140.));
+    let placeholder = |frame: gpui_kit::gpui::Stateful<gpui_kit::gpui::Div>, label| {
+        frame
+            .rounded(px(6.))
+            .border_1()
+            .border_color(p.border)
+            .flex()
+            .items_center()
+            .justify_center()
+            .text_size(size::sm())
+            .text_color(p.muted)
+            .child(label)
+            .into_any_element()
+    };
+    match shown {
+        Shown::Ready(image) => frame
+            .cursor_pointer()
+            .tooltip(|window, cx| Tooltip::new("Open image").build(window, cx))
+            .on_click(move |_, _, cx| open(cx))
+            .child(gpui_kit::gpui::img(image).size_full())
+            .into_any_element(),
+        Shown::Loading => placeholder(frame, "Loading image…"),
+        Shown::Unavailable => placeholder(
+            frame.tooltip(|window, cx| {
+                Tooltip::new("Its host could not send this image").build(window, cx)
+            }),
+            "Image unavailable",
+        ),
+    }
+}
+
+/// Opens an image a daemon keeps at full size. It is read again: what the
+/// cache holds may be scaled down.
+fn open_kept_image(core: &Core, host: &HostId, file: &ImageFile, cx: &mut App) {
+    let read = core.store.read(cx).read_image(host, file, cx);
+    let name = file.file_name().to_string();
+    cx.spawn(async move |cx| {
+        if let Ok(image) = read.await {
+            cx.update(|cx| crate::app::images::open_read(&name, &image, cx));
+        }
+    })
+    .detach();
+}
+
+/// What a reply's Markdown images show: a file its daemon keeps once read,
+/// a placeholder while it loads or when it cannot be, and any other image
+/// as the renderer would show it.
+fn reply_image_source(
+    images: &RowImages,
+    shown: &[Shown],
+) -> impl Fn(&SharedUri) -> ImageSource + Send + Sync + 'static {
+    let sources: HashMap<String, Arc<gpui_kit::gpui::Image>> = (images.sources.iter())
+        .filter_map(|(source, file)| {
+            let image = match shown.get(*file)? {
+                Shown::Ready(image) => image.clone(),
+                Shown::Loading => crate::app::images::placeholder(true),
+                Shown::Unavailable => crate::app::images::placeholder(false),
+            };
+            Some((source.clone(), image))
+        })
+        .collect();
+    move |uri| {
+        let url: &str = uri;
+        match sources.get(url) {
+            Some(image) => ImageSource::Image(image.clone()),
+            None => default_image_source(uri),
+        }
+    }
+}
+
+/// An image as the renderer shows it with no resolver: a `data:` URL's own
+/// bytes, anything else loaded from its URI.
+fn default_image_source(uri: &SharedUri) -> ImageSource {
+    let url: &str = uri;
+    (url.strip_prefix("data:"))
+        .and_then(|rest| rest.split_once(";base64,"))
+        .and_then(|(mime, data)| attachments::decode(&ImageAttachment::new(data, mime)))
+        .map(ImageSource::Image)
+        .unwrap_or_else(|| uri.clone().into())
 }
 
 fn hash_str(s: &str) -> u64 {
@@ -1177,11 +1519,13 @@ fn fingerprint(item: &fleet::timeline::Item, expanded: bool) -> u64 {
         ItemKind::User {
             text,
             images,
+            image_files,
             message_id,
             ..
         } => {
             text.len().hash(&mut h);
             images.len().hash(&mut h);
+            image_files.len().hash(&mut h);
             message_id.is_some().hash(&mut h);
         }
         ItemKind::Assistant { text, .. } => text.len().hash(&mut h),
@@ -1235,13 +1579,29 @@ impl Render for Conversation {
             .map(|a| a.cwd.clone())
             .unwrap_or_default();
 
+        let agent_id = self.agent_id.clone();
+        let remote_images = self.remote_images.clone();
+        let host = self.host.clone();
         let stream = list(self.list.clone(), move |ix, _window, cx| {
             let Some(row) = rows.get(ix).cloned() else {
                 return div().into_any_element();
             };
+            // Read now that the row is on screen; never for rows scrolled past.
+            let remote = row_images(&row, &session, &cwd, &remote_images, cx).map(|images| {
+                let shown = (core.store)
+                    .update(cx, |store, cx| store.show_images(&host, &images.files, cx));
+                (images, shown)
+            });
             let content = render_row(
-                &row, &session, &core, &expanded, &replies, &forms, &this, &cwd, cx,
+                &row, &session, &core, &expanded, &replies, &forms, &this, &cwd, remote, cx,
             );
+            // A selection stays within the turn it started in, and within
+            // this conversation: a drag never runs on into the next turn or
+            // across other cards.
+            let group = match &row {
+                Row::Item { turn, .. } => format!("{agent_id}:turn:{turn}"),
+                _ => format!("{agent_id}:row:{ix}"),
+            };
             div()
                 .w_full()
                 .flex()
@@ -1254,6 +1614,7 @@ impl Render for Conversation {
                         .when(!wide, |row| row.max_w(px(size::COMPOSER_MAX_WIDTH)))
                         .child(content),
                 )
+                .text_selection_group(TextSelectionGroupId::from_raw(hash_str(&group)))
                 .into_any_element()
         })
         .size_full();
@@ -1269,6 +1630,10 @@ impl Render for Conversation {
             >= 2;
         let jump_loading = session.prompt_index.loading();
         let index = (!loading && show_index).then(|| self.prompt_index(cx));
+        // Scrolled up from the end: an arrow back down to it.
+        let latest =
+            (!loading && !self.list.is_following_tail() && edges::list_overflow(&self.list).1)
+                .then(|| self.jump_to_latest(cx));
 
         div()
             .size_full()
@@ -1284,7 +1649,7 @@ impl Render for Conversation {
                     .on_mouse_down(
                         MouseButton::Right,
                         cx.listener(|this, event: &MouseDownEvent, window, cx| {
-                            this.open_copy_menu(event.position, window, cx);
+                            this.open_copy_menu(event.position, None, window, cx);
                         }),
                     )
                     .when(loading, |d| {
@@ -1298,7 +1663,12 @@ impl Render for Conversation {
                                 .child("Loading conversation…"),
                         )
                     })
-                    .when(!loading, |d| d.child(stream))
+                    .when(!loading, |d| {
+                        // Fades where there is more above or below; after the
+                        // list, so they read its fresh layout.
+                        d.child(stream).child(edges::list_fades(self.list.clone()))
+                    })
+                    .children(latest)
                     .when_some(index, |d, index| d.child(index))
                     .when(jump_loading, |d| {
                         d.child(
@@ -1329,6 +1699,56 @@ impl Render for Conversation {
     }
 }
 
+/// A small copy icon that copies `text`. It brightens under the pointer,
+/// so it reads as something to click.
+fn copy_button(id: String, text: String) -> impl IntoElement {
+    let p = palette();
+    div()
+        .id(SharedString::from(id))
+        .group("copy-button")
+        .p(px(2.))
+        .rounded(px(4.))
+        .cursor_pointer()
+        .hover(|s| s.bg(p.surface1))
+        .child(
+            svg()
+                .path("icons/copy.svg")
+                .flex_shrink_0()
+                .size(px(12.))
+                .text_color(p.extra_muted)
+                .group_hover("copy-button", |s| s.text_color(p.foreground)),
+        )
+        .on_click(move |_, _, cx| {
+            cx.write_to_clipboard(gpui_kit::gpui::ClipboardItem::new_string(text.clone()));
+        })
+}
+
+/// What a click on a link in a reply does: a right-click or a long press
+/// opens the menu to open it or copy its address, others open it as a
+/// text view does by itself.
+fn reply_links(
+    view: WeakEntity<Conversation>,
+) -> impl Fn(&SharedString, &ClickEvent, &mut Window, &mut App) + Send + Sync + 'static {
+    move |url, event, window, cx| {
+        let (menu, open) = match event {
+            ClickEvent::Mouse(click) => (
+                click.up.button == MouseButton::Right,
+                matches!(click.up.button, MouseButton::Left | MouseButton::Middle),
+            ),
+            ClickEvent::Keyboard(_) => (false, true),
+            ClickEvent::Touch(click) => (click.long_press, !click.long_press),
+        };
+        if menu {
+            let position = event.position();
+            let _ = view.update(cx, |view, cx| {
+                view.open_copy_menu(position, Some(url.clone()), window, cx)
+            });
+        } else if open {
+            cx.open_url(url);
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_row(
     row: &Row,
@@ -1339,6 +1759,7 @@ fn render_row(
     forms: &QuestionForms,
     view: &Entity<Conversation>,
     cwd: &str,
+    remote: Option<(Rc<RowImages>, Vec<Shown>)>,
     cx: &mut App,
 ) -> AnyElement {
     let p = palette();
@@ -1398,15 +1819,14 @@ fn render_row(
                 .skip(*start)
                 .take(end - start + 1)
                 .collect();
-            let first = items.first().and_then(|i| parse_iso(&i.timestamp));
-            let last = items
-                .last()
-                .map(|i| i.timestamp.clone())
+            // A turn of one message, as an agent's own often is, has no
+            // length to show.
+            let footer = fleet::timeline::turn_footer(&items, 0, items.len().saturating_sub(1));
+            let duration = footer
+                .duration_secs
+                .map(display::short_duration)
                 .unwrap_or_default();
-            let duration = match (first, parse_iso(&last)) {
-                (Some(a), Some(b)) if b >= a => display::short_duration((b - a) / 1000),
-                _ => String::new(),
-            };
+            let last = footer.ended_at;
             let text: String = items
                 .iter()
                 .filter_map(|item| match &item.kind {
@@ -1424,22 +1844,10 @@ fn render_row(
                 .gap(px(8.))
                 .text_size(size::sm())
                 .text_color(p.extra_muted)
-                .child(
-                    div()
-                        .id(SharedString::from(format!(
-                            "copy-turn-{}-{start}",
-                            session_ref.agent_id
-                        )))
-                        .p(px(2.))
-                        .rounded(px(4.))
-                        .hover(|s| s.bg(p.surface1))
-                        .child(ui::icon("copy", 12., p.extra_muted))
-                        .on_click(move |_, _, cx| {
-                            cx.write_to_clipboard(gpui_kit::gpui::ClipboardItem::new_string(
-                                text.clone(),
-                            ));
-                        }),
-                )
+                .child(copy_button(
+                    format!("copy-turn-{}-{start}", session_ref.agent_id),
+                    text,
+                ))
                 .child(ago)
                 .when(!duration.is_empty(), |d| d.child("·").child(duration))
                 .into_any_element()
@@ -1461,7 +1869,7 @@ fn render_row(
                 cwd,
             )
         }
-        Row::Item { index, gap } => {
+        Row::Item { index, gap, .. } => {
             let Some(item) = timeline.items().nth(*index) else {
                 return div().into_any_element();
             };
@@ -1471,6 +1879,7 @@ fn render_row(
                 ItemKind::User {
                     text,
                     images: wires,
+                    image_files,
                     ..
                 } => div()
                     .w_full()
@@ -1494,34 +1903,45 @@ fn render_row(
                             .flex()
                             .flex_col()
                             .gap(px(8.))
-                            .children(
-                                images
-                                    .get(&item.id)
-                                    .into_iter()
-                                    .flat_map(|entry| entry.decoded.iter())
-                                    .map(|image| {
-                                        gpui_kit::gpui::img(image.clone())
-                                            .w(px(180.))
-                                            .h(px(140.))
-                                            .into_any_element()
-                                    }),
+                            .children(prompt_images(
+                                &item.id,
+                                images.get(&item.id).map(|entry| entry.decoded.as_slice()),
+                                remote.as_ref(),
+                                &session_ref.host,
+                                core,
+                            ))
+                            .when(
+                                text.is_empty() && !(wires.is_empty() && image_files.is_empty()),
+                                |d| d.child("Image attachment"),
                             )
-                            .when(text.is_empty() && !wires.is_empty(), |d| {
-                                d.child("Image attachment")
+                            // Selectable like a reply, within its turn.
+                            .when(!text.is_empty(), |d| {
+                                d.child(SelectableText::new(
+                                    SharedString::from(format!("prompt-{}", item.id)),
+                                    text.clone(),
+                                ))
                             })
-                            .child(text.clone())
-                            // When it was sent, tucked into the corner.
+                            // When it was sent, tucked into the corner, then
+                            // a copy of the whole prompt.
                             .child(
                                 div()
                                     .mt(px(-4.))
                                     .flex()
                                     .justify_end()
+                                    .items_center()
+                                    .gap(px(6.))
                                     .text_size(size::sm())
                                     .text_color(p.muted)
                                     .child(if pending {
                                         "Sending…".to_string()
                                     } else {
                                         crate::app::store::time_ago(&item.timestamp)
+                                    })
+                                    .when(!text.is_empty(), |d| {
+                                        d.child(copy_button(
+                                            format!("copy-prompt-{}", item.id),
+                                            text.clone(),
+                                        ))
                                     }),
                             ),
                     )
@@ -1531,11 +1951,25 @@ fn render_row(
                     // reply's state is brought up to date.
                     let (id, text) = (item.id.clone(), text.clone());
                     let state = reply_state(replies, &id, &text, cx);
+                    // Images saved on the daemon's host are read from there,
+                    // through Base's view: the component's has no resolver.
+                    let links = reply_links(view.downgrade());
+                    let view = match remote {
+                        Some((images, shown)) => gpui_kit::base::TextView::new(&state)
+                            .selectable(true)
+                            .image_source(reply_image_source(&images, &shown))
+                            .on_link_click(links)
+                            .into_any_element(),
+                        None => TextView::new(&state)
+                            .selectable(true)
+                            .on_link_click(links)
+                            .into_any_element(),
+                    };
                     div()
                         .w_full()
                         .text_size(size::content())
                         .text_color(p.foreground)
-                        .child(TextView::new(&state).selectable(true))
+                        .child(view)
                         .into_any_element()
                 }
                 ItemKind::Thought { text, loading } => {
@@ -1544,6 +1978,7 @@ fn render_row(
                         &item.id,
                         "brain",
                         "Thinking",
+                        None,
                         None,
                         *loading,
                         false,
@@ -1566,7 +2001,10 @@ fn render_row(
                     col.into_any_element()
                 }
                 ItemKind::Tool(tool) if tool.detail_type() == "plan" => plan_card(tool, &item.id),
-                ItemKind::Tool(tool) => tool_row(tool, &item.id, cwd, expanded, view),
+                ItemKind::Tool(tool) => {
+                    let host = &session_ref.host;
+                    tool_row(tool, &item.id, cwd, expanded, view, host, core, cx)
+                }
                 ItemKind::Todo {
                     items, activity, ..
                 } => {
@@ -1578,7 +2016,8 @@ fn render_row(
                     };
                     let open = expanded.borrow().contains(&item.id);
                     let header = tool_header(
-                        &item.id, icon_name, &text, None, false, false, true, open, expanded, view,
+                        &item.id, icon_name, &text, None, None, false, false, true, open, expanded,
+                        view,
                     );
                     let mut col = div().flex().flex_col().child(header);
                     if open {
@@ -1663,11 +2102,43 @@ fn render_row(
     }
 }
 
+/// An agent a row names, as a link that opens it; plain text when `host`,
+/// the conversation's own, does not know the agent.
+fn agent_link(id: &str, link: &AgentLink, host: &HostId, core: &Core, cx: &App) -> AnyElement {
+    let p = palette();
+    let known = core.agent_title(host, &link.id, cx);
+    let openable = known.is_some();
+    let label = div()
+        .id(SharedString::from(format!("agent-link-{id}")))
+        .min_w(px(0.))
+        // A long title leaves room for what the message says.
+        .max_w(relative(0.4))
+        .flex_shrink_0()
+        .truncate()
+        .text_color(with_alpha(p.foreground, 0.8))
+        .child(link.label(known));
+    if !openable {
+        return label.into_any_element();
+    }
+    let core = core.clone();
+    let (host, agent) = (host.clone(), link.id.clone());
+    label
+        .cursor_pointer()
+        .hover(|s| s.text_color(p.foreground).underline())
+        .on_click(move |_, _, cx| {
+            // Opening the agent, not unfolding the row.
+            cx.stop_propagation();
+            core.open_agent(&host, &agent, cx);
+        })
+        .into_any_element()
+}
+
 #[allow(clippy::too_many_arguments)]
 fn tool_header(
     id: &str,
     icon_name: &'static str,
     name: &str,
+    agent: Option<(AnyElement, bool)>,
     summary: Option<String>,
     running: bool,
     failed: bool,
@@ -1683,18 +2154,24 @@ fn tool_header(
     } else {
         ui::icon(icon_name, 12., p.muted).into_any_element()
     };
+    let name = div()
+        .flex_shrink_0()
+        .text_color(p.muted)
+        .child(name.to_string());
+    // "From planner" or "worker finished".
+    let (name, agent) = match agent {
+        Some((link, true)) => (link, Some(name.into_any_element())),
+        Some((link, false)) => (name.into_any_element(), Some(link)),
+        None => (name.into_any_element(), None),
+    };
     let label = div()
         .flex()
         .items_center()
         .gap(px(6.))
         .min_w(px(0.))
         .flex_1()
-        .child(
-            div()
-                .flex_shrink_0()
-                .text_color(p.muted)
-                .child(name.to_string()),
-        )
+        .child(name)
+        .children(agent)
         .when_some(summary, |d, summary| {
             d.child(
                 div()
@@ -1777,25 +2254,35 @@ fn tool_header(
         .into_any_element()
 }
 
+/// A tool call's one-line row, unfolding to its detail. A message from
+/// another agent, or a notice about one, names the agent on the same line
+/// ("From planner · …", "worker finished · …"), so it costs no height.
+#[allow(clippy::too_many_arguments)]
 fn tool_row(
     tool: &ToolCall,
     id: &str,
     cwd: &str,
     expanded: &Rc<std::cell::RefCell<HashSet<String>>>,
     view: &Entity<Conversation>,
+    host: &HostId,
+    core: &Core,
+    cx: &App,
 ) -> AnyElement {
     let p = palette();
     let ToolDisplay {
         name,
         summary,
         icon,
+        agent,
     } = display::tool_display(tool, cwd);
+    let agent = agent.map(|link| (agent_link(id, &link, host, core, cx), link.lead));
     let expandable = display::has_details(tool);
     let open = expandable && expanded.borrow().contains(id);
     let header = tool_header(
         id,
         ui::tool_icon_name(icon),
         &name,
+        agent,
         summary,
         tool.running(),
         tool.failed(),
@@ -1920,7 +2407,7 @@ fn plan_card(tool: &ToolCall, id: &str) -> AnyElement {
 
 fn permission_card(
     request: &Value,
-    host: &str,
+    host: &HostId,
     agent_id: &str,
     permission_id: &str,
     core: &Core,
@@ -1947,6 +2434,7 @@ fn permission_card(
             json!({"type": "unknown", "input": request["input"].clone(), "output": null})
         },
         metadata: Default::default(),
+        agent_message: None,
     };
     let plan_text = request["metadata"]["planText"]
         .as_str()
@@ -2030,7 +2518,7 @@ fn permission_card(
     let mut row = div().flex().gap(px(8.)).justify_end();
     for (action_id, label, allow, variant) in buttons {
         let core = core.clone();
-        let host = host.to_string();
+        let host = host.clone();
         let agent = agent_id.to_string();
         let permission = permission_id.to_string();
         let mut button = Button::new(SharedString::from(format!(

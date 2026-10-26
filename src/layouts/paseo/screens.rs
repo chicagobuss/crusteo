@@ -1,12 +1,12 @@
 //! Full-pane screens reached from the sidebar: hosts, new workspace, settings.
 
 use fleet::providers::Provider;
-use fleet::{Connection, HostConfig};
+use fleet::{Connection, HostConfig, HostId};
 use gpui_kit::base::{Disableable as _, Selectable as _};
 use gpui_kit::component::Sizable;
 use gpui_kit::component::button::{Button, ButtonGroup, ButtonVariants};
 use gpui_kit::component::color_picker::{ColorPicker, ColorPickerEvent, ColorPickerState};
-use gpui_kit::component::input::{Input, InputState, Textarea, TextareaState};
+use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
 use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_kit::component::slider::{Slider, SliderEvent, SliderState};
 use gpui_kit::component::switch::Switch;
@@ -18,10 +18,11 @@ use gpui_kit::prelude::FluentBuilder;
 use serde_json::json;
 
 use crate::app::notifications::{Corner, Route};
-use crate::app::store::uuid_v4;
+use crate::app::store::ProvidersState;
 use crate::app::{Core, Screen, Tab};
 use crate::theme::{palette, size};
 use crate::ui;
+use crate::widgets::workspace_form::{FormChanged, FormPicked, FormSubmit, WorkspaceForm};
 
 fn page(title: &str) -> gpui_kit::gpui::Div {
     let p = palette();
@@ -85,8 +86,13 @@ impl HostsScreen {
             .iter()
             .map(|h| h.config.clone())
             .collect();
+        // A name already saved edits that host, keeping its id; a new one
+        // gets an id when saved.
+        let id =
+            (hosts.iter().find(|h| h.name == name)).map_or_else(HostId::default, |h| h.id.clone());
         hosts.retain(|h| h.name != name);
         hosts.push(HostConfig {
+            id,
             name,
             endpoint: Some(endpoint),
             password: None,
@@ -103,10 +109,11 @@ impl HostsScreen {
 impl Render for HostsScreen {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette();
+        let reef = self.core.store.read(cx).reef.clone();
         let hosts = &self.core.store.read(cx).fleet.hosts;
         let mut list = card();
         for (i, host) in hosts.iter().enumerate() {
-            let name = host.config.name.clone();
+            let name = host.id().clone();
             let core = self.core.clone();
             let core_remove = self.core.clone();
             let detail = match &host.connection {
@@ -163,29 +170,45 @@ impl Render for HostsScreen {
                                 core.store.update(cx, |store, _| store.reconnect(&name));
                             }),
                     )
-                    .child({
-                        let remove = host.config.name.clone();
-                        Button::new(SharedString::from(format!("remove-{i}")))
-                            .label("Remove")
-                            .ghost()
-                            .small()
-                            .on_click(move |_, _, cx| {
-                                let hosts: Vec<HostConfig> = core_remove
-                                    .store
-                                    .read(cx)
-                                    .fleet
-                                    .hosts
-                                    .iter()
-                                    .map(|h| h.config.clone())
-                                    .filter(|h| h.name != remove)
-                                    .collect();
-                                core_remove
-                                    .store
-                                    .update(cx, |store, cx| store.set_hosts(hosts, cx));
-                            })
+                    .when(reef.is_none(), |row| {
+                        row.child({
+                            let remove = host.id().clone();
+                            Button::new(SharedString::from(format!("remove-{i}")))
+                                .label("Remove")
+                                .ghost()
+                                .small()
+                                .on_click(move |_, _, cx| {
+                                    let hosts: Vec<HostConfig> = core_remove
+                                        .store
+                                        .read(cx)
+                                        .fleet
+                                        .hosts
+                                        .iter()
+                                        .map(|h| h.config.clone())
+                                        .filter(|h| h.id != remove)
+                                        .collect();
+                                    core_remove
+                                        .store
+                                        .update(cx, |store, cx| store.set_hosts(hosts, cx));
+                                })
+                        })
                     }),
             );
         }
+        // In reef mode the list is Reef's: say whose, and how the last ask went.
+        let intro = match &reef {
+            None => "Each host is a Paseo daemon. Crusteo keeps a live connection to all of them at once.".to_string(),
+            Some(reef) => {
+                let synced = reef.synced_at.map_or_else(
+                    || "not yet".to_string(),
+                    |at| crate::app::store::time_ago(&crate::app::store::iso_from_millis(at)),
+                );
+                match &reef.error {
+                    Some(error) => format!("Hosts come from Reef at {}, which did not answer: {error}. These are the hosts it gave last ({synced}).", reef.url),
+                    None => format!("Hosts come from Reef at {} (last asked {synced}). Add or remove them there; this desktop connects to each daemon itself.", reef.url),
+                }
+            }
+        };
         page("Hosts").child(
             div()
                 .id("hosts-scroll")
@@ -195,30 +218,32 @@ impl Render for HostsScreen {
                 .flex()
                 .flex_col()
                 .gap(px(16.))
-                .child(div().text_size(size::sm()).text_color(p.muted).child(
-                    "Each host is a Paseo daemon. Crusteo keeps a live connection to all of them at once.",
-                ))
+                .child(div().text_size(size::sm()).text_color(p.muted).child(intro))
                 .child(list)
-                .child(
-                    card()
-                        .p(px(16.))
-                        .gap(px(8.))
-                        .child(div().text_color(p.foreground).child("Add host"))
-                        .child(
-                            div()
-                                .flex()
-                                .gap(px(8.))
-                                .child(div().w(px(200.)).child(Input::new(&self.name).small()))
-                                .child(div().flex_1().child(Input::new(&self.endpoint).small()))
-                                .child(
-                                    Button::new("add-host")
-                                        .label("Add")
-                                        .primary()
-                                        .small()
-                                        .on_click(cx.listener(|this, _, window, cx| this.add(window, cx))),
-                                ),
-                        ),
-                ),
+                .when(reef.is_none(), |page| {
+                    page.child(
+                        card()
+                            .p(px(16.))
+                            .gap(px(8.))
+                            .child(div().text_color(p.foreground).child("Add host"))
+                            .child(
+                                div()
+                                    .flex()
+                                    .gap(px(8.))
+                                    .child(div().w(px(200.)).child(Input::new(&self.name).small()))
+                                    .child(div().flex_1().child(Input::new(&self.endpoint).small()))
+                                    .child(
+                                        Button::new("add-host")
+                                            .label("Add")
+                                            .primary()
+                                            .small()
+                                            .on_click(cx.listener(|this, _, window, cx| {
+                                                this.add(window, cx)
+                                            })),
+                                    ),
+                            ),
+                    )
+                }),
         )
     }
 }
@@ -227,43 +252,95 @@ impl Render for HostsScreen {
 
 pub struct NewWorkspaceScreen {
     core: Core,
-    host: Option<String>,
-    project: Option<String>,
-    worktree: bool,
+    form: Entity<WorkspaceForm>,
     provider: Option<String>,
     prompt: Entity<TextareaState>,
     creating: bool,
     error: Option<String>,
 }
 
+/// The project a New workspace screen opens on: the one asked for, else,
+/// on the host asked for, the selected workspace's.
+fn screen_target(core: &Core, cx: &App) -> (Option<HostId>, Option<String>) {
+    let Screen::NewWorkspace { host, project } = core.nav.read(cx).screen.clone() else {
+        return (None, None);
+    };
+    if project.is_some() {
+        return (host, project);
+    }
+    let selected = core.nav.read(cx).selection.clone().and_then(|selection| {
+        let workspace =
+            (core.store.read(cx).fleet).workspace(&selection.host, &selection.workspace)?;
+        Some((selection.host.clone(), workspace.project_id.clone()))
+    });
+    match (host, selected) {
+        (Some(host), Some((on, project))) if host == on => (Some(host), Some(project)),
+        (None, Some((on, project))) => (Some(on), Some(project)),
+        (host, _) => (host, None),
+    }
+}
+
 impl NewWorkspaceScreen {
     pub fn new(core: Core, window: &mut Window, cx: &mut Context<Self>) -> Self {
         cx.observe(&core.store, |_, _, cx| cx.notify()).detach();
-        cx.observe(&core.nav, |this, nav, cx| {
-            if let Screen::NewWorkspace { host, project } = nav.read(cx).screen.clone()
-                && host.is_some()
-                && host != this.host
-            {
-                this.host = host;
-                this.project = project;
-                cx.notify();
+        cx.observe(&core.nav, |this, _, cx| {
+            // Opened again for another project, from a project's "+".
+            let (host, project) = screen_target(&this.core, cx);
+            if let (Some(host), Some(project)) = (host, project) {
+                let form = this.form.read(cx);
+                if form.host() != Some(&host) || form.project() != Some(project.as_str()) {
+                    this.form
+                        .update(cx, |form, cx| form.set_project(&host, &project, cx));
+                }
             }
         })
         .detach();
         let prompt = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .auto_grow(3, 12)
-                .placeholder("Describe the work for the first agent")
+                .submit_on_enter(true)
+                .placeholder("Describe the work for the first agent, or leave it blank")
         });
-        let (host, project) = match core.nav.read(cx).screen.clone() {
-            Screen::NewWorkspace { host, project } => (host, project),
-            _ => (None, None),
+        let (host, project) = screen_target(&core, cx);
+        let form = {
+            let core = core.clone();
+            cx.new(|cx| WorkspaceForm::new(core, host, project, Vec::new(), window, cx))
         };
+        cx.subscribe(&form, |this, form, _: &FormChanged, cx| {
+            if let Some(host) = form.read(cx).host().cloned() {
+                this.core
+                    .store
+                    .update(cx, |store, cx| store.ensure_providers(&host, cx));
+            }
+            this.error = None;
+            cx.notify();
+        })
+        .detach();
+        cx.subscribe_in(&form, window, |this, _, _: &FormPicked, window, cx| {
+            this.prompt.update(cx, |input, cx| input.focus(window, cx));
+        })
+        .detach();
+        cx.subscribe(&form, |this, _, _: &FormSubmit, cx| this.create(cx))
+            .detach();
+        cx.subscribe(
+            &prompt,
+            |this, prompt, event: &InputEvent, cx| match event {
+                InputEvent::Change => {
+                    let text = prompt.read(cx).value().to_string();
+                    this.form.update(cx, |form, cx| form.set_prompt(&text, cx));
+                }
+                InputEvent::PressEnter { shift: false, .. } => this.create(cx),
+                _ => {}
+            },
+        )
+        .detach();
+        if let Some(host) = form.read(cx).host().cloned() {
+            core.store
+                .update(cx, |store, cx| store.ensure_providers(&host, cx));
+        }
         Self {
             core,
-            host,
-            project,
-            worktree: true,
+            form,
             provider: None,
             prompt,
             creating: false,
@@ -272,92 +349,86 @@ impl NewWorkspaceScreen {
     }
 
     fn create(&mut self, cx: &mut Context<Self>) {
-        let picked = {
-            let store = self.core.store.read(cx);
-            let host = self.host.clone().filter(|h| {
-                store
-                    .fleet
-                    .host(h)
-                    .is_some_and(|h| h.connection.is_online())
-            });
-            let project = host.as_ref().and_then(|host| {
-                let id = self.project.as_ref()?;
-                store.fleet.host(host)?.directory.projects.get(id).cloned()
-            });
-            let providers: Vec<Provider> = host
-                .as_ref()
-                .and_then(|h| store.providers.get(h).cloned())
-                .unwrap_or_default();
-            (host, project, providers)
-        };
-        let (Some(host), project, providers) = picked else {
-            self.error = Some("Pick an online host".into());
-            cx.notify();
+        if self.creating {
             return;
-        };
-        let Some(project) = project else {
-            self.error = Some("Pick a project".into());
-            cx.notify();
-            return;
-        };
-        let provider = self
-            .provider
-            .clone()
-            .or_else(|| {
-                providers
-                    .iter()
-                    .find(|p| p.ready() && p.id == "claude")
-                    .map(|p| p.id.clone())
-            })
-            .or_else(|| providers.iter().find(|p| p.ready()).map(|p| p.id.clone()))
-            .unwrap_or_else(|| "claude".into());
-        let prompt = self.prompt.read(cx).value().trim().to_string();
-        let worktree = self.worktree && project.project_kind == "git";
-        let source = if worktree {
-            json!({ "kind": "worktree", "cwd": project.project_root_path, "projectId": project.project_id })
-        } else {
-            json!({ "kind": "directory", "path": project.project_root_path, "projectId": project.project_id })
-        };
-        let mut message = json!({
-            "type": "workspace.create.request",
-            "idempotencyKey": uuid_v4(),
-            "source": source,
-        });
-        if !prompt.is_empty() {
-            message["agent"] = json!({
-                "config": { "provider": provider, "cwd": project.project_root_path },
-                "initialPrompt": prompt,
-                "clientMessageId": uuid_v4(),
-                "labels": {},
-            });
-            message["firstAgentContext"] = json!({ "prompt": prompt });
         }
+        let plan = match self.form.read(cx).plan(cx) {
+            Ok(plan) => plan,
+            Err(error) => {
+                self.error = Some(error);
+                cx.notify();
+                return;
+            }
+        };
+        let prompt = self.prompt.read(cx).value().trim().to_string();
+        let agent = if prompt.is_empty() {
+            None
+        } else {
+            let store = self.core.store.read(cx);
+            let providers: Vec<Provider> = (store.providers.get(&plan.host).cloned())
+                .unwrap_or_default()
+                .into_iter()
+                .filter(Provider::ready)
+                .collect();
+            let provider = (self.provider.as_ref())
+                .and_then(|id| providers.iter().find(|p| &p.id == id))
+                .or_else(|| providers.iter().find(|p| p.id == "claude"))
+                .or_else(|| providers.first());
+            let Some(provider) = provider else {
+                self.error = Some(match store.providers_state(&plan.host) {
+                    ProvidersState::Ready => format!("No ready providers on {}", plan.host_name),
+                    state => format!("{}: {}", plan.host_name, state.label()),
+                });
+                cx.notify();
+                return;
+            };
+            let model = provider.default_model();
+            let config = fleet::creation::agent_config(
+                provider,
+                model.map(|m| m.id.as_str()),
+                model.and_then(|m| m.default_thinking.as_deref()),
+                None,
+                &plan.root,
+            );
+            Some((
+                config,
+                fleet::prompt::Prompt {
+                    text: prompt,
+                    ..Default::default()
+                },
+            ))
+        };
         self.creating = true;
         self.error = None;
         cx.notify();
-        let task = self.core.store.read(cx).request(&host, message, cx);
-        let nav = self.core.nav.clone();
+        let task = self.core.store.update(cx, |store, cx| {
+            store.create_workspace(&plan, agent, None, cx)
+        });
+        let (nav, host) = (self.core.nav.clone(), plan.host.clone());
         cx.spawn(async move |this: WeakEntity<Self>, cx| {
             let result = task.await;
             let _ = this.update(cx, |this, cx| {
                 this.creating = false;
                 match result {
-                    Ok(payload) if payload["error"].is_string() => {
-                        this.error = payload["error"].as_str().map(str::to_string);
-                    }
-                    Ok(payload) => {
-                        let workspace = payload["workspace"]["id"].as_str().map(str::to_string);
-                        let agent = payload["agent"]["id"].as_str().map(str::to_string);
-                        if let Some(workspace) = workspace {
-                            nav.update(cx, |nav, cx| {
-                                nav.select(&host, &workspace, cx);
-                                if let Some(agent) = agent {
-                                    nav.focus_tab(
-                                        &format!("{host}:{workspace}"),
-                                        Tab::Agent(agent),
-                                        cx,
-                                    );
-                                }
+                    Ok(created) => {
+                        this.form.update(cx, |form, cx| form.remember(cx));
+                        let workspace = created.workspace.clone();
+                        nav.update(cx, |nav, cx| {
+                            nav.select(&host, &workspace, cx);
+                            if let Ok(Some(agent)) = &created.agent {
+                                nav.focus_tab(
+                                    &format!("{host}:{workspace}"),
+                                    Tab::Agent(agent.clone()),
+                                    cx,
+                                );
+                            }
+                        });
+                        if let Err(error) = created.agent {
+                            this.core.store.update(cx, |store, cx| {
+                                store.toast(
+                                    format!("The workspace is made, but its agent did not start: {error}"),
+                                    cx,
+                                )
                             });
                         }
                     }
@@ -373,43 +444,8 @@ impl NewWorkspaceScreen {
 impl Render for NewWorkspaceScreen {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette();
+        let host = self.form.read(cx).host().cloned();
         let store = self.core.store.read(cx);
-        let online: Vec<String> = store
-            .fleet
-            .hosts
-            .iter()
-            .filter(|h| h.connection.is_online())
-            .map(|h| h.config.name.clone())
-            .collect();
-        if self.host.is_none() {
-            self.host = online.first().cloned();
-        }
-        let host = self.host.clone();
-        let projects: Vec<(String, String, String)> = host
-            .as_ref()
-            .and_then(|h| store.fleet.host(h))
-            .map(|h| {
-                let mut list: Vec<_> = h
-                    .directory
-                    .projects
-                    .values()
-                    .map(|p| (p.project_id.clone(), p.name(), p.project_kind.clone()))
-                    .collect();
-                list.sort_by(|a, b| fleet::sidebar::natural(&a.1, &b.1));
-                list
-            })
-            .unwrap_or_default();
-        let project_label = self
-            .project
-            .as_ref()
-            .and_then(|id| projects.iter().find(|p| &p.0 == id))
-            .map(|p| p.1.clone())
-            .unwrap_or_else(|| "Choose a project".into());
-        let is_git = self
-            .project
-            .as_ref()
-            .and_then(|id| projects.iter().find(|p| &p.0 == id))
-            .is_some_and(|p| p.2 == "git");
         let providers: Vec<Provider> = host
             .as_ref()
             .and_then(|h| store.providers.get(h).cloned())
@@ -417,16 +453,7 @@ impl Render for NewWorkspaceScreen {
             .into_iter()
             .filter(Provider::ready)
             .collect();
-        if let Some(h) = &host
-            && !store.providers.contains_key(h)
-        {
-            let h = h.clone();
-            let core = self.core.clone();
-            cx.defer(move |cx| {
-                core.store
-                    .update(cx, |store, cx| store.ensure_providers(&h, cx))
-            });
-        }
+        let state = host.as_ref().map(|h| store.providers_state(h));
         let provider_label = self
             .provider
             .clone()
@@ -443,55 +470,14 @@ impl Render for NewWorkspaceScreen {
                     .find(|p| p.id == id)
                     .map(|p| p.label.clone())
             })
-            .unwrap_or_else(|| "Provider".into());
+            .unwrap_or_else(|| {
+                state
+                    .as_ref()
+                    .map_or("Provider", ProvidersState::label)
+                    .to_string()
+            });
 
         let this = cx.entity().downgrade();
-        let host_menu = {
-            let this = this.clone();
-            let online = online.clone();
-            Button::new("nw-host")
-                .label(host.clone().unwrap_or_else(|| "No host online".into()))
-                .small()
-                .dropdown_menu(move |mut menu, _, _| {
-                    for name in &online {
-                        let this = this.clone();
-                        let name = name.clone();
-                        menu = menu.item(PopupMenuItem::new(name.clone()).on_click(
-                            move |_, _, cx| {
-                                let name = name.clone();
-                                let _ = this.update(cx, |this, cx| {
-                                    this.host = Some(name);
-                                    this.project = None;
-                                    cx.notify();
-                                });
-                            },
-                        ));
-                    }
-                    menu
-                })
-        };
-        let project_menu = {
-            let this = this.clone();
-            Button::new("nw-project")
-                .label(project_label)
-                .small()
-                .dropdown_menu(move |mut menu, _, _| {
-                    for (id, name, _) in &projects {
-                        let this = this.clone();
-                        let id = id.clone();
-                        menu = menu.item(PopupMenuItem::new(name.clone()).on_click(
-                            move |_, _, cx| {
-                                let id = id.clone();
-                                let _ = this.update(cx, |this, cx| {
-                                    this.project = Some(id);
-                                    cx.notify();
-                                });
-                            },
-                        ));
-                    }
-                    menu.max_h(px(400.))
-                })
-        };
         let provider_menu = {
             let this = this.clone();
             Button::new("nw-provider")
@@ -514,7 +500,6 @@ impl Render for NewWorkspaceScreen {
                     menu
                 })
         };
-        let worktree = self.worktree;
 
         page("New workspace").child(
             div().flex_1().flex().justify_center().p(px(24.)).child(
@@ -524,51 +509,7 @@ impl Render for NewWorkspaceScreen {
                     .flex()
                     .flex_col()
                     .gap(px(16.))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(8.))
-                            .child(div().w(px(80.)).text_color(p.muted).child("Host"))
-                            .child(host_menu),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(8.))
-                            .child(div().w(px(80.)).text_color(p.muted).child("Project"))
-                            .child(project_menu),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(8.))
-                            .child(div().w(px(80.)).text_color(p.muted).child("Isolation"))
-                            .child(
-                                Button::new("nw-local")
-                                    .label("Local checkout")
-                                    .small()
-                                    .when(!worktree || !is_git, |b| b.primary())
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.worktree = false;
-                                        cx.notify();
-                                    })),
-                            )
-                            .when(is_git, |d| {
-                                d.child(
-                                    Button::new("nw-worktree")
-                                        .label("New worktree")
-                                        .small()
-                                        .when(worktree, |b| b.primary())
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.worktree = true;
-                                            cx.notify();
-                                        })),
-                                )
-                            }),
-                    )
+                    .child(self.form.clone())
                     .child(
                         div()
                             .flex()
@@ -594,13 +535,24 @@ impl Render for NewWorkspaceScreen {
                         d.child(div().text_color(p.status_danger).child(e))
                     })
                     .child(
-                        div().flex().justify_end().child(
-                            Button::new("nw-create")
-                                .label("Create workspace")
-                                .primary()
-                                .loading(self.creating)
-                                .on_click(cx.listener(|this, _, _, cx| this.create(cx))),
-                        ),
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(8.))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .text_size(size::sm())
+                                    .text_color(p.extra_muted)
+                                    .child("Enter creates · Shift+Enter for a new line · a blank prompt makes the workspace alone"),
+                            )
+                            .child(
+                                Button::new("nw-create")
+                                    .label("Create workspace")
+                                    .primary()
+                                    .loading(self.creating)
+                                    .on_click(cx.listener(|this, _, _, cx| this.create(cx))),
+                            ),
                     ),
             ),
         )
@@ -794,10 +746,21 @@ impl Render for SettingsScreen {
         let colors = nav.read(cx).colored_lanes;
         let recency = nav.read(cx).recency_headers;
         let box_single = nav.read(cx).box_single_workspaces;
+        let show_background = nav.read(cx).show_background();
         let colors_nav = nav.clone();
         let recency_nav = nav.clone();
         let box_nav = nav.clone();
+        let background_nav = nav.clone();
         let preferences = card()
+            .child(preference_toggle(
+                "show-background",
+                "Show background",
+                "List background workspaces, which Paseo 0.12 keeps out of its sidebar, and their agents in every view, tagged “background”.",
+                show_background,
+                move |checked, _, cx| {
+                    background_nav.update(cx, |nav, cx| nav.set_show_background(*checked, cx))
+                },
+            ))
             .child(preference_toggle(
                 "follow-relabel",
                 "Follow cards after relabeling",
@@ -1029,7 +992,7 @@ impl Render for SettingsScreen {
 
 #[derive(Clone)]
 struct HistoryRow {
-    host: String,
+    host: HostId,
     agent: fleet::Agent,
     workspace_name: String,
 }
@@ -1073,7 +1036,7 @@ impl HistoryScreen {
         self.generation += 1;
         let generation = self.generation;
         let query = self.search.read(cx).value().trim().to_string();
-        let hosts: Vec<String> = self
+        let hosts: Vec<HostId> = self
             .core
             .store
             .read(cx)
@@ -1081,7 +1044,7 @@ impl HistoryScreen {
             .hosts
             .iter()
             .filter(|h| h.connection.is_online())
-            .map(|h| h.config.name.clone())
+            .map(|h| h.id().clone())
             .collect();
         self.rows.clear();
         self.loading = hosts.len();
@@ -1173,7 +1136,14 @@ impl Render for HistoryScreen {
         for (i, row) in self.rows.clone().into_iter().enumerate() {
             let archived = row.agent.archived_at.is_some();
             let subtitle = [
-                multi.then(|| row.host.clone()),
+                multi.then(|| {
+                    self.core
+                        .store
+                        .read(cx)
+                        .fleet
+                        .host_name(&row.host)
+                        .to_string()
+                }),
                 Some(row.workspace_name.clone()).filter(|s| !s.is_empty()),
                 Some(row.agent.provider_id().to_string()),
                 row.agent

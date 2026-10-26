@@ -19,6 +19,17 @@ pub fn picker(
     width: Pixels,
     on_pick: impl Fn(usize, &mut Window, &mut App) + 'static,
 ) -> Popover {
+    picker_titled(label, "Label color", current, width, on_pick)
+}
+
+/// [`picker`] headed `heading`, for what the colour is of.
+pub fn picker_titled(
+    label: &str,
+    heading: &'static str,
+    current: usize,
+    width: Pixels,
+    on_pick: impl Fn(usize, &mut Window, &mut App) + 'static,
+) -> Popover {
     let on_pick = std::rc::Rc::new(on_pick);
     Popover::new(SharedString::from(format!("lane-color-{label}")))
         .anchor(Anchor::TopRight)
@@ -27,8 +38,8 @@ pub fn picker(
             Button::new(SharedString::from(format!("lane-color-trigger-{label}")))
                 .ghost()
                 .xsmall()
-                .tooltip("Choose label color")
-                .accessibility_label("Choose label color")
+                .tooltip(format!("Choose {}", heading.to_lowercase()))
+                .accessibility_label(format!("Choose {}", heading.to_lowercase()))
                 .child(
                     div()
                         .size(px(12.))
@@ -52,7 +63,7 @@ pub fn picker(
                     div()
                         .text_size(size::sm())
                         .text_color(palette().muted)
-                        .child("Label color"),
+                        .child(heading),
                 )
                 .child(div().flex().flex_wrap().gap(px(4.)).children(
                     LANE_COLORS.iter().enumerate().map(|(index, (name, hex))| {

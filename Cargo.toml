@@ -5,6 +5,9 @@ resolver = "3"
 exclude = ["vendor"]
 
 [workspace.package]
+# The release version, which a release tag must match. crusteo, reef and
+# burrow all report it.
+version = "0.1.0-beta.1"
 edition = "2024"
 license = "Apache-2.0"
 repository = "https://github.com/chicagobuss/crusteo"
@@ -20,10 +23,31 @@ fleet = { path = "crates/fleet" }
 term = { path = "crates/term" }
 usage-source = { path = "crates/usage-source" }
 sampler = { path = "crates/sampler" }
+# Burrow: a daemon that speaks the Paseo protocol.
+burrow-protocol = { path = "crates/burrow-protocol" }
+burrow-daemon = { path = "crates/burrow-daemon" }
+burrow-provider = { path = "crates/burrow-provider" }
+burrow-provider-claude = { path = "crates/burrow-provider-claude" }
+burrow-provider-codex = { path = "crates/burrow-provider-codex" }
+burrow-provider-antigravity = { path = "crates/burrow-provider-antigravity" }
+burrow-provider-pi = { path = "crates/burrow-provider-pi" }
+burrow-provider-acp = { path = "crates/burrow-provider-acp" }
+anyhow = "1.0.104"
+clap = { version = "4.6.7", features = ["derive", "env"] }
+futures-util = { version = "0.3.34", default-features = false, features = ["sink", "std"] }
+gethostname = "1.1.0"
+sha2 = "0.10.9"
+thiserror = "2.0.21"
+time = { version = "0.3.55", features = ["formatting", "macros", "parsing"] }
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "net", "sync", "time", "signal", "process", "io-util"] }
+tokio-tungstenite = "0.28"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+uuid = { version = "1.26.1", features = ["v4"] }
 
 [package]
 name = "crusteo"
-version = "0.1.0-alpha.6"
+version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -56,7 +80,7 @@ embed-resource = "3.0.11"
 mimalloc.workspace = true
 # The system's window border, colored to match crusteo's own.
 raw-window-handle = "0.6"
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Dwm"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Dwm", "Win32_System_Console"] }
 
 # GPUI with crusteo's performance fixes; see vendor/gpui-pre/PATCHES.md.
 [patch.crates-io]

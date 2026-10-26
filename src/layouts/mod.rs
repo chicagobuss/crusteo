@@ -2,6 +2,7 @@
 //! entry here; every layout gets the same `Core`.
 
 pub mod board;
+pub mod columns;
 pub mod fleet;
 pub mod lanes;
 pub mod paseo;

@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Reef as a launchd agent on macOS: started at login, restarted if it
+  stops. See docs/reef/install.md (INSTALL.md in the release archive).
+
+    cp dev.crusteo.reef.plist ~/Library/LaunchAgents/
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/dev.crusteo.reef.plist
+    launchctl bootout gui/$(id -u)/dev.crusteo.reef        # to stop it
+
+  It runs from /Users/user/reef, which holds the binary and hosts.json;
+  replace /Users/user with your home folder. Its output, the first device
+  token included, goes to reef.log there.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>dev.crusteo.reef</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/user/reef/reef</string>
+    <string>/Users/user/reef/hosts.json</string>
+    <!-- Every network the Mac is on, over plain HTTP. Leave these two out to
+         keep it on 127.0.0.1 behind `tailscale serve`. -->
+    <string>--bind</string>
+    <string>0.0.0.0</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/Users/user/reef</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>/Users/user/reef/reef.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/user/reef/reef.log</string>
+</dict>
+</plist>

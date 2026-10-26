@@ -1,0 +1,36 @@
+# Reef as a systemd system service: started at boot, restarted if it
+# stops. See docs/reef/install.md (INSTALL.md in the release archive).
+#
+#   sudo cp reef.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now reef
+#   journalctl -u reef -f            # its output, the first device token included
+#
+# It runs as `user`, from /home/user/reef, which holds the binary and
+# hosts.json. Reef keeps its own files (client id, device tokens,
+# reef-settings.json) in the `reef-data` folder it makes beside hosts.json; a `hub`
+# folder there from crusteo-hub becomes it on first start. Replace `user` and
+# the paths with your own.
+
+[Unit]
+Description=Reef: the agent fleet, for phones
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=user
+WorkingDirectory=/home/user/reef
+# --bind 0.0.0.0 serves every network the machine is on, over plain HTTP; leave
+# it out to keep Reef on 127.0.0.1 behind `tailscale serve`. Phones then need
+# a device token, printed on first start. Add --open to do without tokens, but
+# only on a network where reaching Reef at all is the lock.
+#
+# $REEF_ARGS adds more options without editing this line; see usage.conf.
+Environment=REEF_ARGS=
+ExecStart=/home/user/reef/reef /home/user/reef/hosts.json --bind 0.0.0.0 $REEF_ARGS
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -11,6 +11,8 @@ use std::collections::HashSet;
 
 use serde_json::{Map, Value, json};
 
+use crate::agent_messages::AgentMessage;
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ToolCall {
     pub identity: String,
@@ -20,6 +22,9 @@ pub struct ToolCall {
     pub error: Option<Value>,
     pub detail: Value,
     pub metadata: Map<String, Value>,
+    /// Set when the call stands for a message from another agent, or a
+    /// notice about one, with who sent it.
+    pub agent_message: Option<Box<AgentMessage>>,
 }
 
 impl ToolCall {
@@ -71,6 +76,9 @@ pub enum ItemKind {
     User {
         text: String,
         images: Vec<crate::prompt::ImageAttachment>,
+        /// Images the daemon kept as files, read on demand; see
+        /// [`crate::images`].
+        image_files: Vec<crate::images::ImageFile>,
         seq: Option<u64>,
         client_message_id: Option<String>,
         message_id: Option<String>,
@@ -83,7 +91,8 @@ pub enum ItemKind {
         text: String,
         loading: bool,
     },
-    Tool(ToolCall),
+    /// Boxed: a call is several times the size of any other item.
+    Tool(Box<ToolCall>),
     Todo {
         provider: String,
         items: Vec<TodoEntry>,
@@ -190,6 +199,15 @@ impl Timeline {
         self.tail.len() + self.head.len()
     }
 
+    /// The text of the newest assistant reply loaded that has any.
+    pub fn newest_reply(&self) -> Option<&str> {
+        let mut newest_first = self.tail.iter().chain(&self.head).rev();
+        newest_first.find_map(|item| match &item.kind {
+            ItemKind::Assistant { text, .. } if !text.trim().is_empty() => Some(text.as_str()),
+            _ => None,
+        })
+    }
+
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
@@ -282,6 +300,7 @@ impl Timeline {
             kind: ItemKind::User {
                 text: prompt.text.clone(),
                 images: prompt.images.clone(),
+                image_files: Vec::new(),
                 seq: None,
                 client_message_id: Some(id.to_string()),
                 message_id: None,
@@ -619,7 +638,11 @@ impl Timeline {
             finalize_thoughts(&mut self.head);
             return;
         }
-        let item = &event["item"];
+        // A prompt in an agent message's envelope is shown as 0.12 shows it.
+        let projected = (event["item"]["type"] == "user_message")
+            .then(|| crate::agent_messages::project_user_message(&event["item"]))
+            .flatten();
+        let item = projected.as_ref().unwrap_or(&event["item"]);
         let item_type = item["type"].as_str().unwrap_or_default();
         let turn_id = event["turnId"].as_str().map(str::to_string);
         let provider = event["provider"].as_str().unwrap_or_default();
@@ -861,11 +884,14 @@ impl Timeline {
         let text = item["text"].as_str().unwrap_or_default().to_string();
         let client_id = item["clientMessageId"].as_str().map(str::to_string);
         let message_id = item["messageId"].as_str().map(str::to_string);
-        let incoming_images: Vec<crate::prompt::ImageAttachment> = item["images"]
-            .as_array()
-            .into_iter()
-            .flatten()
+        let listed = item["images"].as_array().map_or(&[][..], Vec::as_slice);
+        let incoming_images: Vec<crate::prompt::ImageAttachment> = listed
+            .iter()
             .filter_map(|image| serde_json::from_value(image.clone()).ok())
+            .collect();
+        let incoming_files: Vec<crate::images::ImageFile> = listed
+            .iter()
+            .filter_map(crate::images::ImageFile::listed)
             .collect();
         let position = self.tail.iter().position(|existing| match &existing.kind {
             ItemKind::User {
@@ -892,6 +918,7 @@ impl Timeline {
                 client_message_id,
                 message_id: existing_message,
                 images,
+                image_files,
                 seq: existing_seq,
                 ..
             } = &mut existing.kind
@@ -899,6 +926,9 @@ impl Timeline {
                 *existing_seq = seq.or(*existing_seq);
                 if !incoming_images.is_empty() {
                     *images = incoming_images.clone();
+                }
+                if !incoming_files.is_empty() {
+                    *image_files = incoming_files.clone();
                 }
                 if client_message_id.is_none() {
                     *client_message_id = client_id.clone();
@@ -910,7 +940,7 @@ impl Timeline {
             existing.turn_id = turn_id.or(existing.turn_id);
             existing.timestamp = timestamp.to_string();
             self.tail.push(existing);
-        } else if !text.is_empty() || !incoming_images.is_empty() {
+        } else if !text.is_empty() || !incoming_images.is_empty() || !incoming_files.is_empty() {
             let id = client_id
                 .clone()
                 .or_else(|| message_id.clone())
@@ -922,6 +952,7 @@ impl Timeline {
                 kind: ItemKind::User {
                     text,
                     images: incoming_images,
+                    image_files: incoming_files,
                     seq,
                     client_message_id: client_id.clone(),
                     message_id,
@@ -993,6 +1024,7 @@ impl Timeline {
                 .or_else(|| item["error"].as_str().map(|s| Value::String(s.to_string()))),
             detail,
             metadata: item["metadata"].as_object().cloned().unwrap_or_default(),
+            agent_message: AgentMessage::from_wire(&item["agentMessage"]).map(Box::new),
         };
         let item_id = format!("agent_tool_{identity}");
         if let Some(existing) = self
@@ -1010,7 +1042,7 @@ impl Timeline {
             id: item_id,
             turn_id: turn_id.map(str::to_string),
             timestamp: timestamp.to_string(),
-            kind: ItemKind::Tool(incoming),
+            kind: ItemKind::Tool(Box::new(incoming)),
         });
     }
 
@@ -1208,12 +1240,171 @@ fn merge_tool(current: &mut ToolCall, incoming: ToolCall) {
     for (key, value) in incoming.metadata {
         current.metadata.insert(key, value);
     }
+    if incoming.agent_message.is_some() {
+        current.agent_message = incoming.agent_message;
+    }
     current.name = incoming.name;
+}
+
+/// Each item's turn, as the index of the turn's first item. A turn starts at
+/// a user message, or where the turn id changes: an agent that resumes
+/// itself, as an orchestrator does, runs turns of its own that no message
+/// starts. Items without an id belong to the turn they fall in.
+pub fn turn_starts(items: &[&Item]) -> Vec<usize> {
+    let mut starts = Vec::with_capacity(items.len());
+    // The open turn: where it starts, and its id once known.
+    let mut open: Option<(usize, Option<&str>)> = None;
+    for (index, item) in items.iter().enumerate() {
+        let id = item.turn_id.as_deref();
+        let begins = matches!(item.kind, ItemKind::User { .. })
+            || match open {
+                None => true,
+                Some((_, Some(current))) => id.is_some_and(|id| id != current),
+                Some((_, None)) => false,
+            };
+        if begins {
+            open = Some((index, id));
+        } else if let Some((_, current @ None)) = &mut open {
+            // A message sent from here has no id until its turn begins.
+            *current = id;
+        }
+        starts.push(open.map_or(index, |(start, _)| start));
+    }
+    starts
+}
+
+/// The finished turns among `items`, as the first and last index of each,
+/// for a footer after each one; turns are as [`turn_starts`] has them. A
+/// turn the user started counts only once something answered it; the last
+/// turn only once it has ended.
+pub fn finished_turns(items: &[&Item], running: bool) -> Vec<(usize, usize)> {
+    let starts = turn_starts(items);
+    let mut turns = Vec::new();
+    let mut index = 0;
+    while index < starts.len() {
+        let start = starts[index];
+        let end = (index..starts.len())
+            .take_while(|&i| starts[i] == start)
+            .last()
+            .unwrap_or(index);
+        let last = end + 1 == starts.len();
+        let by_user = matches!(items[start].kind, ItemKind::User { .. });
+        if !(by_user && end == start) && !(last && running) {
+            turns.push((start, end));
+        }
+        index = end + 1;
+    }
+    turns
+}
+
+/// What a finished turn's footer shows: when it ended and how long it took.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Footer {
+    /// The last item's timestamp.
+    pub ended_at: String,
+    /// Seconds from the first item to the last; `None` for a turn shorter
+    /// than a second, as a turn of one message is.
+    pub duration_secs: Option<i64>,
+}
+
+/// The footer of the turn `items[start..=end]`, as [`finished_turns`]
+/// gives them.
+pub fn turn_footer(items: &[&Item], start: usize, end: usize) -> Footer {
+    let ended_at = items
+        .get(end)
+        .map(|item| item.timestamp.clone())
+        .unwrap_or_default();
+    let first = items
+        .get(start)
+        .and_then(|item| crate::clock::parse_iso(&item.timestamp));
+    let duration_secs = match (first, crate::clock::parse_iso(&ended_at)) {
+        (Some(a), Some(b)) if b >= a + 1000 => Some((b - a) / 1000),
+        _ => None,
+    };
+    Footer {
+        ended_at,
+        duration_secs,
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn turn_item(kind: &str, turn: Option<&str>) -> Item {
+        let kind = match kind {
+            "user" => ItemKind::User {
+                text: "do it".into(),
+                images: Vec::new(),
+                image_files: Vec::new(),
+                seq: None,
+                client_message_id: None,
+                message_id: None,
+            },
+            _ => ItemKind::Assistant {
+                text: "done".into(),
+                message_id: None,
+            },
+        };
+        Item {
+            id: String::new(),
+            turn_id: turn.map(str::to_string),
+            timestamp: String::new(),
+            kind,
+        }
+    }
+
+    #[test]
+    fn every_turn_ends_with_a_footer_even_ones_no_message_started() {
+        let items = [
+            turn_item("user", Some("f1")),
+            turn_item("assistant", Some("f1")),
+            turn_item("assistant", Some("auto-2")),
+            turn_item("assistant", None),
+            turn_item("assistant", Some("auto-3")),
+            turn_item("user", Some("f4")),
+            turn_item("assistant", Some("f4")),
+        ];
+        let items: Vec<&Item> = items.iter().collect();
+        assert_eq!(
+            finished_turns(&items, false),
+            [(0, 1), (2, 3), (4, 4), (5, 6)]
+        );
+        // The turn still running has none yet.
+        assert_eq!(finished_turns(&items, true), [(0, 1), (2, 3), (4, 4)]);
+    }
+
+    #[test]
+    fn a_footer_has_a_duration_only_from_a_second_up() {
+        let mut items = [
+            turn_item("user", Some("f1")),
+            turn_item("assistant", Some("f1")),
+            turn_item("assistant", Some("auto-2")),
+        ];
+        items[0].timestamp = "2026-10-13T09:00:00.000Z".into();
+        items[1].timestamp = "2026-10-13T09:01:12.000Z".into();
+        items[2].timestamp = "2026-10-13T09:05:00.400Z".into();
+        let items: Vec<&Item> = items.iter().collect();
+        let footer = turn_footer(&items, 0, 1);
+        assert_eq!(footer.ended_at, "2026-10-13T09:01:12.000Z");
+        assert_eq!(footer.duration_secs, Some(72));
+        assert_eq!(turn_footer(&items, 2, 2).duration_secs, None);
+    }
+
+    #[test]
+    fn a_message_takes_its_turns_id_and_unanswered_ones_have_no_footer() {
+        let items = [
+            turn_item("assistant", None),
+            turn_item("user", None),
+            turn_item("assistant", Some("f2")),
+            turn_item("assistant", Some("f2")),
+            turn_item("user", Some("f3")),
+            turn_item("user", Some("f4")),
+        ];
+        let items: Vec<&Item> = items.iter().collect();
+        assert_eq!(finished_turns(&items, false), [(0, 0), (1, 3)]);
+        assert_eq!(turn_starts(&items), [0, 1, 1, 1, 4, 5]);
+    }
 
     #[test]
     fn typed_detail_survives_unknown_update() {
@@ -1246,6 +1437,47 @@ mod tests {
         };
         assert_eq!(tool.detail["command"], "ls");
         assert_eq!(tool.status, "completed");
+    }
+
+    #[test]
+    fn agent_messages_keep_their_sender() {
+        let mut tl = Timeline::default();
+        let entry = |seq: u64, turn: &str, item: Value| json!({"item": item, "turnId": turn, "timestamp": "t", "seqStart": seq, "seqEnd": seq});
+        tl.apply_page(&json!({"direction": "tail", "epoch": "e", "window": {"maxSeq": 3},
+            "startCursor": {"seq": 1}, "endCursor": {"seq": 3}, "entries": [
+            // Paseo 0.12's projection.
+            entry(1, "t1", json!({"type": "tool_call", "callId": "paseo-agent-message:m1",
+                "name": "agent_message", "status": "completed", "error": null,
+                "detail": {"type": "plain_text", "text": "Review it", "icon": "bot"},
+                "agentMessage": {"event": "message", "sender": {"id": "p1", "title": "planner"}, "text": "Review it"}})),
+            // The same from a replayed history: still tagged.
+            entry(2, "t2", json!({"type": "user_message", "messageId": "u2", "text":
+                "<paseo-system version=\"1\" kind=\"agent-notification\" source-agent-id=\"w1\" message-id=\"m2\" event=\"finished\">\nAgent w1 (worker) finished.\n</paseo-system>"})),
+            // An older daemon: a plain prompt, with no sender to show.
+            entry(3, "t3", json!({"type": "user_message", "messageId": "u3", "text": "Review it too"})),
+        ]}));
+        let kinds: Vec<_> = tl.items().map(|item| &item.kind).collect();
+        assert_eq!(kinds.len(), 3);
+        let ItemKind::Tool(first) = kinds[0] else {
+            panic!("{:?}", kinds[0])
+        };
+        let message = first.agent_message.as_ref().unwrap();
+        assert_eq!(
+            (message.sender_id.as_str(), message.sender_title.as_deref()),
+            ("p1", Some("planner"))
+        );
+        let ItemKind::Tool(second) = kinds[1] else {
+            panic!("{:?}", kinds[1])
+        };
+        assert_eq!(
+            second.agent_message.as_ref().unwrap().event,
+            crate::agent_messages::AgentEvent::Finished
+        );
+        assert_eq!(tl.items().nth(1).unwrap().turn_id.as_deref(), Some("t2"));
+        assert!(matches!(kinds[2], ItemKind::User { text, .. } if text == "Review it too"));
+        // A notice starts no turn of the user's, but its own.
+        let items: Vec<_> = tl.items().collect();
+        assert_eq!(turn_starts(&items), [0, 1, 2]);
     }
 
     #[test]
@@ -1339,6 +1571,45 @@ mod tests {
         assert!(
             matches!(&tl.items().next().unwrap().kind, ItemKind::User { seq: Some(1), images, .. } if images.len() == 1)
         );
+    }
+
+    #[test]
+    fn kept_image_files_are_listed_beside_inline_images() {
+        use crate::images::ImageFile;
+        use crate::prompt::{ImageAttachment, Prompt};
+        let kept = |name: &str| json!({"path": format!("/srv/attachments/{name}.png"), "mimeType": "image/png"});
+        let file = |name: &str| ImageFile {
+            cwd: "/".into(),
+            path: format!("/srv/attachments/{name}.png"),
+        };
+        // From another client: only the files the daemon kept.
+        let mut tl = Timeline::default();
+        tl.apply_page(&json!({"direction":"tail", "epoch":"e", "entries":[{
+            "seqStart":1, "seqEnd":1, "timestamp":"t1", "item":{
+                "type":"user_message", "text":"", "messageId":"x", "images":[kept("a"), kept("b")]
+            }}], "startCursor":{"seq":1}, "endCursor":{"seq":1}, "window":{"maxSeq":1}}));
+        assert!(matches!(&tl.items().next().unwrap().kind,
+            ItemKind::User { images, image_files, .. } if images.is_empty() && *image_files == [file("a"), file("b")]));
+        // Sent from here: the bytes in hand stay, and the files join them.
+        let image = ImageAttachment::new("cG5n", "image/png");
+        tl.add_local_prompt(
+            "m",
+            &Prompt {
+                text: "look".into(),
+                images: vec![image.clone()],
+            },
+            "t2",
+        );
+        tl.apply_live(
+            &json!({"agentId":"a", "timestamp":"t3", "seq":2, "epoch":"e", "event":{
+                "type":"timeline", "item":{"type":"user_message", "text":"look", "messageId":"m",
+                    "clientMessageId":"m", "images":[kept("c")]}
+            }}),
+        );
+        assert_eq!(tl.len(), 2);
+        assert!(matches!(&tl.items().nth(1).unwrap().kind,
+            ItemKind::User { images, image_files, .. }
+                if images.as_slice() == std::slice::from_ref(&image) && *image_files == [file("c")]));
     }
 
     #[test]

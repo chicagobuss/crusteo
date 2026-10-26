@@ -20,6 +20,7 @@ fn pool(id: &str, provider: &str, windows: Vec<Window>) -> Pool {
         account_label: id.into(),
         status: "ok".into(),
         windows,
+        ..Default::default()
     }
 }
 

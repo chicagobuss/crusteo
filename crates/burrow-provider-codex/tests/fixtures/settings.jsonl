@@ -1,0 +1,9 @@
+// Mode and thinking changes reach the next turn/start.
+{"setup":"start"}
+{"cmd":{"mode":"full-access"}}
+{"cmd":{"thinking":"low"}}
+{"cmd":{"prompt":{"turn":"codex-turn-1","text":"Go"}}}
+{"dir":"in","frame":{"method":"turn/start","params":{"threadId":"thr-1","approvalPolicy":"never","sandboxPolicy":{"type":"dangerFullAccess"},"approvalsReviewer":"user","model":"gpt-6-luna","effort":"low","collaborationMode":{"mode":"default","settings":{"model":"gpt-6-luna","reasoning_effort":"low"}}}}}
+{"dir":"out","frame":{"id":"$ID","result":{"turn":{"id":"turn-a","status":"inProgress"}}}}
+{"dir":"out","frame":{"method":"turn/started","params":{"threadId":"thr-1","turn":{"id":"turn-a","status":"inProgress"}}}}
+{"dir":"out","frame":{"method":"turn/completed","params":{"threadId":"thr-1","turn":{"id":"turn-a","status":"failed","error":{"message":"usage limit reached"}}}}}

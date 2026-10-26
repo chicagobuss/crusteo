@@ -1,0 +1,23 @@
+// A bash call with streamed output, a read that fails, then the answer.
+{"dir":"in","frame":{"type":"get_state"}}
+{"dir":"out","frame":{"id":"$REQ","type":"response","command":"get_state","success":true,"data":{"model":{"provider":"google","id":"gemini-2.5-flash-lite","name":"Gemini 2.5 Flash-Lite","reasoning":true,"input":["text","image"],"contextWindow":1048576},"thinkingLevel":"off","isStreaming":false,"isCompacting":false,"sessionFile":"/home/user/.pi/agent/sessions/--home-user-proj--/2026-10-19T00-00-00-000Z_sess-1.jsonl","sessionId":"sess-1","messageCount":0,"pendingMessageCount":0}}}
+{"cmd":{"prompt":{"turn":"foreground-turn-1","text":"List the files"}}}
+{"dir":"in","frame":{"type":"prompt","message":"List the files"}}
+{"dir":"out","frame":{"id":"$REQ","type":"response","command":"prompt","success":true,"data":{"disposition":"started"}}}
+{"dir":"out","frame":{"type":"agent_start"}}
+{"dir":"out","frame":{"type":"turn_start"}}
+{"dir":"out","frame":{"type":"message_update","assistantMessageEvent":{"type":"toolcall_start","contentIndex":0,"id":"bash_1","toolName":"bash"}}}
+{"dir":"out","frame":{"type":"message_end","message":{"role":"assistant","content":[{"type":"toolCall","id":"bash_1","name":"bash","arguments":{"command":"ls"}}],"stopReason":"toolUse"}}}
+{"dir":"out","frame":{"type":"tool_execution_start","toolCallId":"bash_1","toolName":"bash","args":{"command":"ls"}}}
+{"dir":"out","frame":{"type":"tool_execution_update","toolCallId":"bash_1","toolName":"bash","args":{"command":"ls"},"partialResult":{"content":[{"type":"text","text":"a.txt\n"}],"details":{}}}}
+{"dir":"out","frame":{"type":"tool_execution_end","toolCallId":"bash_1","toolName":"bash","result":{"content":[{"type":"text","text":"a.txt\nb.txt\n"}],"structuredContent":{"output":"a.txt\nb.txt\n","truncated":false,"exit_code":0}},"isError":false}}
+{"dir":"out","frame":{"type":"tool_execution_start","toolCallId":"read_2","toolName":"read","args":{"path":"/home/user/proj/missing.txt"}}}
+{"dir":"out","frame":{"type":"tool_execution_end","toolCallId":"read_2","toolName":"read","result":{"content":[{"type":"text","text":"ENOENT"}]},"isError":true}}
+{"dir":"out","frame":{"type":"turn_start"}}
+{"dir":"out","frame":{"type":"message_start","message":{"role":"assistant","content":[],"stopReason":"pending"}}}
+{"dir":"out","frame":{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"Two files."}}}
+{"dir":"out","frame":{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"Two files."}],"stopReason":"stop"}}}
+{"dir":"out","frame":{"type":"agent_end","messages":[{"role":"assistant","content":[{"type":"text","text":"Two files."}],"stopReason":"stop"}],"willRetry":false}}
+{"dir":"out","frame":{"type":"agent_settled"}}
+{"dir":"in","frame":{"type":"get_session_stats"}}
+{"dir":"out","frame":{"id":"$REQ","type":"response","command":"get_session_stats","success":true,"data":{"sessionId":"sess-1","tokens":{"input":3240,"output":3,"cacheRead":0,"cacheWrite":0,"total":3243},"cost":0.000334,"contextUsage":{"tokens":3243,"contextWindow":1048576,"percent":0.3}}}}

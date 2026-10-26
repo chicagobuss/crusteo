@@ -5,6 +5,7 @@
 
 use std::collections::BTreeSet;
 
+use fleet::HostId;
 use fleet::questions::{self, Question};
 use gpui_kit::base::Disableable as _;
 use gpui_kit::component::Sizable;
@@ -23,7 +24,7 @@ use crate::ui;
 
 pub struct QuestionForm {
     core: Core,
-    host: String,
+    host: HostId,
     agent: String,
     permission: String,
     request: Value,
@@ -41,7 +42,7 @@ impl QuestionForm {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         core: Core,
-        host: &str,
+        host: &HostId,
         agent: &str,
         permission: &str,
         request: Value,
@@ -80,7 +81,7 @@ impl QuestionForm {
             .collect();
         Self {
             core,
-            host: host.to_string(),
+            host: host.clone(),
             agent: agent.to_string(),
             permission: permission.to_string(),
             selected: vec![BTreeSet::new(); questions.len()],

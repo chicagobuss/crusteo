@@ -1,0 +1,12 @@
+// An extension wakes pi with a message of its own: a run with no prompt.
+{"dir":"in","frame":{"type":"get_state"}}
+{"dir":"out","frame":{"id":"$REQ","type":"response","command":"get_state","success":true,"data":{"model":{"provider":"google","id":"gemini-2.5-flash-lite","name":"Gemini 2.5 Flash-Lite","reasoning":true,"input":["text","image"],"contextWindow":1048576},"thinkingLevel":"off","isStreaming":false,"isCompacting":false,"sessionFile":"/home/user/.pi/agent/sessions/--home-user-proj--/2026-10-19T00-00-00-000Z_sess-1.jsonl","sessionId":"sess-1","messageCount":0,"pendingMessageCount":0}}}
+{"dir":"out","frame":{"type":"agent_start"}}
+{"dir":"out","frame":{"type":"message_start","message":{"role":"custom","customType":"build-watch","content":"Build finished","display":true}}}
+{"dir":"out","frame":{"type":"message_end","message":{"role":"custom","customType":"build-watch","content":"Build finished","display":true}}}
+{"dir":"out","frame":{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"The build passed."}}}
+{"dir":"out","frame":{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"The build passed."}],"stopReason":"stop"}}}
+{"dir":"out","frame":{"type":"agent_end","messages":[{"role":"assistant","content":[{"type":"text","text":"The build passed."}],"stopReason":"stop"}],"willRetry":false}}
+{"dir":"out","frame":{"type":"agent_settled"}}
+{"dir":"in","frame":{"type":"get_session_stats"}}
+{"dir":"out","frame":{"id":"$REQ","type":"response","command":"get_session_stats","success":true,"data":{"sessionId":"sess-1","tokens":{"input":3240,"output":3,"cacheRead":0,"cacheWrite":0,"total":3243},"cost":0.000334,"contextUsage":{"tokens":3243,"contextWindow":1048576,"percent":0.3}}}}

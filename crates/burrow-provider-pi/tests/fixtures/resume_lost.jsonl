@@ -1,0 +1,16 @@
+// pi no longer has the session: it exits at once, and the adapter starts a
+// new session with the prompt that was waiting.
+{"dir":"in","frame":{"type":"get_state"}}
+{"cmd":{"prompt":{"turn":"foreground-turn-3","text":"hi"}}}
+{"exit":{"status":1,"stderr":"No session found matching 'gone'"}}
+{"dir":"in","frame":{"type":"get_state"}}
+{"dir":"out","frame":{"id":"$REQ","type":"response","command":"get_state","success":true,"data":{"model":{"provider":"google","id":"gemini-2.5-flash-lite"},"thinkingLevel":"off","isStreaming":false,"sessionId":"sess-2","messageCount":0,"pendingMessageCount":0}}}
+{"dir":"in","frame":{"type":"prompt","message":"hi"}}
+{"dir":"out","frame":{"id":"$REQ","type":"response","command":"prompt","success":true,"data":{"disposition":"started"}}}
+{"dir":"out","frame":{"type":"agent_start"}}
+{"dir":"out","frame":{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"fresh"}}}
+{"dir":"out","frame":{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"fresh"}],"stopReason":"stop"}}}
+{"dir":"out","frame":{"type":"agent_end","messages":[{"role":"assistant","content":[{"type":"text","text":"fresh"}],"stopReason":"stop"}],"willRetry":false}}
+{"dir":"out","frame":{"type":"agent_settled"}}
+{"dir":"in","frame":{"type":"get_session_stats"}}
+{"dir":"out","frame":{"id":"$REQ","type":"response","command":"get_session_stats","success":true,"data":{"sessionId":"sess-1","tokens":{"input":3240,"output":3,"cacheRead":0,"cacheWrite":0,"total":3243},"cost":0.000334,"contextUsage":{"tokens":3243,"contextWindow":1048576,"percent":0.3}}}}

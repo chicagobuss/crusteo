@@ -3,6 +3,7 @@
 
 use serde_json::Value;
 
+use crate::agent_messages::{AgentEvent, AgentMessage};
 use crate::timeline::ToolCall;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -17,6 +18,14 @@ pub enum ToolIcon {
     Sparkles,
     Mic,
     Paseo,
+    /// A message from another agent.
+    Message,
+    /// A message to another agent.
+    Send,
+    Finished,
+    Failed,
+    Permission,
+    Closed,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -24,25 +33,68 @@ pub struct ToolDisplay {
     pub name: String,
     pub summary: Option<String>,
     pub icon: ToolIcon,
+    /// The agent the row is about, drawn as a link to it.
+    pub agent: Option<AgentLink>,
+}
+
+/// An agent a row names: who sent a message, or the agent a Paseo tool
+/// call acts on.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AgentLink {
+    pub id: String,
+    /// Its title as the message or call gave it.
+    pub title: Option<String>,
+    /// It comes before the row's name ("planner finished") rather than
+    /// after it ("From planner").
+    pub lead: bool,
+}
+
+impl AgentLink {
+    /// What to call it: the title the fleet knows now, else the one given,
+    /// else the start of its id.
+    pub fn label(&self, known: Option<String>) -> String {
+        known
+            .or_else(|| self.title.clone())
+            .unwrap_or_else(|| self.id.chars().take(8).collect())
+    }
+}
+
+/// A pending permission request as the tool call it asks to make, so it
+/// is labelled as that call would be.
+pub fn permission_call(request: &Value) -> ToolCall {
+    let id = request["id"].as_str().unwrap_or_default().to_string();
+    ToolCall {
+        identity: id.clone(),
+        call_id: id,
+        name: request["name"].as_str().unwrap_or_default().to_string(),
+        status: "completed".into(),
+        error: None,
+        detail: if request["detail"].is_object() {
+            request["detail"].clone()
+        } else {
+            serde_json::json!({"type": "unknown", "input": request["input"].clone(), "output": null})
+        },
+        metadata: Default::default(),
+        agent_message: None,
+    }
 }
 
 pub fn tool_display(tool: &ToolCall, cwd: &str) -> ToolDisplay {
     let detail = &tool.detail;
     let lower = tool.name.to_lowercase();
+    if let Some(message) = &tool.agent_message {
+        return agent_message_display(message);
+    }
     if lower == "thinking" {
         return ToolDisplay {
             name: "Thinking".into(),
             summary: None,
             icon: ToolIcon::Brain,
+            agent: None,
         };
     }
-    if lower.starts_with("mcp__paseo__") || lower.starts_with("paseo.") {
-        let leaf = tool.name.rsplit(['.', '_']).next().unwrap_or(&tool.name);
-        return ToolDisplay {
-            name: leaf.to_string(),
-            summary: None,
-            icon: ToolIcon::Paseo,
-        };
+    if let Some(leaf) = paseo_leaf(&tool.name) {
+        return paseo_tool_display(&leaf, detail);
     }
     let text = |key: &str| {
         detail[key]
@@ -118,6 +170,262 @@ pub fn tool_display(tool: &ToolCall, cwd: &str) -> ToolDisplay {
         name,
         summary,
         icon,
+        agent: None,
+    }
+}
+
+/// A message from another agent leads with who sent it ("From planner"),
+/// then its first line; a notice reads as a status line ("worker
+/// finished"), then the first line of the agent's last reply. The whole
+/// text is the row's detail.
+fn agent_message_display(message: &AgentMessage) -> ToolDisplay {
+    let (name, icon) = match message.event {
+        AgentEvent::Message => ("From", ToolIcon::Message),
+        AgentEvent::Finished => ("finished", ToolIcon::Finished),
+        AgentEvent::Errored => ("failed", ToolIcon::Failed),
+        AgentEvent::PermissionRequired => ("needs permission", ToolIcon::Permission),
+        AgentEvent::Closed => ("was closed", ToolIcon::Closed),
+    };
+    let summary = if message.is_notice() {
+        message.response().and_then(first_line)
+    } else {
+        first_line(&message.text)
+    };
+    ToolDisplay {
+        name: name.into(),
+        summary,
+        icon,
+        agent: Some(AgentLink {
+            id: message.sender_id.clone(),
+            title: message.sender_title.clone(),
+            lead: message.is_notice(),
+        }),
+    }
+}
+
+fn first_line(text: &str) -> Option<String> {
+    text.lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(str::to_string)
+}
+
+/// The tool's name within Paseo's own tools (`mcp__paseo__list_agents`,
+/// `paseo.list_agents`), as protocol/tool-name-normalization.ts reads it.
+fn paseo_leaf(name: &str) -> Option<String> {
+    let lower = name.trim().to_lowercase();
+    let paseo = |server: &str| server == "paseo" || server.starts_with("paseo_");
+    // Speaking is the voice tool's, wherever it is served from.
+    if lower.rsplit(|c: char| !c.is_ascii_alphanumeric()).next() == Some("speak") {
+        return None;
+    }
+    if lower.contains("__") {
+        let segments: Vec<&str> = lower.split("__").filter(|s| !s.is_empty()).collect();
+        return (segments.len() >= 3 && segments[0] == "mcp" && paseo(segments[1]))
+            .then(|| segments[2..].join("__"));
+    }
+    let (server, leaf) = lower.split_once('.')?;
+    paseo(server).then(|| leaf.to_string())
+}
+
+/// What a Paseo tool call's row shows after its label.
+enum Context {
+    None,
+    /// The first of these input fields that holds something.
+    Field(&'static [&'static str]),
+    /// The agent named by `agentId`.
+    Agent,
+    /// The field when given, else the agent.
+    FieldOrAgent(&'static str),
+    Workspace,
+    Viewport,
+}
+
+/// Paseo's labels for its own tools (protocol/paseo-tool-presentation/
+/// catalog.ts): the action first, then what it acts on.
+#[rustfmt::skip]
+const PASEO_TOOLS: &[(&str, &str, Context)] = &[
+    ("create_agent", "Create agent", Context::Field(&["title", "initialPrompt"])),
+    ("send_agent_prompt", "Send message", Context::Field(&["prompt"])),
+    ("get_agent_status", "Check agent", Context::Agent),
+    ("get_agent_activity", "Read agent activity", Context::Agent),
+    ("list_agents", "List agents", Context::None),
+    ("update_agent", "Update agent", Context::FieldOrAgent("name")),
+    ("set_agent_mode", "Set agent mode", Context::Field(&["modeId"])),
+    ("cancel_agent", "Cancel agent", Context::Agent),
+    ("archive_agent", "Archive agent", Context::Agent),
+    ("kill_agent", "Kill agent", Context::Agent),
+    ("list_pending_permissions", "List permissions", Context::None),
+    ("respond_to_permission", "Respond to permission", Context::Agent),
+    ("create_workspace", "Create workspace", Context::Workspace),
+    ("list_workspaces", "List workspaces", Context::None),
+    ("rename_workspace", "Rename workspace", Context::Field(&["title"])),
+    ("archive_workspace", "Archive workspace", Context::Field(&["workspaceId"])),
+    ("list_workspace_scripts", "List scripts", Context::None),
+    ("start_workspace_script", "Start script", Context::Field(&["scriptName"])),
+    ("stop_workspace_script", "Stop script", Context::Field(&["scriptName"])),
+    ("create_terminal", "Create terminal", Context::Field(&["name", "command"])),
+    ("list_terminals", "List terminals", Context::None),
+    ("capture_terminal", "Read terminal", Context::Field(&["terminalId"])),
+    ("send_terminal_keys", "Send keys", Context::Field(&["keys"])),
+    ("kill_terminal", "Kill terminal", Context::Field(&["terminalId"])),
+    ("create_schedule", "Create schedule", Context::Field(&["name", "cron"])),
+    ("create_heartbeat", "Create heartbeat", Context::Field(&["name", "cron"])),
+    ("update_schedule", "Update schedule", Context::Field(&["name", "id"])),
+    ("list_schedules", "List schedules", Context::None),
+    ("inspect_schedule", "Inspect schedule", Context::Field(&["id"])),
+    ("schedule_logs", "Read schedule logs", Context::Field(&["id"])),
+    ("run_schedule_once", "Run schedule", Context::Field(&["id"])),
+    ("pause_schedule", "Pause schedule", Context::Field(&["id"])),
+    ("resume_schedule", "Resume schedule", Context::Field(&["id"])),
+    ("delete_schedule", "Delete schedule", Context::Field(&["id"])),
+    ("delete_heartbeat", "Delete heartbeat", Context::Field(&["id"])),
+    ("list_providers", "List providers", Context::None),
+    ("list_models", "List models", Context::Field(&["provider"])),
+    ("list_profiles", "List profiles", Context::None),
+    ("inspect_provider", "Inspect provider", Context::Field(&["provider"])),
+    ("browser_list_tabs", "List browser tabs", Context::None),
+    ("browser_new_tab", "Open browser tab", Context::Field(&["url"])),
+    ("browser_close_tab", "Close browser tab", Context::Field(&["browserId"])),
+    ("browser_navigate", "Navigate", Context::Field(&["url"])),
+    ("browser_back", "Go back", Context::None),
+    ("browser_forward", "Go forward", Context::None),
+    ("browser_reload", "Reload page", Context::None),
+    ("browser_snapshot", "Snapshot page", Context::None),
+    ("browser_screenshot", "Take screenshot", Context::None),
+    ("browser_click", "Click element", Context::Field(&["ref"])),
+    ("browser_hover", "Hover element", Context::Field(&["ref"])),
+    ("browser_drag", "Drag element", Context::Field(&["sourceRef"])),
+    ("browser_fill", "Fill field", Context::Field(&["ref"])),
+    ("browser_select", "Select option", Context::Field(&["value", "ref"])),
+    ("browser_type", "Type text", Context::Field(&["text"])),
+    ("browser_keypress", "Press key", Context::Field(&["key"])),
+    ("browser_upload", "Upload files", Context::Field(&["filePaths"])),
+    ("browser_wait", "Wait for page", Context::Field(&["text", "url"])),
+    ("browser_scroll", "Scroll page", Context::None),
+    ("browser_resize", "Resize browser", Context::Viewport),
+    ("browser_logs", "Read browser logs", Context::None),
+    ("browser_evaluate", "Run JavaScript", Context::Field(&["function"])),
+];
+
+/// A Paseo tool call, as Paseo labels it. A message to another agent
+/// names it as a message from one names its sender ("To worker", then the
+/// prompt's first line), and calls on an agent link to it.
+fn paseo_tool_display(leaf: &str, detail: &Value) -> ToolDisplay {
+    let input = if detail["type"] == "unknown" {
+        &detail["input"]
+    } else {
+        &Value::Null
+    };
+    let agent_id = input["agentId"].as_str().filter(|id| !id.is_empty());
+    let link = |id: &str, title: Option<&str>| AgentLink {
+        id: id.to_string(),
+        title: title.map(str::to_string),
+        lead: false,
+    };
+    let entry = PASEO_TOOLS.iter().find(|(name, ..)| *name == leaf);
+    let Some((_, label, context)) = entry else {
+        return ToolDisplay {
+            name: humanize(leaf),
+            summary: None,
+            icon: ToolIcon::Paseo,
+            agent: None,
+        };
+    };
+    let field = |keys: &[&str]| keys.iter().find_map(|key| context_text(&input[*key]));
+    let (name, summary, icon, agent) = match (leaf, context) {
+        ("send_agent_prompt", _) if agent_id.is_some() => (
+            "To".to_string(),
+            field(&["prompt"]),
+            ToolIcon::Send,
+            agent_id.map(|id| link(id, None)),
+        ),
+        // Once made, the new agent can be opened.
+        ("create_agent", _) => {
+            let made = detail["output"]["agentId"]
+                .as_str()
+                .filter(|id| !id.is_empty());
+            match made {
+                Some(id) => (
+                    label.to_string(),
+                    None,
+                    ToolIcon::Paseo,
+                    Some(link(id, input["title"].as_str())),
+                ),
+                None => (
+                    label.to_string(),
+                    field(&["title", "initialPrompt"]),
+                    ToolIcon::Paseo,
+                    None,
+                ),
+            }
+        }
+        (_, Context::None) => (label.to_string(), None, ToolIcon::Paseo, None),
+        (_, Context::Field(keys)) => (label.to_string(), field(keys), ToolIcon::Paseo, None),
+        (_, Context::FieldOrAgent(key)) if field(&[*key]).is_some() => {
+            (label.to_string(), field(&[*key]), ToolIcon::Paseo, None)
+        }
+        (_, Context::Agent | Context::FieldOrAgent(_)) => (
+            label.to_string(),
+            None,
+            ToolIcon::Paseo,
+            agent_id.map(|id| link(id, None)),
+        ),
+        (_, Context::Workspace) => (
+            label.to_string(),
+            field(&["title", "branchName", "branch"]).or_else(|| {
+                input["path"]
+                    .as_str()
+                    .and_then(|p| p.rsplit(['/', '\\']).find(|s| !s.is_empty()))
+                    .map(str::to_string)
+            }),
+            ToolIcon::Paseo,
+            None,
+        ),
+        (_, Context::Viewport) => (
+            label.to_string(),
+            match (input["width"].as_u64(), input["height"].as_u64()) {
+                (Some(w), Some(h)) => Some(format!("{w}×{h}")),
+                _ => None,
+            },
+            ToolIcon::Paseo,
+            None,
+        ),
+    };
+    ToolDisplay {
+        name,
+        summary,
+        icon,
+        agent,
+    }
+}
+
+/// A context field as one line: text, a number, or a list's first item
+/// and how many more.
+fn context_text(value: &Value) -> Option<String> {
+    match value {
+        Value::String(text) => first_line(text),
+        Value::Number(n) => Some(n.to_string()),
+        Value::Array(items) => {
+            let head = first_line(items.first()?.as_str()?)?;
+            Some(match items.len() {
+                1 => head,
+                n => format!("{head} +{}", n - 1),
+            })
+        }
+        _ => None,
+    }
+}
+
+/// Whether a conversation leaves this item out: a plan waiting for
+/// approval shows as its permission card instead.
+pub fn hidden_in_stream(kind: &crate::timeline::ItemKind) -> bool {
+    match kind {
+        crate::timeline::ItemKind::Tool(tool) => {
+            let name = tool.name.as_str();
+            name == "ExitPlanMode" || (name == "plan_approval" && tool.running())
+        }
+        _ => false,
     }
 }
 
@@ -368,7 +676,88 @@ mod tests {
             error: None,
             detail,
             metadata: Default::default(),
+            agent_message: None,
         }
+    }
+
+    #[test]
+    fn agent_messages_name_their_sender() {
+        let mut received = tool(
+            "agent_message",
+            json!({"type": "plain_text", "text": "Review it\nthen merge", "icon": "bot"}),
+        );
+        received.agent_message = Some(Box::new(AgentMessage {
+            event: AgentEvent::Message,
+            sender_id: "0f3a9c2e-77aa".into(),
+            sender_title: None,
+            text: "\nReview it\nthen merge".into(),
+        }));
+        let shown = tool_display(&received, "");
+        assert_eq!(shown.name, "From");
+        assert_eq!(shown.summary.as_deref(), Some("Review it"));
+        assert_eq!(shown.icon, ToolIcon::Message);
+        let link = shown.agent.unwrap();
+        assert!(!link.lead);
+        assert_eq!(link.label(None), "0f3a9c2e");
+        assert_eq!(link.label(Some("planner".into())), "planner");
+        assert!(has_details(&received));
+
+        received.agent_message = Some(Box::new(AgentMessage {
+            event: AgentEvent::Finished,
+            sender_id: "w1".into(),
+            sender_title: Some("worker".into()),
+            text: "Agent w1 (worker) finished.\n\n<agent-response>\nAll green.\n</agent-response>"
+                .into(),
+        }));
+        let shown = tool_display(&received, "");
+        assert_eq!(
+            (shown.name.as_str(), shown.summary.as_deref()),
+            ("finished", Some("All green."))
+        );
+        assert_eq!(shown.agent.unwrap().label(None), "worker");
+    }
+
+    #[test]
+    fn paseo_tools_read_as_paseo_labels_them() {
+        let call = |name: &str, input: Value| {
+            tool(
+                name,
+                json!({"type": "unknown", "input": input, "output": null}),
+            )
+        };
+        let sent = tool_display(
+            &call(
+                "mcp__paseo__send_agent_prompt",
+                json!({"agentId": "w1", "prompt": "Take the second one.\nThanks"}),
+            ),
+            "",
+        );
+        assert_eq!(sent.name, "To");
+        assert_eq!(sent.summary.as_deref(), Some("Take the second one."));
+        assert_eq!(sent.agent.unwrap().id, "w1");
+        let status = tool_display(
+            &call("paseo.get_agent_status", json!({"agentId": "w1"})),
+            "",
+        );
+        assert_eq!(status.name, "Check agent");
+        assert_eq!(status.agent.unwrap().id, "w1");
+        let listed = tool_display(&call("mcp__paseo__list_agents", json!({})), "");
+        assert_eq!((listed.name.as_str(), listed.agent), ("List agents", None));
+        let terminal = tool_display(
+            &call(
+                "mcp__paseo__create_terminal",
+                json!({"command": "cargo test"}),
+            ),
+            "",
+        );
+        assert_eq!(terminal.summary.as_deref(), Some("cargo test"));
+        assert_eq!(
+            tool_display(&call("mcp__paseo__brand_new_tool", json!({})), "").name,
+            "Brand new tool"
+        );
+        // Not Paseo's.
+        assert_eq!(paseo_leaf("mcp__github__create_issue"), None);
+        assert_eq!(paseo_leaf("paseo.speak"), None);
     }
 
     #[test]

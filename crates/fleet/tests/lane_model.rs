@@ -3,7 +3,7 @@
 //! patched lanes are compared with `LaneView::build` on the same fleet.
 
 use fleet::lanes::{LabelLaneMode, Lane, LaneGrouping, LaneModel, LaneState, LaneView};
-use fleet::{DirChange, Fleet, HostConfig};
+use fleet::{DirChange, Fleet, HostConfig, HostId, labels};
 use serde_json::{Value, json};
 
 /// xorshift64*: deterministic, so a failure reproduces from its seed.
@@ -55,6 +55,9 @@ fn workspace(rng: &mut Rng, host: usize, w: usize) -> Value {
         }
     }
     let project = ["web", "api", "data"][w % 3];
+    // Every sixth workspace is a background one, as Paseo 0.12 makes them,
+    // and another moves in and out of the background (and its lane).
+    let background = w == 5 || (w == 4 && rng.chance(25));
     // Renames reorder a lane's workspaces and retitle workspace lanes.
     let name = if rng.chance(20) {
         format!("renamed {w}")
@@ -69,10 +72,20 @@ fn workspace(rng: &mut Rng, host: usize, w: usize) -> Value {
         "name": name,
         "status": "done",
         "labels": labels,
+        "background": background,
     })
 }
 
-fn agent(rng: &mut Rng, id: &str, workspace: Option<String>, tick: u64) -> Value {
+/// An agent; with `labels` (reef mode's catalog ids), its own label
+/// assignment, often none (so it inherits), sometimes explicitly empty, one in
+/// a format from the future, or a deleted label's id.
+fn agent(
+    rng: &mut Rng,
+    id: &str,
+    workspace: Option<String>,
+    tick: u64,
+    labels: &[String],
+) -> Value {
     let mut agent = json!({
         "id": id,
         "title": format!("task {}", rng.below(5)),
@@ -88,6 +101,24 @@ fn agent(rng: &mut Rng, id: &str, workspace: Option<String>, tick: u64) -> Value
         agent["requiresAttention"] = json!(true);
         agent["attentionReason"] = json!("finished");
     }
+    if !labels.is_empty() {
+        let roll = rng.below(100);
+        let assignment = if roll < 35 {
+            None
+        } else if roll < 45 {
+            Some("v1:".to_string())
+        } else if roll < 50 {
+            Some("v2:anything".to_string())
+        } else {
+            let picked: Vec<&str> = (0..1 + rng.below(3))
+                .map(|_| labels[rng.below(labels.len())].as_str())
+                .collect();
+            Some(format!("v1:{}", picked.join(",")))
+        };
+        if let Some(assignment) = assignment {
+            agent["labels"] = json!({ labels::KEY: assignment });
+        }
+    }
     agent
 }
 
@@ -96,10 +127,19 @@ struct World {
     fleet: Fleet,
     tick: u64,
     next_agent: usize,
+    /// In reef mode, the catalog's ids agents may name, a deleted one among
+    /// them; empty otherwise.
+    label_ids: Vec<String>,
 }
 
 impl World {
     fn new(seed: u64) -> Self {
+        Self::with(seed, false)
+    }
+
+    /// With `reef`, the fleet has a catalog imported from the hosts' labels,
+    /// one label deleted, and agents carry their own assignments.
+    fn with(seed: u64, reef: bool) -> Self {
         let mut rng = Rng(seed);
         let mut fleet = Fleet::new(HOSTS.iter().map(|name| HostConfig {
             name: name.to_string(),
@@ -117,10 +157,28 @@ impl World {
             let workspaces: Vec<Value> = (0..6).map(|w| workspace(&mut rng, h, w)).collect();
             host.directory
                 .apply_workspaces_reply(&json!({ "entries": workspaces }), true);
+        }
+        let mut label_ids = Vec::new();
+        if reef {
+            let mut catalog = labels::Catalog::default();
+            let hosts: Vec<labels::ImportHost> = (fleet.hosts.iter())
+                .map(|host| labels::ImportHost {
+                    labels: &host.directory.labels,
+                    workspaces: host.directory.workspaces.values().collect(),
+                })
+                .collect();
+            catalog.import(&hosts, |_| "violet".into());
+            label_ids = catalog.labels.iter().map(|l| l.id.to_string()).collect();
+            let ops = catalog.by_name("Ops").unwrap().id.clone();
+            catalog.delete(&ops).unwrap();
+            fleet.labels = Some(catalog);
+        }
+        for (h, host) in fleet.hosts.iter_mut().enumerate() {
             let mut agents = Vec::new();
             for _ in 0..12 {
                 let ws = (!rng.chance(10)).then(|| format!("w{h}-{}", rng.below(6)));
-                agents.push(json!({ "agent": agent(&mut rng, &format!("a{next_agent}"), ws, 1) }));
+                let made = agent(&mut rng, &format!("a{next_agent}"), ws, 1, &label_ids);
+                agents.push(json!({ "agent": made }));
                 next_agent += 1;
             }
             host.directory
@@ -133,6 +191,7 @@ impl World {
             fleet,
             tick: 10,
             next_agent,
+            label_ids,
         }
     }
 
@@ -155,23 +214,23 @@ impl World {
                 .workspace_id
                 .clone();
             let tick = self.tick;
-            json!({"type": "agent_update", "payload": {"kind": "upsert", "agent": agent(&mut self.rng, &id, ws, tick)}})
+            json!({"type": "agent_update", "payload": {"kind": "upsert", "agent": agent(&mut self.rng, &id, ws, tick, &self.label_ids)}})
         } else if roll < 62 && !ids.is_empty() {
             // A stale snapshot, which the directory ignores.
             let id = pick(&mut self.rng).unwrap();
-            json!({"type": "agent_update", "payload": {"kind": "upsert", "agent": agent(&mut self.rng, &id, None, 0)}})
+            json!({"type": "agent_update", "payload": {"kind": "upsert", "agent": agent(&mut self.rng, &id, None, 0, &self.label_ids)}})
         } else if roll < 74 {
             let id = format!("a{}", self.next_agent);
             self.next_agent += 1;
             let ws = (!self.rng.chance(15)).then(|| format!("w{h}-{}", self.rng.below(6)));
             let tick = self.tick;
-            json!({"type": "agent_update", "payload": {"kind": "upsert", "agent": agent(&mut self.rng, &id, ws, tick)}})
+            json!({"type": "agent_update", "payload": {"kind": "upsert", "agent": agent(&mut self.rng, &id, ws, tick, &self.label_ids)}})
         } else if roll < 84 && !ids.is_empty() {
             let id = pick(&mut self.rng).unwrap();
             if self.rng.chance(50) {
                 json!({"type": "agent_update", "payload": {"kind": "remove", "agentId": id}})
             } else {
-                let mut archived = agent(&mut self.rng, &id, None, self.tick);
+                let mut archived = agent(&mut self.rng, &id, None, self.tick, &self.label_ids);
                 archived["archivedAt"] = json!(iso(self.tick));
                 json!({"type": "agent_update", "payload": {"kind": "upsert", "agent": archived}})
             }
@@ -180,7 +239,7 @@ impl World {
             let id = pick(&mut self.rng).unwrap();
             let ws = (!self.rng.chance(20)).then(|| format!("w{h}-{}", self.rng.below(6)));
             let tick = self.tick;
-            json!({"type": "agent_update", "payload": {"kind": "upsert", "agent": agent(&mut self.rng, &id, ws, tick)}})
+            json!({"type": "agent_update", "payload": {"kind": "upsert", "agent": agent(&mut self.rng, &id, ws, tick, &self.label_ids)}})
         } else if roll < 97 {
             let w = self.rng.below(6);
             let ws = workspace(&mut self.rng, h, w);
@@ -219,20 +278,34 @@ fn unwrap(lanes: &[std::rc::Rc<Lane>]) -> Vec<Lane> {
     lanes.iter().map(|lane| (**lane).clone()).collect()
 }
 
-fn check(grouping: LaneGrouping, mode: LabelLaneMode, seed: u64) {
-    let mut world = World::new(seed);
+fn check(grouping: LaneGrouping, mode: LabelLaneMode, seed: u64, hide_background: bool) {
+    check_in(World::new(seed), grouping, mode, seed, hide_background);
+}
+
+fn check_in(
+    mut world: World,
+    grouping: LaneGrouping,
+    mode: LabelLaneMode,
+    seed: u64,
+    hide_background: bool,
+) {
     let state = LaneState {
         label_mode: mode,
         // A user arrangement for some lanes, and one collapsed.
         order: vec!["search".into(), "web".into()],
         collapsed: ["infra".to_string()].into_iter().collect(),
+        hide_background,
     };
     let mut model = LaneModel::build(&world.fleet, grouping, &state);
     for step in 0..600 {
         let changes = world.step();
+        // The world's hosts were saved by name, so each name is its id.
+        let changes: Vec<(HostId, &DirChange)> = (changes.iter())
+            .map(|(host, change)| (HostId::new(host.clone()), change))
+            .collect();
         model.apply(
             &world.fleet,
-            changes.iter().map(|(host, change)| (host.as_str(), change)),
+            changes.iter().map(|(host, change)| (host, *change)),
         );
         let expected = LaneView::build(&world.fleet, grouping, &state);
         assert!(
@@ -251,14 +324,49 @@ fn check(grouping: LaneGrouping, mode: LabelLaneMode, seed: u64) {
 }
 
 #[test]
+fn incremental_lanes_equal_a_full_build_in_reef_mode() {
+    // Agents carry their own labels, inherit their workspace's, or neither;
+    // a workspace follows its agents. The patch must agree with a build.
+    let world = World::with(1, true);
+    let lanes = LaneView::build(&world.fleet, LaneGrouping::Label, &LaneState::default());
+    assert!(
+        lanes.iter().any(|lane| lane.key.starts_with("lbl_")),
+        "lanes keyed by label id"
+    );
+    for seed in [1, 7, 42, 1234, 99_991] {
+        for hide in [false, true] {
+            for mode in LabelLaneMode::ALL {
+                check_in(
+                    World::with(seed, true),
+                    LaneGrouping::Label,
+                    mode,
+                    seed,
+                    hide,
+                );
+            }
+            // Other groupings ignore the catalog.
+            check_in(
+                World::with(seed, true),
+                LaneGrouping::Project,
+                LabelLaneMode::Labels,
+                seed,
+                hide,
+            );
+        }
+    }
+}
+
+#[test]
 fn incremental_lanes_equal_a_full_build_under_random_churn() {
     for seed in [1, 7, 42, 1234, 99_991] {
-        for mode in LabelLaneMode::ALL {
-            check(LaneGrouping::Label, mode, seed);
+        for hide in [false, true] {
+            for mode in LabelLaneMode::ALL {
+                check(LaneGrouping::Label, mode, seed, hide);
+            }
+            check(LaneGrouping::Project, LabelLaneMode::Labels, seed, hide);
+            check(LaneGrouping::Host, LabelLaneMode::Labels, seed, hide);
+            check(LaneGrouping::Workspace, LabelLaneMode::Labels, seed, hide);
         }
-        check(LaneGrouping::Project, LabelLaneMode::Labels, seed);
-        check(LaneGrouping::Host, LabelLaneMode::Labels, seed);
-        check(LaneGrouping::Workspace, LabelLaneMode::Labels, seed);
     }
 }
 
@@ -280,7 +388,8 @@ fn unchanged_lanes_keep_their_identity() {
         "agent": {"id": id, "status": "running", "updatedAt": iso(99_999)}}});
     world.fleet.hosts[0].directory.apply_push(&message);
     let changes = std::mem::take(&mut world.fleet.hosts[0].directory.journal);
-    model.apply(&world.fleet, changes.iter().map(|change| ("alpha", change)));
+    let alpha = HostId::new("alpha");
+    model.apply(&world.fleet, changes.iter().map(|change| (&alpha, change)));
     for lane in model.lanes() {
         let old = before.iter().find(|old| old.key == lane.key).unwrap();
         assert_eq!(

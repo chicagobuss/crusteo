@@ -118,10 +118,73 @@ pub fn parse(payload: &Value) -> Vec<Provider> {
         .collect()
 }
 
+/// What a `providers_snapshot_update` push asks of a client that keeps one
+/// host-wide snapshot, given the `snapshotHash` it last loaded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Update {
+    /// The push carries the snapshot itself (older daemons): keep it.
+    Keep,
+    /// Only a new hash came (clients that take snapshot references, as
+    /// crusteo does, are sent just that): load the snapshot again.
+    Reload,
+    /// Nothing changed, or it is one project directory's snapshot.
+    Ignore,
+}
+
+pub fn update(payload: &Value, known_hash: Option<&str>) -> Update {
+    if payload["cwd"].as_str().is_some_and(|cwd| !cwd.is_empty()) {
+        return Update::Ignore;
+    }
+    let carries_snapshot = payload["compactSnapshot"].is_object()
+        || payload["entries"]
+            .as_array()
+            .is_some_and(|entries| !entries.is_empty());
+    if carries_snapshot {
+        return Update::Keep;
+    }
+    match payload["snapshotHash"].as_str() {
+        Some(hash) if Some(hash) == known_hash => Update::Ignore,
+        _ => Update::Reload,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn a_hash_only_push_reloads_when_the_hash_moved() {
+        let push = json!({"entries": [], "snapshotHash": "h2", "generatedAt": "t"});
+        assert_eq!(update(&push, Some("h1")), Update::Reload);
+        assert_eq!(update(&push, None), Update::Reload);
+        assert_eq!(update(&push, Some("h2")), Update::Ignore);
+    }
+
+    #[test]
+    fn a_push_with_the_snapshot_is_kept() {
+        let compact = json!({"entries": [], "snapshotHash": "h2",
+            "compactSnapshot": {"entries": [], "thinkingSets": []}});
+        assert_eq!(update(&compact, Some("h1")), Update::Keep);
+        let plain = json!({"entries": [{"provider": "claude", "status": "ready"}]});
+        assert_eq!(update(&plain, None), Update::Keep);
+    }
+
+    #[test]
+    fn a_project_directory_snapshot_is_not_the_host_wide_one() {
+        let push = json!({"cwd": "/home/user/app", "entries": [], "snapshotHash": "h9"});
+        assert_eq!(update(&push, Some("h1")), Update::Ignore);
+    }
+
+    #[test]
+    fn a_snapshot_taken_while_probes_run_has_nothing_ready() {
+        // What a daemon answers just after it starts: the reason a cached
+        // snapshot must be reloaded when the daemon says it changed.
+        let payload = json!({"entries": [], "compactSnapshot": {"thinkingSets": [], "entries": [
+            {"provider": "claude", "status": "loading", "enabled": true, "label": "Claude"},
+            {"provider": "codex", "status": "loading", "enabled": true, "label": "Codex"}]}});
+        assert!(parse(&payload).iter().all(|provider| !provider.ready()));
+    }
 
     #[test]
     fn compact_snapshot() {

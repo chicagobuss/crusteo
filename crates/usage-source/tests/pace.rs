@@ -24,6 +24,7 @@ fn pool(provider: &str, windows: Vec<Window>) -> Pool {
         account_label: String::new(),
         status: "ok".into(),
         windows,
+        ..Default::default()
     }
 }
 

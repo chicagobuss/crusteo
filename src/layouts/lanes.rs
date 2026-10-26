@@ -2,30 +2,29 @@
 //! embeds the Paseo conversation in the column.
 
 mod activity;
-mod colors;
-mod edges;
+pub(crate) mod colors;
 mod find;
 mod placement;
 
+use fleet::HostId;
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use fleet::lanes::{
-    LabelLaneMode, Lane, LaneCard, LaneGrouping, LaneKind, LaneModel, LaneState, UNLABELLED,
+    BACKGROUND, LabelLaneMode, Lane, LaneCard, LaneGrouping, LaneKind, LaneModel, LaneState,
+    UNLABELLED,
 };
-use fleet::providers::{Model, Provider};
+use fleet::project_remove;
 use fleet::timeline::ItemKind;
 use gpui_kit::base::{Disableable as _, Selectable as _};
 use gpui_kit::component::Icon;
 use gpui_kit::component::Sizable;
 use gpui_kit::component::button::{Button, ButtonGroup, ButtonVariants};
-use gpui_kit::component::input::{InputEvent, Textarea, TextareaState};
 use gpui_kit::component::menu::{DropdownMenu, PopupMenu, PopupMenuItem};
 use gpui_kit::component::popover::Popover;
 use gpui_kit::component::scroll::{Scrollbar, ScrollbarMode};
-use gpui_kit::component::slider::{Slider, SliderEvent, SliderState};
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::gpui::{
     Anchor, AnyElement, AnyView, App, AppContext, Bounds, ClickEvent, Context, CursorStyle,
@@ -38,24 +37,23 @@ use gpui_kit::gpui::{
 };
 
 use gpui_kit::prelude::FluentBuilder;
-use serde_json::json;
 
 use crate::app::Core;
-use crate::app::nav::{LANE_WIDTH_MAX, LANE_WIDTH_MIN, LaneFilter, workspace_key};
+use crate::app::nav::{LaneFilter, workspace_key};
 use crate::app::store::{FleetStore, LabelBatch, LabelChange, TerminalWatch, now_millis};
+use crate::layouts::columns::{self, COLUMN_GAP, COLUMNS_PADDING, ColumnWidth, SideScroll, edges};
 use crate::layouts::paseo::{Conversation, ConversationEvent, TerminalView};
 use crate::theme::{self, palette, size, with_alpha};
 use crate::ui;
 use crate::widgets::agent_rename::{AgentRename, RenameDone};
 use crate::widgets::label_picker::{ApplyLabels, LabelPicker};
 use crate::widgets::lane_color_picker;
+use crate::widgets::new_agent::{self, Place};
 
 const EXPANDED_MIN: f32 = 360.;
 const EXPANDED_MAX: f32 = 720.;
 /// Narrowest an expanded column can be dragged to.
 const EXPANDED_RESIZE_MIN: f32 = 300.;
-const COLUMN_GAP: f32 = 12.;
-const COLUMNS_PADDING: f32 = 16.;
 const CARD_GAP: f32 = 6.;
 const CARD_HEIGHT: f32 = 90.;
 const HEADER_PADDING: f32 = 10.;
@@ -72,11 +70,14 @@ const HEADER_HEIGHT: f32 = HEADER_PADDING * 2.
 
 struct RelabelPending {
     source: String,
-    host: String,
+    host: HostId,
     /// The card relabeled from, followed to its new lane; None for a
     /// workspace relabeled from its box.
     agent: Option<String>,
     workspace: String,
+    /// In reef mode, the agents whose own labels changed; the progress
+    /// then names labels by id. Empty when the workspace's changed.
+    agents: Vec<String>,
     progress: placement::Progress,
     follow: bool,
     token: u64,
@@ -96,30 +97,6 @@ pub fn open_find(view: &AnyView, window: &mut Window, cx: &mut App) {
 pub fn build(core: &Core, window: &mut Window, cx: &mut App) -> AnyView {
     let core = core.clone();
     cx.new(|cx| Lanes::new(core, window, cx)).into()
-}
-
-struct DraftState {
-    lane: String,
-    input: Entity<TextareaState>,
-    workspace: Option<(String, String)>,
-    /// A workspace to make for the agent, in place of `workspace`.
-    new_workspace: Option<NewWorkspace>,
-    provider: Option<String>,
-    model: Option<String>,
-    thinking: Option<String>,
-    creating: bool,
-    error: Option<String>,
-    /// Where the card was drawn: a click outside it closes the draft.
-    bounds: Rc<Cell<Option<gpui_kit::gpui::Bounds<Pixels>>>>,
-}
-
-/// A workspace the draft will make, in a project on a host.
-#[derive(Clone)]
-struct NewWorkspace {
-    host: String,
-    project: String,
-    /// In a new git worktree rather than the project's own checkout.
-    worktree: bool,
 }
 
 /// Lanes' controls in the toolbars.
@@ -183,8 +160,8 @@ impl crate::toolbars::ToolbarItem for LanesItem {
 type ArrangedLane = (Rc<Lane>, Rc<Lane>);
 
 /// The workspace a card belongs to, if it has one.
-fn card_workspace(card: &LaneCard) -> Option<(&str, &str)> {
-    Some((card.host.as_str(), card.workspace_id.as_deref()?))
+fn card_workspace(card: &LaneCard) -> Option<(&HostId, &str)> {
+    Some((&card.host, card.workspace_id.as_deref()?))
 }
 
 /// Who started whom among a lane's cards. A card's parent is the card of
@@ -198,17 +175,17 @@ struct Family {
 impl Family {
     fn of(lane: &Lane) -> Self {
         let cards = &lane.cards;
-        let index: HashMap<(&str, &str), usize> = cards
+        let index: HashMap<(&HostId, &str), usize> = cards
             .iter()
             .enumerate()
-            .map(|(ix, card)| ((card.host.as_str(), card.agent_id.as_str()), ix))
+            .map(|(ix, card)| ((&card.host, card.agent_id.as_str()), ix))
             .collect();
         let parent: Vec<Option<usize>> = cards
             .iter()
             .enumerate()
             .map(|(ix, card)| {
                 let workspace = card_workspace(card)?;
-                let parent = *index.get(&(card.host.as_str(), card.parent.as_deref()?))?;
+                let parent = *index.get(&(&card.host, card.parent.as_deref()?))?;
                 (parent != ix && card_workspace(&cards[parent]) == Some(workspace))
                     .then_some(parent)
             })
@@ -263,7 +240,7 @@ impl Family {
 fn group_workspaces(lane: &Lane, placement: &Placement) -> Option<Lane> {
     let cards = &lane.cards;
     let family = Family::of(lane);
-    let mut first: HashMap<(&str, &str), usize> = HashMap::new();
+    let mut first: HashMap<(&HostId, &str), usize> = HashMap::new();
     let workspace_rank: Vec<usize> = cards
         .iter()
         .enumerate()
@@ -385,13 +362,13 @@ enum Owner {
 }
 
 impl Owner {
-    /// Host and workspace id.
-    fn workspace(self, lane: &Lane) -> (&str, &str) {
+    /// Host and workspace id; None for a card with no workspace.
+    fn workspace(self, lane: &Lane) -> Option<(&HostId, &str)> {
         match self {
-            Owner::Card(card) => card_workspace(&lane.cards[card]).unwrap_or_default(),
+            Owner::Card(card) => card_workspace(&lane.cards[card]),
             Owner::Workspace(ix) => {
                 let ws = &lane.workspaces[ix];
-                (ws.host.as_str(), ws.workspace_id.as_str())
+                Some((&ws.host, ws.workspace_id.as_str()))
             }
         }
     }
@@ -510,7 +487,7 @@ fn lane_rows(
     box_single: bool,
     empty_open: bool,
     subagents_open: &dyn Fn(&LaneCard) -> bool,
-    terminals: &dyn Fn(&str, &str) -> usize,
+    terminals: &dyn Fn(&HostId, &str) -> usize,
 ) -> Vec<Row> {
     let family = Family::of(lane);
     let cards = &lane.cards;
@@ -583,10 +560,10 @@ fn lane_rows(
         }
         start = end;
     }
-    let occupied: HashSet<(&str, &str)> = cards.iter().filter_map(card_workspace).collect();
+    let occupied: HashSet<(&HostId, &str)> = cards.iter().filter_map(card_workspace).collect();
     let mut empty: Vec<usize> = Vec::new();
     for (ix, ws) in lane.workspaces.iter().enumerate() {
-        if occupied.contains(&(ws.host.as_str(), ws.workspace_id.as_str())) {
+        if occupied.contains(&(&ws.host, ws.workspace_id.as_str())) {
             continue;
         }
         let shells = terminals(&ws.host, &ws.workspace_id);
@@ -706,19 +683,19 @@ fn card_frame(
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 enum RowFocus {
     /// An empty workspace, by host and workspace id.
-    Workspace(String, String),
+    Workspace(HostId, String),
     /// The empty workspaces' fold toggle.
     Fold,
     /// An agent's subagents' fold toggle, by host and agent id.
-    Subagents(String, String),
+    Subagents(HostId, String),
     /// A terminal, by host and terminal id.
-    Terminal(String, String),
+    Terminal(HostId, String),
 }
 
 /// A workspace box's label picker, opened from its header.
 struct BoxPicker {
     lane: String,
-    host: String,
+    host: HostId,
     workspace: String,
     picker: Entity<LabelPicker>,
 }
@@ -758,7 +735,7 @@ struct ColumnResize {
 /// An open card blinking its outline, as one opened from a notification
 /// does, so the eye finds it.
 struct CardFlash {
-    host: String,
+    host: HostId,
     agent: String,
     /// In the lit half of a blink.
     lit: bool,
@@ -810,45 +787,40 @@ struct CardMenu {
 pub struct Lanes {
     core: Core,
     focus: FocusHandle,
-    h_scroll: ScrollHandle,
+    /// Scrolling across the lanes.
+    side: SideScroll,
+    width: ColumnWidth,
     collapsed_scroll: ScrollHandle,
     /// Lane key → (host, agent) expanded in that column.
-    expanded: BTreeMap<String, (String, String)>,
+    expanded: BTreeMap<String, (HostId, String)>,
     /// Lane key → (host, terminal) open in that column, in place of an
     /// expanded agent.
-    expanded_terminals: BTreeMap<String, (String, String)>,
-    terminal_views: HashMap<(String, String), Entity<TerminalView>>,
+    expanded_terminals: BTreeMap<String, (HostId, String)>,
+    terminal_views: HashMap<(HostId, String), Entity<TerminalView>>,
     /// The workspaces whose terminal lists Lanes last asked to watch.
     terminal_watch_key: u64,
-    conversations: HashMap<(String, String), Entity<Conversation>>,
+    conversations: HashMap<(HostId, String), Entity<Conversation>>,
     /// Agent just created, kept expanded until the directory lists it.
-    pending: Option<(String, String, String)>,
+    /// Lane, host and agent.
+    pending: Option<(String, HostId, String)>,
     focused_lane: Option<String>,
-    focused_agent: Option<(String, String)>,
-    draft_focused: bool,
-    /// The lane and text of a draft closed without creating, restored by
-    /// the next draft opened in that lane.
-    draft_stash: Option<(String, String)>,
-    draft: Option<DraftState>,
+    focused_agent: Option<(HostId, String)>,
     /// Focus this composer's input once it exists.
-    focus_composer: Option<(String, String)>,
+    focus_composer: Option<(HostId, String)>,
     /// Per lane key: the virtual list of its cards.
     lists: HashMap<String, LaneList>,
+    /// Per lane with an open card: the list of its other cards under it.
+    open_lists: HashMap<String, OpenList>,
     /// Per lane key: the cached view the column renders in.
     columns: HashMap<String, Entity<ColumnView>>,
     /// The lane model, patched from the store's change log and rebuilt only
     /// when the nav's grouping, order or colours change.
     lanes_cache: RefCell<Option<LaneCache>>,
-    middle: Option<MiddleScroll>,
-    /// Last pointer position over the board, in window coordinates.
-    pointer: Point<Pixels>,
-    width_slider: Entity<SliderState>,
     /// Last observed nav transition for focus reconciliation and stopping pan.
     /// Model validity itself belongs to LaneCache::nav_key.
     observed_nav_key: Option<LaneModelKey>,
     /// Width of an ordinary column in the last render, after fitting.
     column_width: Pixels,
-    width_save_generation: u64,
     /// The one right-click menu for every card, open over the card it was
     /// opened on.
     card_menu: Option<CardMenu>,
@@ -891,17 +863,18 @@ pub struct Lanes {
     box_picker: Option<BoxPicker>,
     /// The card shown large and centered over the dimmed board, by lane,
     /// host and agent. It stays expanded in its lane underneath.
-    focus_mode: Option<(String, String, String)>,
+    focus_mode: Option<(String, HostId, String)>,
     /// The lane whose box a workspace rename was started from; the same
     /// workspace's boxes in other lanes keep showing its name.
     rename_lane: Option<String>,
     /// Agents showing their subagents unfolded, by host and agent id.
-    subagents_open: HashMap<String, HashSet<String>>,
-    label_pickers: HashMap<(String, String, String, String), Entity<LabelPicker>>,
+    subagents_open: HashMap<HostId, HashSet<String>>,
+    label_pickers: HashMap<(String, HostId, String, String), Entity<LabelPicker>>,
+    /// The catalog revision whose ids the saved lane keys were last
+    /// brought to, in reef mode.
+    labels_adopted: Option<u64>,
     relabel_pending: Option<RelabelPending>,
     next_relabel: u64,
-    window_active: bool,
-    pointer_inside: bool,
     view_membership: Option<placement::ViewMembership>,
     focus_check_needed: Cell<bool>,
     /// A lane being dragged, and where the board shows it.
@@ -910,9 +883,9 @@ pub struct Lanes {
     find: Option<find::Find>,
     /// Where a card dragged inside its box would land: before or after
     /// this card, as host, agent and whether before.
-    card_drop: Option<(String, String, bool)>,
+    card_drop: Option<(HostId, String, bool)>,
     /// Loaded conversations lowercased for find, kept between searches.
-    find_index: RefCell<HashMap<(String, String), find::Indexed>>,
+    find_index: RefCell<HashMap<(HostId, String), find::Indexed>>,
 }
 
 /// One lane column as its own cached view. It tracks the live summaries it
@@ -1105,7 +1078,7 @@ struct LaneDrag {
 #[derive(Clone)]
 struct CardDrag {
     lane: String,
-    host: String,
+    host: HostId,
     agent: String,
     workspace: String,
     title: SharedString,
@@ -1132,7 +1105,8 @@ struct LaneStyle {
 
 #[derive(Clone, PartialEq, Eq)]
 struct LaneModelKey {
-    membership: (LaneGrouping, LabelLaneMode),
+    /// Grouping, label mode, and whether background workspaces are left out.
+    membership: (LaneGrouping, LabelLaneMode, bool),
     order: Vec<String>,
     collapsed: BTreeSet<String>,
     colors: BTreeMap<String, String>,
@@ -1140,7 +1114,7 @@ struct LaneModelKey {
 
 #[derive(PartialEq, Eq)]
 struct LaneModelKeyRef<'a> {
-    membership: (LaneGrouping, LabelLaneMode),
+    membership: (LaneGrouping, LabelLaneMode, bool),
     order: &'a [String],
     collapsed: &'a BTreeSet<String>,
     colors: &'a BTreeMap<String, String>,
@@ -1162,7 +1136,11 @@ impl LaneModelKey {
 
 fn lane_model_key_ref(nav: &crate::app::Nav) -> LaneModelKeyRef<'_> {
     LaneModelKeyRef {
-        membership: (nav.lane_grouping, nav.lane_label_mode),
+        membership: (
+            nav.lane_grouping,
+            nav.lane_label_mode,
+            !nav.show_background(),
+        ),
         order: &nav.lane_order,
         collapsed: &nav.lane_collapsed,
         colors: &nav.lane_color_choices,
@@ -1179,33 +1157,9 @@ fn lane_model_key(nav: &crate::app::Nav) -> LaneModelKey {
     }
 }
 
-const FIT_MIN_WIDTH: f32 = 160.;
 /// Below this width a column header shows its buttons only on hover, and
 /// its host chips collapse to a count.
 const NARROW_WIDTH: f32 = 290.;
-/// Ctrl+wheel width change per wheel line.
-const WHEEL_WIDTH_STEP: f32 = 20.;
-
-/// Scrolling across columns with the middle mouse button, the way browsers
-/// do it on Windows: hold and drag to pan, or click to autoscroll.
-#[derive(Debug, Clone, Copy)]
-enum MiddleScroll {
-    /// Button held. Turns into a pan once the pointer moves a few pixels.
-    Held {
-        origin: Point<Pixels>,
-        offset: Pixels,
-        panning: bool,
-    },
-    /// Clicked without moving: the board scrolls toward the pointer, faster
-    /// the further it is from `origin`. Any click or Escape ends it.
-    Auto { origin: Point<Pixels> },
-}
-
-const PAN_THRESHOLD: f32 = 4.;
-const AUTOSCROLL_DEAD_ZONE: f32 = 12.;
-/// Scroll speed in pixels per second, per pixel the pointer is past the dead zone.
-const AUTOSCROLL_GAIN: f32 = 8.;
-const AUTOSCROLL_TICK: Duration = Duration::from_millis(7);
 
 /// A lane's card list only builds the rows in view. `source` is the lane
 /// and row settings the list state was last told about, to see what
@@ -1276,9 +1230,44 @@ impl LaneList {
     }
 }
 
+/// Rows the list under an open card shows before its edge is dragged.
+const OPEN_LIST_ROWS: usize = 6;
+
+/// The list under a lane's open card: its scroll, and which cards it held
+/// last, to keep the scroll where it was as cards come, go and move.
+struct OpenList {
+    state: ListState,
+    cards: Vec<(HostId, String)>,
+}
+
+impl OpenList {
+    fn new() -> Self {
+        Self {
+            state: ListState::new(0, ListAlignment::Top, px(240.)),
+            cards: Vec::new(),
+        }
+    }
+
+    /// Tells the list which rows changed, keeping the scroll position.
+    fn sync(&mut self, cards: Vec<(HostId, String)>) {
+        let old = &self.cards;
+        let prefix = old.iter().zip(&cards).take_while(|(a, b)| a == b).count();
+        let suffix = (old[prefix..].iter().rev())
+            .zip(cards[prefix..].iter().rev())
+            .take_while(|(a, b)| a == b)
+            .count();
+        let (old_end, new_end) = (old.len() - suffix, cards.len() - suffix);
+        if old_end > prefix || new_end > prefix {
+            self.state.splice(prefix..old_end, new_end - prefix);
+        }
+        self.cards = cards;
+    }
+}
+
 impl Lanes {
     fn new(core: Core, window: &mut Window, cx: &mut Context<Self>) -> Self {
         cx.observe(&core.store, |this, _, cx| {
+            this.adopt_label_ids(cx);
             this.finish_relabel(false, cx);
             this.prune_expanded(cx);
             let membership = this.view_membership(cx);
@@ -1324,44 +1313,15 @@ impl Lanes {
                     this.reconcile_view(true, cx);
                 }
             }
-            // Keep the slider in step when the width changes another way.
-            let width = nav.read(cx).lane_width;
-            this.width_slider.update(cx, |slider, cx| {
-                if slider.value().start() != width {
-                    slider.set_value(width, window, cx);
-                }
-            });
             cx.notify();
         })
         .detach();
         cx.observe_window_activation(window, |this, window, cx| {
-            this.window_active = window.is_window_active();
-            if !window.is_window_active() {
-                this.stop_middle(cx);
-            } else {
-                cx.notify();
-            }
+            this.side.set_window_active(window.is_window_active(), cx);
         })
         .detach();
         let width = core.nav.read(cx).lane_width;
-        let width_slider = cx.new(|_| {
-            // Max first: `min` clamps against the current max, which starts at 100.
-            SliderState::new()
-                .max(LANE_WIDTH_MAX)
-                .min(LANE_WIDTH_MIN)
-                .step(10.)
-                .default_value(width)
-        });
-        cx.subscribe(&width_slider, |this, _, event: &SliderEvent, cx| {
-            let (value, persist) = match event {
-                SliderEvent::Change(value) => (value.start(), false),
-                SliderEvent::Release(value) => (value.start(), true),
-            };
-            this.core
-                .nav
-                .update(cx, |nav, cx| nav.set_lane_width(value, persist, cx));
-        })
-        .detach();
+        let column_width = ColumnWidth::new("lanes", &core, window, cx);
         let focus = cx.focus_handle();
         focus.focus(window, cx);
         // Relative ages need one redraw per minute while this view is visible,
@@ -1373,7 +1333,7 @@ impl Lanes {
                     .await;
                 if this
                     .update(cx, |this, cx| {
-                        if this.window_active && this.core.nav.read(cx).layout == "lanes" {
+                        if this.side.window_active() && this.core.nav.read(cx).layout == "lanes" {
                             cx.notify();
                         }
                     })
@@ -1405,7 +1365,8 @@ impl Lanes {
         Self {
             core,
             focus,
-            h_scroll: ScrollHandle::new(),
+            side: SideScroll::new(window),
+            width: column_width,
             collapsed_scroll: ScrollHandle::new(),
             expanded: BTreeMap::new(),
             expanded_terminals: BTreeMap::new(),
@@ -1415,19 +1376,13 @@ impl Lanes {
             pending: None,
             focused_lane: None,
             focused_agent: None,
-            draft_focused: false,
-            draft_stash: None,
-            draft: None,
             focus_composer: None,
             lists: HashMap::new(),
+            open_lists: HashMap::new(),
             columns: HashMap::new(),
             lanes_cache: RefCell::new(None),
-            middle: None,
-            pointer: Point::default(),
-            width_slider,
             observed_nav_key: Some(initial_model_key),
             column_width: px(width),
-            width_save_generation: 0,
             card_menu: None,
             expanded_widths: HashMap::new(),
             resizing: None,
@@ -1448,10 +1403,9 @@ impl Lanes {
             rename_lane: None,
             subagents_open: HashMap::new(),
             label_pickers: HashMap::new(),
+            labels_adopted: None,
             relabel_pending: None,
             next_relabel: 0,
-            window_active: window.is_window_active(),
-            pointer_inside: false,
             view_membership: None,
             focus_check_needed: Cell::new(false),
             lane_drag: None,
@@ -1482,7 +1436,7 @@ impl Lanes {
             match store.changes_since(cache.cursor) {
                 Some(changes) => cache.model.apply(
                     &store.fleet,
-                    changes.map(|change| (change.host.as_str(), &change.change)),
+                    changes.map(|change| (&change.host, &change.change)),
                 ),
                 None => {
                     cache.model =
@@ -1496,6 +1450,7 @@ impl Lanes {
                 label_mode: nav.lane_label_mode,
                 order: nav.lane_order.clone(),
                 collapsed: nav.lane_collapsed.clone(),
+                hide_background: !nav.show_background(),
             };
             *slot = Some(LaneCache {
                 model: LaneModel::build(&store.fleet, nav.lane_grouping, &state),
@@ -1558,16 +1513,8 @@ impl Lanes {
         // Made again only when the lanes or the filter change.
         if cache.visible_filter.as_ref() != Some(filter) {
             let fleet = &self.core.store.read(cx).fleet;
-            let labels = |host: &str, workspace: &str| -> Vec<String> {
-                fleet
-                    .workspace(host, workspace)
-                    .map(|ws| {
-                        ws.labels
-                            .iter()
-                            .map(|l| fleet::directory::label_key(l))
-                            .collect()
-                    })
-                    .unwrap_or_default()
+            let labels = |host: &HostId, workspace: Option<&str>, agent: Option<&str>| {
+                fleet::lanes::filter_keys(fleet, host, workspace, agent)
             };
             let shown = filter_lanes(&cache.lanes, filter, labels);
             cache.visible = displayed_lanes(&shown);
@@ -1579,7 +1526,7 @@ impl Lanes {
     /// The selected workspace, as host and workspace id: the focused empty
     /// workspace, or the focused card's. Its box is outlined in the focused
     /// lane and tinted in the others.
-    fn selected_workspace(&self, cx: &App) -> Option<(String, String)> {
+    fn selected_workspace(&self, cx: &App) -> Option<(HostId, String)> {
         match &self.focused_row {
             Some(RowFocus::Workspace(host, workspace)) => {
                 return Some((host.clone(), workspace.clone()));
@@ -1590,9 +1537,6 @@ impl Lanes {
                 return Some((host.clone(), workspace));
             }
             Some(RowFocus::Subagents(..)) | None => {}
-        }
-        if self.draft_focused {
-            return None;
         }
         let (host, agent) = match &self.focused_row {
             Some(RowFocus::Subagents(host, agent)) => (host, agent),
@@ -1647,14 +1591,14 @@ impl Lanes {
         )
     }
 
-    fn toggle_subagents(&mut self, lane: &str, host: &str, agent: &str, cx: &mut Context<Self>) {
-        let ids = self.subagents_open.entry(host.to_string()).or_default();
+    fn toggle_subagents(&mut self, lane: &str, host: &HostId, agent: &str, cx: &mut Context<Self>) {
+        let ids = self.subagents_open.entry(host.clone()).or_default();
         if !ids.remove(agent) {
             ids.insert(agent.to_string());
         }
         self.focus_row(
             lane,
-            RowFocus::Subagents(host.to_string(), agent.to_string()),
+            RowFocus::Subagents(host.clone(), agent.to_string()),
             cx,
         );
     }
@@ -1707,7 +1651,7 @@ impl Lanes {
             .update(cx, |nav, cx| nav.set_lane_collapsed(key, false, cx));
         let lanes = self.visible_lanes(cx);
         if let Some(index) = lanes.iter().position(|lane| lane.key == key) {
-            self.h_scroll.scroll_to_item(index);
+            self.side.handle.scroll_to_item(index);
         }
         cx.notify();
     }
@@ -1722,7 +1666,6 @@ impl Lanes {
                     .first()
                     .map(|card| (card.host.clone(), card.agent_id.clone()))
             });
-            self.draft_focused = self.draft.as_ref().is_some_and(|draft| draft.lane == key);
         }
         self.focus.focus(window, cx);
         cx.notify();
@@ -1741,7 +1684,6 @@ impl Lanes {
             if self.focused_lane.as_deref() == Some(key) {
                 self.focused_lane = next;
                 self.focused_agent = None;
-                self.draft_focused = false;
                 self.move_column(0, cx);
             }
         }
@@ -1755,7 +1697,7 @@ impl Lanes {
 
     fn reconcile_expansions(
         &mut self,
-        requested: Option<(&(String, String), &str)>,
+        requested: Option<(&(HostId, String), &str)>,
         cx: &mut Context<Self>,
     ) {
         if self.expanded.is_empty() && self.pending.is_none() {
@@ -1809,16 +1751,10 @@ impl Lanes {
     }
 
     fn view_membership(&self, cx: &App) -> placement::ViewMembership {
-        placement::view_membership(
-            &self.core.store.read(cx).fleet,
-            self.focused_agent.as_ref(),
-            self.draft
-                .as_ref()
-                .and_then(|draft| draft.workspace.as_ref()),
-        )
+        placement::view_membership(&self.core.store.read(cx).fleet, self.focused_agent.as_ref())
     }
 
-    fn protected_agents(&self) -> Vec<(String, String)> {
+    fn protected_agents(&self) -> Vec<(HostId, String)> {
         self.relabel_pending
             .as_ref()
             .and_then(|job| Some((job.host.clone(), job.agent.clone()?)))
@@ -1842,8 +1778,7 @@ impl Lanes {
             .focused_agent
             .as_ref()
             .is_some_and(|agent| self.protected_agents().contains(agent));
-        let has_active_view = self.draft.is_some() || self.focused_lane.is_some();
-        if !has_active_view || protected_focus {
+        if self.focused_lane.is_none() || protected_focus {
             self.ensure_visible_focus(cx);
             self.view_membership = Some(self.view_membership(cx));
             return;
@@ -1855,20 +1790,9 @@ impl Lanes {
                 source: self.focused_lane.as_deref(),
                 preferred,
                 focused: self.focused_agent.as_ref(),
-                draft: self
-                    .draft
-                    .as_ref()
-                    .map(|draft| (draft.lane.as_str(), draft.workspace.as_ref())),
-                draft_focused: self.draft_focused,
                 follow,
             },
         );
-        if let Some(draft) = &mut self.draft
-            && let Some(lane) = outcome.draft_lane
-        {
-            draft.lane = lane;
-        }
-        self.draft_focused = outcome.draft_focused;
         self.focused_lane = outcome.focused_lane;
         self.focused_agent = outcome.focused_agent;
         self.ensure_visible_focus(cx);
@@ -1879,7 +1803,7 @@ impl Lanes {
             if self.focused_lane.as_deref() == Some(lanes[index].key.as_str())
                 && let Some(index) = visible.iter().position(|lane| lane.key == lanes[index].key)
             {
-                self.h_scroll.scroll_to_item(index);
+                self.side.handle.scroll_to_item(index);
             }
         }
         self.view_membership = Some(self.view_membership(cx));
@@ -1893,7 +1817,6 @@ impl Lanes {
         if resolved != self.focused_lane {
             self.focused_lane = resolved;
             self.focused_agent = None;
-            self.draft_focused = false;
             self.move_column(0, cx);
         }
     }
@@ -1921,7 +1844,7 @@ impl Lanes {
     }
 
     fn prune_conversations(&mut self, cx: &App) {
-        let keep: HashSet<(String, String)> = self.expanded.values().cloned().collect();
+        let keep: HashSet<(HostId, String)> = self.expanded.values().cloned().collect();
         let released: Vec<_> = self
             .conversations
             .keys()
@@ -1935,7 +1858,7 @@ impl Lanes {
 
     /// Unsent text and attachments outlive their expansion. Every close,
     /// replacement, and directory-driven relocation uses the same rule.
-    fn release_conversation(&mut self, key: &(String, String), cx: &App) {
+    fn release_conversation(&mut self, key: &(HostId, String), cx: &App) {
         if self.expanded.values().any(|expanded| expanded == key) {
             return;
         }
@@ -1982,7 +1905,7 @@ impl Lanes {
     fn label_picker(
         &mut self,
         lane: &str,
-        host: &str,
+        host: &HostId,
         agent: &str,
         workspace: &str,
         window: &mut Window,
@@ -1990,34 +1913,41 @@ impl Lanes {
     ) -> Entity<LabelPicker> {
         let key = (
             lane.to_string(),
-            host.to_string(),
+            host.clone(),
             agent.to_string(),
             workspace.to_string(),
         );
         if let Some(picker) = self.label_pickers.get(&key) {
             return picker.clone();
         }
-        let picker = self.new_label_picker(lane, host, Some(agent), workspace, window, cx);
+        let picker = self.new_label_picker(lane, host, Some(agent), false, workspace, window, cx);
         self.label_pickers.insert(key, picker.clone());
         picker
     }
 
     /// A picker for `workspace`'s labels that relabels it from `lane`,
-    /// following `agent`'s card when there is one.
+    /// following `agent`'s card when there is one. In reef mode it changes
+    /// that agent's own labels, or, for a box (`whole_box`), those of the
+    /// box's agents in the lane.
+    #[allow(clippy::too_many_arguments)]
     fn new_label_picker(
         &mut self,
         lane: &str,
-        host: &str,
+        host: &HostId,
         agent: Option<&str>,
+        whole_box: bool,
         workspace: &str,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Entity<LabelPicker> {
         let core = self.core.clone();
-        let picker = cx.new(|cx| LabelPicker::new(core, host, workspace, window, cx));
+        let card = agent.filter(|_| !whole_box);
+        let agents = self.relabel_targets(lane, host, card, workspace, cx);
+        let picker =
+            cx.new(|cx| LabelPicker::new(core, host, workspace, agents.clone(), window, cx));
         cx.observe(&picker, |_, _, cx| cx.notify()).detach();
         let source = lane.to_string();
-        let host = host.to_string();
+        let host = host.clone();
         let agent = agent.map(str::to_string);
         let workspace = workspace.to_string();
         cx.subscribe(&picker, move |this, _, event: &ApplyLabels, cx| {
@@ -2026,6 +1956,7 @@ impl Lanes {
                 &host,
                 agent.as_deref(),
                 &workspace,
+                &agents,
                 event.0.clone(),
                 cx,
             );
@@ -2034,17 +1965,62 @@ impl Lanes {
         picker
     }
 
+    /// Reef mode: once per catalog revision, lane keys saved by label name
+    /// become label ids ([`crate::app::nav::Nav::adopt_label_ids`]).
+    fn adopt_label_ids(&mut self, cx: &mut Context<Self>) {
+        let store = self.core.store.read(cx);
+        let Some(catalog) = &store.fleet.labels else {
+            return;
+        };
+        if self.labels_adopted == Some(catalog.revision) {
+            return;
+        }
+        self.labels_adopted = Some(catalog.revision);
+        let catalog = catalog.clone();
+        self.core
+            .nav
+            .update(cx, |nav, cx| nav.adopt_label_ids(&catalog, cx));
+    }
+
+    /// In reef mode, whose labels a picker changes: the card's agent, or,
+    /// from a workspace's box, its agents in that lane. Empty outside reef
+    /// mode, and for a box with no agents: those change the workspace's
+    /// Paseo labels, which its agents without their own inherit.
+    fn relabel_targets(
+        &self,
+        lane: &str,
+        host: &HostId,
+        agent: Option<&str>,
+        workspace: &str,
+        cx: &App,
+    ) -> Vec<String> {
+        if self.core.store.read(cx).fleet.labels.is_none() {
+            return Vec::new();
+        }
+        if let Some(agent) = agent {
+            return vec![agent.to_string()];
+        }
+        let lanes = self.current_lanes(cx);
+        let Some(lane) = lanes.iter().find(|l| l.key == lane) else {
+            return Vec::new();
+        };
+        (lane.cards.iter())
+            .filter(|card| &card.host == host && card.workspace_id.as_deref() == Some(workspace))
+            .map(|card| card.agent_id.clone())
+            .collect()
+    }
+
     /// Opens the label picker for a workspace box's header.
     fn open_box_picker(
         &mut self,
         lane: &str,
-        host: &str,
+        host: &HostId,
         agent: Option<&str>,
         workspace: &str,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let picker = self.new_label_picker(lane, host, agent, workspace, window, cx);
+        let picker = self.new_label_picker(lane, host, agent, true, workspace, window, cx);
         picker.update(cx, |picker, cx| picker.set_open(true, window, cx));
         // The header shows the picker while it is open.
         cx.observe(&picker, |this, picker, cx| {
@@ -2061,19 +2037,21 @@ impl Lanes {
         .detach();
         self.box_picker = Some(BoxPicker {
             lane: lane.to_string(),
-            host: host.to_string(),
+            host: host.clone(),
             workspace: workspace.to_string(),
             picker,
         });
         cx.notify();
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn start_relabel(
         &mut self,
         source: &str,
-        host: &str,
+        host: &HostId,
         agent: Option<&str>,
         workspace: &str,
+        agents: &[String],
         changes: Vec<LabelChange>,
         cx: &mut Context<Self>,
     ) {
@@ -2108,18 +2086,22 @@ impl Lanes {
         self.relabel_pending = Some(RelabelPending {
             known,
             source: source.into(),
-            host: host.into(),
+            host: host.clone(),
             agent: agent.map(str::to_string),
             workspace: workspace.into(),
+            agents: agents.to_vec(),
             progress: placement::Progress::Writing,
             follow: self.core.nav.read(cx).follow_relabel,
             token,
         });
-        let task = self
-            .core
-            .store
-            .read(cx)
-            .set_workspace_labels(host, workspace, changes, cx);
+        let task = if agents.is_empty() {
+            (self.core.store.read(cx)).set_workspace_labels(host, workspace, changes, cx)
+        } else {
+            let agents = agents.to_vec();
+            (self.core.store).update(cx, |store, cx| {
+                store.relabel_agents(host, agents, changes, cx)
+            })
+        };
         cx.spawn(async move |this, cx| {
             let batch = task.await;
             let _ = this.update(cx, |this, cx| this.label_batch_done(token, batch, cx));
@@ -2162,14 +2144,29 @@ impl Lanes {
         let Some(job) = &self.relabel_pending else {
             return;
         };
-        let labels = self
-            .core
-            .store
-            .read(cx)
-            .fleet
-            .workspace(&job.host, &job.workspace)
-            .map(|workspace| workspace.labels.as_slice());
-        if !job.progress.can_finish(labels, force) {
+        let store = self.core.store.read(cx);
+        let landed = if job.agents.is_empty() {
+            let labels = (store.fleet.workspace(&job.host, &job.workspace))
+                .map(|workspace| workspace.labels.as_slice());
+            job.progress.can_finish(labels, force)
+        } else {
+            // Each agent's labels, by id, as the progress names them.
+            let catalog = store.fleet.labels.as_ref();
+            job.agents.iter().all(|agent| {
+                // An agent gone meanwhile has nothing to wait for.
+                let (Some(found), Some(catalog)) = (store.fleet.agent(&job.host, agent), catalog)
+                else {
+                    return job.progress.can_finish(None, true);
+                };
+                let workspace = (found.workspace_id.as_deref())
+                    .and_then(|w| store.fleet.workspace(&job.host, w));
+                let ids: Vec<String> = (fleet::labels::effective(found, workspace, catalog).iter())
+                    .map(|id| id.to_string())
+                    .collect();
+                job.progress.can_finish(Some(&ids), force)
+            })
+        };
+        if !landed {
             return;
         }
         let job = self.relabel_pending.take().unwrap();
@@ -2236,12 +2233,12 @@ impl Lanes {
 
     fn conversation(
         &mut self,
-        host: &str,
+        host: &HostId,
         agent: &str,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Entity<Conversation> {
-        let key = (host.to_string(), agent.to_string());
+        let key = (host.clone(), agent.to_string());
         if let Some(view) = self.conversations.get(&key) {
             return view.clone();
         }
@@ -2270,24 +2267,34 @@ impl Lanes {
     fn expand(
         &mut self,
         lane: &str,
-        host: &str,
+        host: &HostId,
         agent: &str,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // One popped out into its own window is brought forward there.
+        let popped = (self.core.nav.read(cx).popouts)
+            .get(&(host.clone(), agent.to_string()))
+            .copied();
+        if let Some(popped) = popped
+            && popped
+                .update(cx, |_, window, _| window.activate_window())
+                .is_ok()
+        {
+            return;
+        }
         // An agent opens in place of a terminal open in the lane.
         self.expanded_terminals.remove(lane);
         let previous = self
             .expanded
-            .insert(lane.to_string(), (host.to_string(), agent.to_string()));
+            .insert(lane.to_string(), (host.clone(), agent.to_string()));
         if let Some(previous) = previous {
             self.release_conversation(&previous, cx);
         }
         self.prune_label_pickers(cx);
         self.focused_lane = Some(lane.to_string());
-        self.focused_agent = Some((host.to_string(), agent.to_string()));
+        self.focused_agent = Some((host.clone(), agent.to_string()));
         self.focused_row = None;
-        self.draft_focused = false;
         self.reveal_column = Some(lane.to_string());
         self.sync_pins(cx);
         let view = self.conversation(host, agent, window, cx);
@@ -2295,6 +2302,41 @@ impl Lanes {
             conversation.focus_composer(window, cx)
         });
         cx.notify();
+    }
+
+    /// Closes `agent`'s card in `lane` and opens it in a window of its own.
+    fn pop_out(
+        &mut self,
+        lane: &str,
+        host: &HostId,
+        agent: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let key = (host.clone(), agent.to_string());
+        let view = self.conversations.get(&key);
+        if view.is_some_and(|view| view.read(cx).preparing_attachment(cx)) {
+            self.core.store.update(cx, |store, cx| {
+                store.toast(
+                    "Wait for the image to finish preparing before popping out.",
+                    cx,
+                )
+            });
+            return;
+        }
+        let draft = view.and_then(|view| view.read(cx).draft(cx));
+        // Open first, keeping the stream pinned until the new window owns it.
+        if matches!(
+            crate::popout::pop_out(&self.core, host, agent, draft, cx),
+            crate::popout::PopoutResult::Opened
+        ) {
+            self.focus_mode = None;
+            self.collapse_lane(lane, window, cx);
+            self.expanded.retain(|_, agent| agent != &key);
+            self.conversations.remove(&key);
+            self.sync_pins(cx);
+            cx.notify();
+        }
     }
 
     fn collapse_lane(&mut self, lane: &str, window: &mut Window, cx: &mut Context<Self>) {
@@ -2314,7 +2356,7 @@ impl Lanes {
     fn start_rename(
         &mut self,
         lane: &str,
-        host: &str,
+        host: &HostId,
         agent: &str,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -2335,7 +2377,7 @@ impl Lanes {
     fn rename_editor(
         &self,
         lane: &str,
-        host: &str,
+        host: &HostId,
         agent: &str,
         cx: &App,
     ) -> Option<Entity<AgentRename>> {
@@ -2352,26 +2394,23 @@ impl Lanes {
     fn toggle_focus_mode(
         &mut self,
         lane: &str,
-        host: &str,
+        host: &HostId,
         agent: &str,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let target = (lane.to_string(), host.to_string(), agent.to_string());
+        let target = (lane.to_string(), host.clone(), agent.to_string());
         if self.focus_mode.as_ref() == Some(&target) {
             self.focus_mode = None;
             self.focus.focus(window, cx);
             cx.notify();
             return;
         }
-        if self.expanded.get(lane) != Some(&(host.to_string(), agent.to_string())) {
+        if self.expanded.get(lane) != Some(&(host.clone(), agent.to_string())) {
             self.expand(lane, host, agent, window, cx);
         }
         self.focus_mode = Some(target);
-        if let Some(view) = self
-            .conversations
-            .get(&(host.to_string(), agent.to_string()))
-        {
+        if let Some(view) = self.conversations.get(&(host.clone(), agent.to_string())) {
             view.update(cx, |conversation, cx| {
                 conversation.focus_composer(window, cx)
             });
@@ -2381,7 +2420,7 @@ impl Lanes {
 
     /// Whether `agent`'s card in `lane` is shown in focus mode, so its lane
     /// shows where it went instead.
-    fn in_focus_mode(&self, lane: &str, host: &str, agent: &str) -> bool {
+    fn in_focus_mode(&self, lane: &str, host: &HostId, agent: &str) -> bool {
         self.focus_mode
             .as_ref()
             .is_some_and(|(l, h, a)| l == lane && h == host && a == agent)
@@ -2446,17 +2485,17 @@ impl Lanes {
     fn focus_placeholder(
         &self,
         lane: &str,
-        host: &str,
+        host: &HostId,
         agent: &str,
         framed: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let p = palette();
-        let (lane_key, host, agent) = (lane.to_string(), host.to_string(), agent.to_string());
+        let (lane_key, host, agent) = (lane.to_string(), host.clone(), agent.to_string());
         div()
             .id(eid_parts(
                 "lane-focus-placeholder",
-                &[&lane_key, &host, &agent],
+                &[&lane_key, host.as_str(), &agent],
             ))
             .h(px(56.))
             .flex_shrink_0()
@@ -2486,7 +2525,7 @@ impl Lanes {
     fn expand_terminal(
         &mut self,
         lane: &str,
-        host: &str,
+        host: &HostId,
         id: &str,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -2494,12 +2533,11 @@ impl Lanes {
         if let Some(previous) = self.expanded.remove(lane) {
             self.release_conversation(&previous, cx);
         }
-        let pair = (host.to_string(), id.to_string());
+        let pair = (host.clone(), id.to_string());
         self.expanded_terminals
             .insert(lane.to_string(), pair.clone());
         self.focused_lane = Some(lane.to_string());
-        self.focused_row = Some(RowFocus::Terminal(host.to_string(), id.to_string()));
-        self.draft_focused = false;
+        self.focused_row = Some(RowFocus::Terminal(host.clone(), id.to_string()));
         self.reveal_column = Some(lane.to_string());
         self.sync_pins(cx);
         let view = self.terminal_view(host, id, window, cx);
@@ -2520,12 +2558,12 @@ impl Lanes {
 
     fn terminal_view(
         &mut self,
-        host: &str,
+        host: &HostId,
         id: &str,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Entity<TerminalView> {
-        let key = (host.to_string(), id.to_string());
+        let key = (host.clone(), id.to_string());
         if let Some(view) = self.terminal_views.get(&key) {
             return view.clone();
         }
@@ -2537,7 +2575,7 @@ impl Lanes {
 
     /// Asks the store to list the terminals of the workspaces in lanes near
     /// the view, once per set; workspaces outside that set release their terminal-list subscription.
-    fn watch_terminals(&mut self, workspaces: Vec<(String, String)>, cx: &mut Context<Self>) {
+    fn watch_terminals(&mut self, workspaces: Vec<(HostId, String)>, cx: &mut Context<Self>) {
         use std::hash::{Hash, Hasher};
         let mut hash = std::collections::hash_map::DefaultHasher::new();
         workspaces.hash(&mut hash);
@@ -2577,7 +2615,7 @@ impl Lanes {
     fn new_terminal(
         &mut self,
         lane: &str,
-        host: &str,
+        host: &HostId,
         workspace: &str,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -2596,7 +2634,7 @@ impl Lanes {
         let task = self.core.store.update(cx, |store, cx| {
             store.create_terminal(host, workspace, &cwd, cx)
         });
-        let (lane, host) = (lane.to_string(), host.to_string());
+        let (lane, host) = (lane.to_string(), host.clone());
         let handle = window.window_handle();
         cx.spawn(async move |this, cx| {
             let result = task.await;
@@ -2617,7 +2655,7 @@ impl Lanes {
     fn start_workspace_rename(
         &mut self,
         lane: &str,
-        host: &str,
+        host: &HostId,
         workspace: &str,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -2638,7 +2676,7 @@ impl Lanes {
     fn workspace_name(
         &self,
         lane: &str,
-        host: &str,
+        host: &HostId,
         workspace: &str,
         name: String,
         color: Rgba,
@@ -2654,15 +2692,17 @@ impl Lanes {
         {
             return editor.clone().into_any_element();
         }
-        let (lane_key, host, workspace) =
-            (lane.to_string(), host.to_string(), workspace.to_string());
+        let (lane_key, host, workspace) = (lane.to_string(), host.clone(), workspace.to_string());
         div()
             .flex_1()
             .min_w(px(0.))
             .flex()
             .child(
                 div()
-                    .id(eid_parts("lane-box-name", &[lane, &host, &workspace]))
+                    .id(eid_parts(
+                        "lane-box-name",
+                        &[lane, host.as_str(), &workspace],
+                    ))
                     .min_w(px(0.))
                     .truncate()
                     .px(px(3.))
@@ -2701,17 +2741,17 @@ impl Lanes {
     /// lane holding its card.
     fn reveal_agent(
         &mut self,
-        host: &str,
+        host: &HostId,
         agent: &str,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let pair = (host.to_string(), agent.to_string());
+        let pair = (host.clone(), agent.to_string());
         let lanes = self.current_lanes(cx);
         let holds = |lane: &Rc<Lane>| {
             lane.cards
                 .iter()
-                .any(|card| card.host == host && card.agent_id == agent)
+                .any(|card| &card.host == host && card.agent_id == agent)
         };
         let lane = lanes
             .iter()
@@ -2733,7 +2773,6 @@ impl Lanes {
             self.focused_lane = Some(key.clone());
             self.focused_agent = Some(pair);
             self.focused_row = None;
-            self.draft_focused = false;
             self.reveal_column = Some(key);
             cx.notify();
         } else {
@@ -2743,7 +2782,7 @@ impl Lanes {
 
     /// Blinks the open card's outline for as long as Settings says, after
     /// a notification opened it.
-    fn flash_card(&mut self, host: &str, agent: &str, cx: &mut Context<Self>) {
+    fn flash_card(&mut self, host: &HostId, agent: &str, cx: &mut Context<Self>) {
         let seconds = self.core.nav.read(cx).notification_flash;
         if seconds == 0 {
             return;
@@ -2751,7 +2790,7 @@ impl Lanes {
         self.flash_generation += 1;
         let generation = self.flash_generation;
         self.flash = Some(CardFlash {
-            host: host.to_string(),
+            host: host.clone(),
             agent: agent.to_string(),
             lit: true,
         });
@@ -2783,479 +2822,102 @@ impl Lanes {
     }
 
     /// Whether the card for `host`/`agent` is in the lit half of a blink.
-    fn flash_lit(&self, host: &str, agent: &str) -> bool {
+    fn flash_lit(&self, host: &HostId, agent: &str) -> bool {
         (self.flash.as_ref())
-            .is_some_and(|flash| flash.lit && flash.host == host && flash.agent == agent)
+            .is_some_and(|flash| flash.lit && &flash.host == host && flash.agent == agent)
     }
 
+    /// New agent from a lane: in the lane's first workspace, with the lane's
+    /// labels.
     fn open_draft(&mut self, lane: &Lane, window: &mut Window, cx: &mut Context<Self>) {
-        self.open_draft_in(lane, None, window, cx);
+        let place = (lane.workspaces.first())
+            .map(|ws| Place::Workspace(ws.host.clone(), ws.workspace_id.clone()))
+            .unwrap_or(Place::NewWorkspace(None));
+        self.open_new_agent(lane, place, window, cx);
     }
 
-    /// Opens a new agent draft in `lane`, in `workspace` when given, else
-    /// in the lane's first workspace. Without a workspace, a draft already
-    /// open in the lane closes instead.
+    /// New agent in a workspace of `lane`.
     fn open_draft_in(
         &mut self,
         lane: &Lane,
-        workspace: Option<(String, String)>,
+        workspace: (HostId, String),
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(draft) = self.draft.as_mut().filter(|draft| draft.lane == lane.key) {
-            if let Some((host, id)) = workspace {
-                self.core
-                    .store
-                    .update(cx, |store, cx| store.ensure_providers(&host, cx));
-                draft.workspace = Some((host, id));
-                draft.new_workspace = None;
-                draft.input.update(cx, |input, cx| input.focus(window, cx));
-                self.draft_focused = true;
-                self.focused_row = None;
-            } else {
-                self.draft = None;
-                self.draft_focused = false;
-            }
-            cx.notify();
-            return;
-        }
-        if lane.collapsed {
-            self.reveal_lane(&lane.key, cx);
-        }
-        let input = cx.new(|cx| {
-            TextareaState::new(window, cx)
-                .auto_grow(2, 8)
-                .submit_on_enter(true)
-                .placeholder("What should the agent do?")
-        });
-        cx.subscribe_in(&input, window, |this, _, event: &InputEvent, window, cx| {
-            if let InputEvent::PressEnter { shift: false, .. } = event {
-                this.create_draft(window, cx);
-            }
-        })
-        .detach();
-        let workspace = workspace.or_else(|| {
-            lane.workspaces
-                .first()
-                .map(|workspace| (workspace.host.clone(), workspace.workspace_id.clone()))
-        });
-        if let Some((host, _)) = &workspace {
-            let host = host.clone();
-            self.core
-                .store
-                .update(cx, |store, cx| store.ensure_providers(&host, cx));
-        }
-        // What was typed in a draft closed without creating comes back.
-        if let Some((_, text)) = self
-            .draft_stash
-            .take_if(|(stashed, _)| *stashed == lane.key)
-        {
-            input.update(cx, |input, cx| input.set_value(text, window, cx));
-        }
-        input.update(cx, |input, cx| input.focus(window, cx));
-        self.focused_lane = Some(lane.key.clone());
-        self.draft_focused = true;
-        self.focused_row = None;
-        // A lane with no workspace can only make one.
-        let new_workspace = workspace
-            .is_none()
-            .then(|| self.default_new_workspace(lane, None, cx))
-            .flatten();
-        self.draft = Some(DraftState {
-            lane: lane.key.clone(),
-            input,
-            workspace,
-            new_workspace,
-            provider: None,
-            model: None,
-            thinking: None,
-            creating: false,
-            error: None,
-            bounds: Rc::new(Cell::new(None)),
-        });
-        cx.notify();
+        self.open_new_agent(lane, Place::Workspace(workspace.0, workspace.1), window, cx);
     }
 
-    /// Closes the draft without creating, keeping what was typed for the
-    /// next draft in its lane. Not while it is being created.
-    fn dismiss_draft(&mut self, refocus: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(draft) = &self.draft else {
-            return;
-        };
-        if draft.creating {
-            return;
-        }
-        let text = draft.input.read(cx).value().to_string();
-        self.draft_stash = (!text.trim().is_empty()).then(|| (draft.lane.clone(), text));
-        self.draft = None;
-        self.draft_focused = false;
-        if refocus {
-            self.focus.focus(window, cx);
-        }
-        cx.notify();
-    }
-
-    /// The host the draft's agent will run on.
-    fn draft_host(&self) -> Option<String> {
-        let draft = self.draft.as_ref()?;
-        match &draft.new_workspace {
-            Some(new) => Some(new.host.clone()),
-            None => draft.workspace.as_ref().map(|(host, _)| host.clone()),
-        }
-    }
-
-    /// Projects a new workspace can go in, as host, project id and name:
-    /// those this lane's workspaces are in first, then every other project
-    /// on an online host.
-    fn project_choices(&self, lane: &Lane, cx: &App) -> Vec<(String, String, String)> {
-        let fleet = &self.core.store.read(cx).fleet;
-        let name = |host: &str, id: &str| {
-            let project = fleet.host(host)?.directory.projects.get(id)?;
-            let name = project
-                .project_custom_name
-                .clone()
-                .filter(|name| !name.is_empty())
-                .unwrap_or_else(|| project.project_display_name.clone());
-            Some(format!("{name} · {host}"))
-        };
-        let mut choices: Vec<(String, String, String)> = Vec::new();
-        for workspace in &lane.workspaces {
-            let Some(id) = fleet
-                .workspace(&workspace.host, &workspace.workspace_id)
-                .map(|ws| ws.project_id.clone())
-            else {
-                continue;
-            };
-            if !choices
-                .iter()
-                .any(|(host, project, _)| *host == workspace.host && *project == id)
-                && let Some(label) = name(&workspace.host, &id)
-            {
-                choices.push((workspace.host.clone(), id, label));
-            }
-        }
-        let mut others: Vec<(String, String, String)> = fleet
-            .hosts
-            .iter()
-            .filter(|host| host.connection.is_online())
-            .flat_map(|host| {
-                host.directory
-                    .projects
-                    .keys()
-                    .map(move |id| (host.name().to_string(), id.clone()))
-            })
-            .filter(|(host, id)| !choices.iter().any(|(h, p, _)| h == host && p == id))
-            .filter_map(|(host, id)| {
-                let label = name(&host, &id)?;
-                Some((host, id, label))
-            })
-            .collect();
-        others.sort_by_key(|a| a.2.to_lowercase());
-        choices.extend(others);
-        choices
-    }
-
-    /// Where a new workspace goes unless the user picks: the project of the
-    /// workspace the draft was in, else the lane's first project, else any.
-    fn default_new_workspace(
-        &self,
+    /// New agent in a new workspace of the project `from` is in.
+    fn open_new_workspace_draft(
+        &mut self,
         lane: &Lane,
-        from: Option<&(String, String)>,
-        cx: &App,
-    ) -> Option<NewWorkspace> {
+        from: (HostId, String),
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_new_agent(lane, Place::NewWorkspace(Some(from)), window, cx);
+    }
+
+    /// Opens New agent started from `lane`: its workspaces offered first,
+    /// its labels on the agent (reef mode) or on a new workspace (else), so
+    /// what is made lands in the lane. The agent made opens there.
+    fn open_new_agent(
+        &mut self,
+        lane: &Lane,
+        place: Place,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let fleet = &self.core.store.read(cx).fleet;
-        let from = from.and_then(|(host, id)| {
-            let project = fleet.workspace(host, id)?.project_id.clone();
-            Some((host.clone(), project))
-        });
-        let (host, project) = from.or_else(|| {
-            self.project_choices(lane, cx)
-                .into_iter()
-                .next()
-                .map(|(host, project, _)| (host, project))
-        })?;
-        Some(NewWorkspace {
-            host,
-            project,
-            worktree: true,
-        })
-    }
-
-    fn create_draft(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(draft) = &self.draft else {
-            return;
-        };
-        if draft.creating {
-            return;
-        }
-        let prompt = draft.input.read(cx).value().trim().to_string();
-        if let Some(new) = draft.new_workspace.clone() {
-            self.create_in_new_workspace(new, prompt, cx);
-            return;
-        }
-        let Some((host, workspace)) = draft.workspace.clone() else {
-            if let Some(draft) = &mut self.draft {
-                draft.error = Some("This column has no workspace".into());
-            }
-            cx.notify();
-            return;
-        };
-        let Some((provider, model, thinking)) = self.resolved(cx) else {
-            if let Some(draft) = &mut self.draft {
-                draft.error = Some("No ready providers on this host".into());
-            }
-            cx.notify();
-            return;
-        };
-        let Some(directory) = self
-            .core
-            .store
-            .read(cx)
-            .fleet
-            .workspace(&host, &workspace)
-            .map(|workspace| workspace.directory().to_string())
-        else {
-            return;
-        };
-        let mut config = json!({ "provider": provider.id, "cwd": directory });
-        if let Some(model) = model {
-            config["model"] = json!(model);
-        }
-        if let Some(thinking) = thinking {
-            config["thinkingOptionId"] = json!(thinking);
-        }
-        if let Some(mode) = provider.default_mode.clone() {
-            config["modeId"] = json!(mode);
-        }
-        if let Some(draft) = &mut self.draft {
-            draft.creating = true;
-            draft.error = None;
-        }
-        cx.notify();
-        let lane = self
-            .draft
-            .as_ref()
-            .map(|draft| draft.lane.clone())
-            .unwrap_or_default();
-        let task = self.core.store.update(cx, |store, cx| {
-            store.create_agent(
-                &host,
-                &workspace,
-                config,
-                Some(fleet::prompt::Prompt {
-                    text: prompt,
-                    ..Default::default()
-                }),
-                cx,
-            )
-        });
-        let _ = window;
-        cx.spawn(async move |this, cx| {
-            let result = task.await;
-            let _ = this.update(cx, |this, cx| {
-                this.draft_created(lane, host, result, cx);
+        let labels = lane_label_ids(lane, fleet);
+        let workspace_labels = fleet.labels.is_none().then(|| {
+            let (lane, store) = (lane.clone(), self.core.store.clone());
+            let labels: new_agent::WorkspaceLabels = Rc::new(move |host: &HostId, cx: &App| {
+                lane_labels(&lane, host, &store.read(cx).fleet)
             });
-        })
-        .detach();
+            labels
+        });
+        let start = new_agent::Start {
+            place: Some(place),
+            preferred: (lane.workspaces.iter())
+                .map(|ws| (ws.host.clone(), ws.workspace_id.clone()))
+                .collect(),
+            labels,
+            workspace_labels,
+            provider: None,
+        };
+        let (board, key) = (cx.entity().downgrade(), lane.key.clone());
+        new_agent::open(&self.core, start, window, cx, move |made, window, cx| {
+            let _ = board.update(cx, |board, cx| board.new_agent_made(&key, made, window, cx));
+        });
     }
 
-    /// Opens the agent a draft created, or shows why it was not.
-    fn draft_created(
+    /// Opens the agent New agent made, in the lane it was started from.
+    fn new_agent_made(
         &mut self,
-        lane: String,
-        host: String,
-        result: Result<String, String>,
+        lane: &str,
+        made: &new_agent::Made,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        match result {
-            Ok(agent_id) => {
-                self.draft = None;
-                self.draft_focused = false;
-                self.pending = Some((lane.clone(), host.clone(), agent_id.clone()));
-                self.expanded
-                    .insert(lane.clone(), (host.clone(), agent_id.clone()));
-                self.focused_lane = Some(lane);
-                self.focused_agent = Some((host.clone(), agent_id.clone()));
-                self.focus_composer = Some((host, agent_id));
-                // The directory push can precede the response, and the
-                // selected mode may have changed while creation ran.
-                self.prune_expanded(cx);
-                self.reconcile_view(true, cx);
-            }
-            Err(err) => {
-                if let Some(draft) = &mut self.draft {
-                    draft.creating = false;
-                    draft.error = Some(err);
-                }
-            }
-        }
-        cx.notify();
-    }
-
-    /// Makes a workspace with the draft's agent in it, as Paseo's own new
-    /// workspace screen does, then gives it the lane's labels so it lands in
-    /// the lane it was started from.
-    fn create_in_new_workspace(
-        &mut self,
-        new: NewWorkspace,
-        prompt: String,
-        cx: &mut Context<Self>,
-    ) {
-        let fail = |this: &mut Self, error: &str, cx: &mut Context<Self>| {
-            if let Some(draft) = &mut this.draft {
-                draft.error = Some(error.to_string());
-            }
+        let Some(agent) = made.agent.clone() else {
+            // A workspace and no agent: it shows in its lane.
+            self.focus.focus(window, cx);
             cx.notify();
-        };
-        if prompt.is_empty() {
-            return fail(self, "Describe the work for the first agent", cx);
-        }
-        let Some(project) = self
-            .core
-            .store
-            .read(cx)
-            .fleet
-            .host(&new.host)
-            .and_then(|host| host.directory.projects.get(&new.project).cloned())
-        else {
-            return fail(self, "Pick a project", cx);
-        };
-        let Some((provider, model, thinking)) = self.resolved(cx) else {
-            return fail(self, "No ready providers on this host", cx);
-        };
-        let Some(lane) = self
-            .lanes(cx)
-            .iter()
-            .find(|lane| {
-                self.draft
-                    .as_ref()
-                    .is_some_and(|draft| draft.lane == lane.key)
-            })
-            .cloned()
-        else {
             return;
         };
-        let mut config = json!({ "provider": provider.id, "cwd": project.project_root_path });
-        if let Some(model) = model {
-            config["model"] = json!(model);
-        }
-        if let Some(thinking) = thinking {
-            config["thinkingOptionId"] = json!(thinking);
-        }
-        if let Some(mode) = provider.default_mode.clone() {
-            config["modeId"] = json!(mode);
-        }
-        let worktree = new.worktree && project.project_kind == "git";
-        let source = if worktree {
-            json!({ "kind": "worktree", "cwd": project.project_root_path, "projectId": project.project_id })
-        } else {
-            json!({ "kind": "directory", "path": project.project_root_path, "projectId": project.project_id })
-        };
-        let message = json!({
-            "type": "workspace.create.request",
-            "idempotencyKey": crate::app::store::uuid_v4(),
-            "source": source,
-            "agent": {
-                "config": config,
-                "initialPrompt": prompt,
-                "clientMessageId": crate::app::store::uuid_v4(),
-                "labels": {},
-            },
-            "firstAgentContext": { "prompt": prompt },
-        });
-        let labels = lane_labels(&lane, &new.host, &self.core.store.read(cx).fleet);
-        if let Some(draft) = &mut self.draft {
-            draft.creating = true;
-            draft.error = None;
-        }
+        let host = made.host.clone();
+        self.pending = Some((lane.to_string(), host.clone(), agent.clone()));
+        self.expanded
+            .insert(lane.to_string(), (host.clone(), agent.clone()));
+        self.focused_lane = Some(lane.to_string());
+        self.focused_agent = Some((host.clone(), agent.clone()));
+        self.focus_composer = Some((host, agent));
+        // The directory push can precede the response, and the selected
+        // mode may have changed while creation ran.
+        self.prune_expanded(cx);
+        self.reconcile_view(true, cx);
         cx.notify();
-        let host = new.host.clone();
-        let task = self.core.store.read(cx).write(&host, message, cx);
-        cx.spawn(async move |this, cx| {
-            let created = match task.await {
-                Ok(payload) if payload["error"].is_string() => {
-                    Err(payload["error"].as_str().unwrap_or_default().to_string())
-                }
-                Ok(payload) => match (
-                    payload["workspace"]["id"].as_str(),
-                    payload["agent"]["id"].as_str(),
-                ) {
-                    (Some(workspace), Some(agent)) => {
-                        Ok((workspace.to_string(), agent.to_string()))
-                    }
-                    _ => Err("The host did not return the new workspace".to_string()),
-                },
-                Err(error) => Err(error),
-            };
-            let result = match created {
-                Ok((workspace, agent)) => {
-                    // In a label lane it takes the lane's labels, or it would
-                    // land under Unlabelled.
-                    if !labels.is_empty() {
-                        let batch = this.update(cx, |this, cx| {
-                            this.core
-                                .store
-                                .read(cx)
-                                .set_workspace_labels(&host, &workspace, labels, cx)
-                        });
-                        if let Ok(batch) = batch
-                            && let Some(error) = batch.await.error
-                        {
-                            let _ = this.update(cx, |this, cx| {
-                                this.core.store.update(cx, |store, cx| {
-                                    store.toast(format!("Labelling the new workspace: {error}"), cx)
-                                });
-                            });
-                        }
-                    }
-                    Ok(agent)
-                }
-                Err(error) => Err(error),
-            };
-            let _ = this.update(cx, |this, cx| {
-                this.draft_created(lane.key.clone(), host, result, cx);
-            });
-        })
-        .detach();
-    }
-
-    fn providers(&self, cx: &App) -> Vec<Provider> {
-        let Some(host) = self.draft_host() else {
-            return Vec::new();
-        };
-        self.core
-            .store
-            .read(cx)
-            .providers
-            .get(&host)
-            .cloned()
-            .unwrap_or_default()
-            .into_iter()
-            .filter(Provider::ready)
-            .collect()
-    }
-
-    /// Picked provider and model, defaulting to Claude Haiku when the host has it.
-    fn resolved(&self, cx: &App) -> Option<(Provider, Option<String>, Option<String>)> {
-        let draft = self.draft.as_ref()?;
-        let providers = self.providers(cx);
-        let provider = draft
-            .provider
-            .as_ref()
-            .and_then(|id| providers.iter().find(|provider| &provider.id == id))
-            .or_else(|| providers.iter().find(|provider| provider.id == "claude"))
-            .or_else(|| providers.first())?
-            .clone();
-        let model = prefer_model(&provider, draft.model.as_ref());
-        let thinking = model.and_then(|model| {
-            draft
-                .thinking
-                .clone()
-                .filter(|id| model.thinking.iter().any(|choice| &choice.id == id))
-                .or_else(|| model.default_thinking.clone())
-        });
-        let model_id = model.map(|model| model.id.clone());
-        Some((provider, model_id, thinking))
     }
 
     fn move_column(&mut self, delta: isize, cx: &mut Context<Self>) {
@@ -3284,8 +2946,7 @@ impl Lanes {
                 .map(|card| (card.host.clone(), card.agent_id.clone()));
         }
         self.focused_lane = Some(lane.key.clone());
-        self.draft_focused = false;
-        self.h_scroll.scroll_to_item(next);
+        self.side.handle.scroll_to_item(next);
         cx.notify();
     }
 
@@ -3306,20 +2967,12 @@ impl Lanes {
             self.move_column(0, cx);
             return;
         }
-        let draft_here = self
-            .draft
-            .as_ref()
-            .is_some_and(|draft| draft.lane == lane.key);
         /// Where focus can rest, with the list row it is drawn in.
         enum Slot {
-            Draft,
-            Card((String, String), usize),
+            Card((HostId, String), usize),
             Row(RowFocus, usize),
         }
         let mut slots = Vec::new();
-        if draft_here {
-            slots.push(Slot::Draft);
-        }
         let box_single = self.core.nav.read(cx).box_single_workspaces;
         let rows = self.rows(&lane, box_single, cx);
         for (ix, row) in rows.into_iter().enumerate() {
@@ -3336,15 +2989,15 @@ impl Lanes {
                     slots.push(Slot::Row(focus, ix));
                 }
                 Row::Terminal { owner, index, .. } => {
-                    let (host, workspace) = owner.workspace(&lane);
-                    if let Some(id) = self
-                        .core
-                        .store
-                        .read(cx)
-                        .workspace_terminal_ids(host, workspace)
-                        .nth(index)
+                    if let Some((host, workspace)) = owner.workspace(&lane)
+                        && let Some(id) = self
+                            .core
+                            .store
+                            .read(cx)
+                            .workspace_terminal_ids(host, workspace)
+                            .nth(index)
                     {
-                        let focus = RowFocus::Terminal(host.to_string(), id.clone());
+                        let focus = RowFocus::Terminal(host.clone(), id.clone());
                         slots.push(Slot::Row(focus, ix));
                     }
                 }
@@ -3358,9 +3011,7 @@ impl Lanes {
         if slots.is_empty() {
             return;
         }
-        let current = if self.draft_focused && draft_here {
-            0
-        } else if let Some(focus) = &self.focused_row {
+        let current = if let Some(focus) = &self.focused_row {
             slots
                 .iter()
                 .position(|slot| matches!(slot, Slot::Row(row, _) if row == focus))
@@ -3377,26 +3028,17 @@ impl Lanes {
         };
         let next = (current as isize + delta).clamp(0, slots.len() as isize - 1) as usize;
         let row = match &slots[next] {
-            Slot::Draft => {
-                self.draft_focused = true;
-                self.focused_row = None;
-                None
-            }
             Slot::Card(agent, row) => {
-                self.draft_focused = false;
                 self.focused_row = None;
                 self.focused_agent = Some(agent.clone());
-                Some(*row)
+                *row
             }
             Slot::Row(focus, row) => {
-                self.draft_focused = false;
                 self.focused_row = Some(focus.clone());
-                Some(*row)
+                *row
             }
         };
-        if let Some(row) = row
-            && let Some(list) = self.lists.get(&lane.key)
-        {
+        if let Some(list) = self.lists.get(&lane.key) {
             list.state.scroll_to_reveal_item(row);
         }
         cx.notify();
@@ -3406,7 +3048,6 @@ impl Lanes {
     fn focus_row(&mut self, lane: &str, focus: RowFocus, cx: &mut Context<Self>) {
         self.focused_lane = Some(lane.to_string());
         self.focused_row = Some(focus);
-        self.draft_focused = false;
         cx.notify();
     }
 
@@ -3418,12 +3059,6 @@ impl Lanes {
     }
 
     fn activate(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.draft_focused {
-            if let Some(draft) = &self.draft {
-                draft.input.update(cx, |input, cx| input.focus(window, cx));
-            }
-            return;
-        }
         let Some(lane_key) = self.focused_lane.clone() else {
             self.move_column(0, cx);
             return;
@@ -3450,7 +3085,7 @@ impl Lanes {
                     .find(|lane| lane.key == lane_key)
                     .cloned()
                 {
-                    self.open_draft_in(&lane, Some((host, workspace)), window, cx);
+                    self.open_draft_in(&lane, (host, workspace), window, cx);
                 }
                 return;
             }
@@ -3462,7 +3097,7 @@ impl Lanes {
         self.expand(&lane_key, &host, &agent, window, cx);
     }
 
-    /// Escape closes a blank composer, a blank draft, or the focused column's card.
+    /// Escape closes a blank composer, or the focused column's card.
     fn on_escape(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         let expanded: Vec<_> = self
             .expanded
@@ -3482,15 +3117,6 @@ impl Lanes {
             }
             return false;
         }
-        if self.draft_focused
-            && let Some(draft) = &self.draft
-            && draft.input.read(cx).focus_handle(cx).is_focused(window)
-        {
-            // Closed whatever it holds; the text comes back with the next
-            // draft in its lane.
-            self.dismiss_draft(true, window, cx);
-            return true;
-        }
         if self.focus.is_focused(window)
             && let Some(lane) = self.focused_lane.clone()
             && self.expanded.contains_key(&lane)
@@ -3501,68 +3127,14 @@ impl Lanes {
         false
     }
 
-    /// Moves the columns' scroll offset (zero or negative), clamped to the content.
-    fn set_scroll_x(&mut self, x: Pixels, cx: &mut Context<Self>) {
-        let current = self.h_scroll.offset();
-        let min = -self.h_scroll.max_offset().x;
-        let next = if x > px(0.) {
-            px(0.)
-        } else if x < min {
-            min
-        } else {
-            x
-        };
-        if next != current.x {
-            self.h_scroll.set_offset(point(next, current.y));
-            cx.notify();
-        }
-    }
-
     /// Positive `dx` reveals later columns.
     fn nudge_scroll(&mut self, dx: f32, cx: &mut Context<Self>) {
-        let x = self.h_scroll.offset().x - px(dx);
-        self.set_scroll_x(x, cx);
+        self.side.nudge(dx, cx);
     }
 
-    fn middle_down(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
-        self.middle = match self.middle {
-            Some(MiddleScroll::Auto { .. }) => None,
-            _ => Some(MiddleScroll::Held {
-                origin: position,
-                offset: self.h_scroll.offset().x,
-                panning: false,
-            }),
-        };
-        cx.notify();
-    }
-
-    fn middle_up(&mut self, cx: &mut Context<Self>) {
-        match self.middle {
-            Some(MiddleScroll::Held {
-                origin,
-                panning: false,
-                ..
-            }) => {
-                self.middle = Some(MiddleScroll::Auto { origin });
-                self.run_autoscroll(cx);
-            }
-            Some(MiddleScroll::Held { .. }) => self.middle = None,
-            _ => return,
-        }
-        cx.notify();
-    }
-
-    fn edge_hover(&self) -> bool {
-        self.window_active && self.pointer_inside && edges::hovered(&self.h_scroll, self.pointer)
-    }
-
+    /// Drags an open card's bottom edge or an open column's right edge.
+    /// The pointer's part in scrolling is [`columns::listen`]'s.
     fn pointer_moved(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
-        let was_hover = self.edge_hover();
-        self.pointer = position;
-        self.pointer_inside = true;
-        if self.edge_hover() != was_hover {
-            cx.notify();
-        }
         if let Some(resize) = &self.resizing_height {
             let height = (resize.start_height + (position.y - resize.start_y))
                 .clamp(resize.min_height, resize.max_height.max(resize.min_height))
@@ -3579,7 +3151,7 @@ impl Lanes {
             return;
         }
         if let Some(resize) = &self.resizing {
-            let widest = (self.h_scroll.bounds().size.width - px(COLUMNS_PADDING * 2.))
+            let widest = (self.side.handle.bounds().size.width - px(COLUMNS_PADDING * 2.))
                 .max(px(EXPANDED_RESIZE_MIN));
             let width = (resize.start_width + (position.x - resize.start_x))
                 .clamp(px(EXPANDED_RESIZE_MIN), widest)
@@ -3588,27 +3160,6 @@ impl Lanes {
                 self.expanded_widths.insert(resize.lane.clone(), width);
                 cx.notify();
             }
-            return;
-        }
-        let Some(MiddleScroll::Held {
-            origin,
-            offset,
-            panning,
-        }) = self.middle
-        else {
-            return;
-        };
-        let dx = position.x - origin.x;
-        let panning = panning || (dx / px(1.)).abs() > PAN_THRESHOLD;
-        if panning {
-            self.middle = Some(MiddleScroll::Held {
-                origin,
-                offset,
-                panning,
-            });
-            // The board follows the pointer, like dragging paper.
-            self.set_scroll_x(offset + dx, cx);
-            cx.notify();
         }
     }
 
@@ -3619,44 +3170,7 @@ impl Lanes {
     }
 
     fn stop_middle(&mut self, cx: &mut Context<Self>) -> bool {
-        if self.middle.take().is_some() {
-            cx.notify();
-            return true;
-        }
-        false
-    }
-
-    /// Ticks while in autoscroll, scrolling by how far the pointer is from
-    /// where the middle button was clicked.
-    fn run_autoscroll(&mut self, cx: &mut Context<Self>) {
-        cx.spawn(async move |this, cx| {
-            let mut last = Instant::now();
-            loop {
-                cx.background_executor().timer(AUTOSCROLL_TICK).await;
-                let now = Instant::now();
-                let elapsed = (now - last).as_secs_f32();
-                last = now;
-                let running = this
-                    .update(cx, |this, cx| {
-                        let Some(MiddleScroll::Auto { origin }) = this.middle else {
-                            return false;
-                        };
-                        let distance = (this.pointer.x - origin.x) / px(1.);
-                        let past = distance.abs() - AUTOSCROLL_DEAD_ZONE;
-                        if past > 0. {
-                            // Pointer to the right of the origin reveals later columns.
-                            let dx = distance.signum() * past * AUTOSCROLL_GAIN * elapsed;
-                            this.nudge_scroll(dx, cx);
-                        }
-                        true
-                    })
-                    .unwrap_or(false);
-                if !running {
-                    break;
-                }
-            }
-        })
-        .detach();
+        self.side.stop_middle(cx)
     }
 
     fn on_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -3692,8 +3206,7 @@ impl Lanes {
     }
 
     fn card_focused(&self, lane: &str, card: &LaneCard) -> bool {
-        !self.draft_focused
-            && self.focused_row.is_none()
+        self.focused_row.is_none()
             && self.focused_lane.as_deref() == Some(lane)
             && self
                 .focused_agent
@@ -3736,6 +3249,8 @@ impl Render for Lanes {
         let (expanded, terminals) = (&self.expanded, &self.expanded_terminals);
         self.expanded_widths
             .retain(|lane, _| expanded.contains_key(lane) || terminals.contains_key(lane));
+        self.open_lists
+            .retain(|lane, _| expanded.contains_key(lane));
         if self
             .resizing
             .as_ref()
@@ -3744,7 +3259,7 @@ impl Render for Lanes {
             self.resizing = None;
         }
 
-        let open: Vec<(String, String)> = self.expanded.values().cloned().collect();
+        let open: Vec<(HostId, String)> = self.expanded.values().cloned().collect();
         for (host, agent) in &open {
             self.conversation(host, agent, window, cx);
         }
@@ -3756,56 +3271,31 @@ impl Render for Lanes {
             });
         }
 
-        let visible_width = match self.h_scroll.bounds().size.width {
-            width if width > px(0.) => width,
-            _ => viewport,
-        };
+        let visible_width = columns::visible_width(&self.side, window);
         let visible = self.arranged(&self.visible_lanes(cx), cx);
         // While a lane is dragged, the lanes show where it would land.
         let visible = match &self.lane_drag {
             Some(drag) => in_order(&visible, &drag.order),
             None => visible,
         };
-        let mut columns = div()
-            .id("lanes-columns")
-            .flex_1()
-            .min_h(px(0.))
-            .w_full()
-            .flex()
-            .gap(px(COLUMN_GAP))
-            .px(px(COLUMNS_PADDING))
-            .pb(px(16.))
-            .overflow_x_scroll()
-            .restrict_scroll_to_axis()
-            .track_scroll(&self.h_scroll)
-            .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _, cx| {
-                if this.wheel_resize(event, cx) {
-                    cx.stop_propagation();
-                    return;
-                }
-                // Headers scroll across columns with a plain wheel, and so do
-                // the gaps between them, so a wheel along the header row never
-                // falls through a gap. Lower gaps stay inert.
-                let board = this.h_scroll.bounds();
-                let header_row = event.position.y >= board.top()
-                    && event.position.y < board.top() + px(HEADER_HEIGHT);
-                if !event.modifiers.shift && !header_row {
-                    return;
-                }
-                // Only a mouse wheel turns sideways; a trackpad's swipe is
-                // left to the board, which takes its sideways part alone.
-                if !matches!(event.delta, ScrollDelta::Lines(_)) {
-                    return;
-                }
-                let delta = event.delta.pixel_delta(px(16.));
-                let dy = delta.y / px(1.);
-                if dy == 0. {
-                    return;
-                }
-                // Wheel down is a negative delta; that should reveal later columns.
-                this.nudge_scroll(-dy, cx);
-                cx.stop_propagation();
-            }));
+        let mut columns = columns::wheel(
+            div()
+                .id("lanes-columns")
+                .flex_1()
+                .min_h(px(0.))
+                .w_full()
+                .flex()
+                .gap(px(COLUMN_GAP))
+                .px(px(COLUMNS_PADDING))
+                .pb(px(16.))
+                .overflow_x_scroll()
+                .restrict_scroll_to_axis()
+                .track_scroll(&self.side.handle),
+            px(HEADER_HEIGHT),
+            |this| &mut this.side,
+            |this| &mut this.width,
+            cx,
+        );
         if visible.is_empty() {
             columns = columns.child(div().p(px(24.)).text_color(p.muted).child(
                 if lanes.is_empty() {
@@ -3822,11 +3312,11 @@ impl Render for Lanes {
         // of the same width, so the scroll extent and scroll_to_item hold.
         // Whole device pixels, so a column that only moved can reuse what it
         // drew: its glyphs stay on the subpixel offsets they were drawn at.
-        let offset = self.h_scroll.offset();
+        let offset = self.side.handle.offset();
         let scale = window.scale_factor();
         let snapped = px((offset.x.as_f32() * scale).round() / scale);
         if snapped != offset.x {
-            self.h_scroll.set_offset(point(snapped, offset.y));
+            self.side.handle.set_offset(point(snapped, offset.y));
         }
         let mut scroll_x = -snapped;
         self.column_width = self.fit_width(&visible, expanded_width, visible_width, cx);
@@ -3849,7 +3339,7 @@ impl Render for Lanes {
                     let target = px((target.as_f32() * scale).round() / scale).max(px(0.));
                     if target != scroll_x {
                         scroll_x = target;
-                        self.h_scroll.set_offset(point(-target, offset.y));
+                        self.side.handle.set_offset(point(-target, offset.y));
                     }
                     break;
                 }
@@ -3862,7 +3352,7 @@ impl Render for Lanes {
         );
         let mut x = px(COLUMNS_PADDING);
         // Workspaces in lanes near the view, whose terminals they list.
-        let mut watched: Vec<(String, String)> = Vec::new();
+        let mut watched: Vec<(HostId, String)> = Vec::new();
         for (ix, lane) in visible.iter().enumerate() {
             let width = self.lane_width(lane, expanded_width);
             let near = x + width >= near_from && x <= near_to;
@@ -3883,16 +3373,12 @@ impl Render for Lanes {
                     style,
                     fingerprint: self.column_fingerprint(lane, &style, cx),
                 };
-                // An expanded card or a draft records where it was drawn
-                // (popover anchors, text input), so only plain card columns
-                // may reuse their drawing when scrolling moves them. See
+                // An expanded card records where it was drawn (popover
+                // anchors, text input), so only plain card columns may reuse
+                // their drawing when scrolling moves them. See
                 // vendor/gpui-pre/PATCHES.md for relocation restrictions.
                 let relocatable = !self.expanded.contains_key(&lane.key)
-                    && !self.expanded_terminals.contains_key(&lane.key)
-                    && !self
-                        .draft
-                        .as_ref()
-                        .is_some_and(|draft| draft.lane == lane.key);
+                    && !self.expanded_terminals.contains_key(&lane.key);
                 let view = self.column_view(&lane.key, inputs, cx);
                 // A cached view is laid out from this style, not its content.
                 AnyView::from(view)
@@ -3927,8 +3413,6 @@ impl Render for Lanes {
         self.columns
             .retain(|key, _| visible_keys.contains(key.as_str()));
 
-        // Passive fades indicate actual overflow. The thumb reveals on edge
-        // or bottom hover, and the stock scrollbar holds it during interaction.
         let board = div()
             .relative()
             .flex_1()
@@ -3936,44 +3420,19 @@ impl Render for Lanes {
             .flex()
             .flex_col()
             .child(columns)
-            .child(edges::fades(&self.h_scroll, p.surface0))
-            .child(
-                div().absolute().inset_0().child(
-                    Scrollbar::horizontal(&self.h_scroll)
-                        .mode(if self.edge_hover() {
-                            ScrollbarMode::Always
-                        } else {
-                            ScrollbarMode::Hover
-                        })
-                        .viewport_from_layout(),
-                ),
-            )
+            .children(self.side.overlays(p.surface0))
             .child(self.width_control(cx));
-        let autoscroll_origin = match self.middle {
-            Some(MiddleScroll::Auto { origin }) => Some(origin),
-            _ => None,
-        };
-        let scrolling = autoscroll_origin.is_some()
-            || matches!(self.middle, Some(MiddleScroll::Held { panning: true, .. }))
-            || self.resizing.is_some();
+        let scrolling = self.side.scrolling() || self.resizing.is_some();
 
         let find_bar = self.find_bar(cx);
-        div()
+        let root = div()
             .id("lanes-root")
             .key_context("Lanes")
             .track_focus(&self.focus)
             .on_action(cx.listener(|this, _: &FindOnBoard, window, cx| {
                 this.open_find(window, cx);
-            }))
-            .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
-                if !*hovered {
-                    let was_hover = this.edge_hover();
-                    this.pointer_inside = false;
-                    if was_hover {
-                        cx.notify();
-                    }
-                }
-            }))
+            }));
+        columns::listen(root, |this| &mut this.side, cx)
             .size_full()
             .flex()
             .flex_col()
@@ -4010,23 +3469,6 @@ impl Render for Lanes {
                     cx.stop_propagation();
                 }
             }))
-            .on_mouse_down(
-                MouseButton::Middle,
-                cx.listener(|this, event: &MouseDownEvent, _, cx| {
-                    this.middle_down(event.position, cx);
-                    cx.stop_propagation();
-                }),
-            )
-            .on_mouse_up(
-                MouseButton::Middle,
-                cx.listener(|this, _: &MouseUpEvent, _, cx| this.middle_up(cx)),
-            )
-            .on_mouse_up_out(
-                MouseButton::Middle,
-                cx.listener(|this, _: &MouseUpEvent, _, cx| {
-                    this.stop_middle(cx);
-                }),
-            )
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
                 this.pointer_moved(event.position, cx);
             }))
@@ -4044,55 +3486,13 @@ impl Render for Lanes {
                     this.cancel_lane_drag(window, cx);
                 }),
             )
-            // A click anywhere but on the draft closes it. Its menus block
-            // clicks from reaching the board, so using them does not.
-            .on_any_mouse_down(cx.listener(|this, event: &MouseDownEvent, window, cx| {
-                let outside = this.draft.as_ref().is_some_and(|draft| {
-                    draft
-                        .bounds
-                        .get()
-                        .is_some_and(|bounds| !bounds.contains(&event.position))
-                });
-                if outside {
-                    this.dismiss_draft(true, window, cx);
-                }
-            }))
-            .on_mouse_down_out(cx.listener(|this, _: &MouseDownEvent, window, cx| {
-                this.dismiss_draft(false, window, cx);
-            }))
-            // A click ends autoscroll without acting on what was under it,
-            // as in browsers.
-            .capture_any_mouse_down(cx.listener(|this, event: &MouseDownEvent, _, cx| {
-                if event.button != MouseButton::Middle
-                    && matches!(this.middle, Some(MiddleScroll::Auto { .. }))
-                    && this.stop_middle(cx)
-                {
-                    cx.stop_propagation();
-                }
-            }))
             .relative()
             .child(board)
             .children(self.focus_overlay(window, cx))
             .children(self.card_menu_layer(window, cx))
             .children(find_bar)
             .children(self.state_bar(cx))
-            .when_some(autoscroll_origin, |root, origin| {
-                root.child(deferred(
-                    anchored().position(origin - point(px(14.), px(14.))).child(
-                        div()
-                            .size(px(28.))
-                            .rounded_full()
-                            .border_1()
-                            .border_color(p.border)
-                            .bg(p.surface2)
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .text_color(p.muted)
-                            .child("↔"),
-                    ),
-                ))
-            })
+            .children(self.side.autoscroll_marker())
     }
 }
 
@@ -4114,19 +3514,20 @@ fn in_order(lanes: &LaneSet, order: &[String]) -> LaneSet {
 /// say when a workspace was made). Read when shown, so it is never stale.
 fn workspace_host_tooltip(
     core: &Core,
-    host: &str,
+    host: &HostId,
     workspace: &str,
 ) -> impl Fn(&mut Window, &mut App) -> AnyView + 'static {
-    let (core, host, workspace) = (core.clone(), host.to_string(), workspace.to_string());
+    let (core, host, workspace) = (core.clone(), host.clone(), workspace.to_string());
     move |window, cx| {
         let store = core.store.read(cx);
         let fleet = &store.fleet;
-        let mut rows: Vec<(&str, String)> = vec![("Host", host.clone())];
+        let host_name = fleet.host_name(&host).to_string();
+        let mut rows: Vec<(&str, String)> = vec![("Host", host_name.clone())];
         let record = fleet.host(&host);
         if let Some(name) = record
             .and_then(|record| record.server.as_ref())
             .map(|server| server.hostname.clone())
-            .filter(|name| !name.is_empty() && !name.eq_ignore_ascii_case(&host))
+            .filter(|name| !name.is_empty() && !name.eq_ignore_ascii_case(&host_name))
         {
             rows.push(("Hostname", name));
         }
@@ -4202,6 +3603,12 @@ fn lane_title_tooltip(
         let fleet = &core.store.read(cx).fleet;
         let mut rows: Vec<(&str, String)> = Vec::new();
         match lane.kind {
+            LaneKind::Label | LaneKind::Combination if fleet.labels.is_some() => {
+                // Reef keeps these labels; agents carry them.
+                let single = lane.label_keys.len() == 1;
+                rows.push((if single { "Label" } else { "Labels" }, lane.title.clone()));
+                rows.push(("Kept by", "Reef".to_string()));
+            }
             LaneKind::Label | LaneKind::Combination => {
                 let single = lane.label_keys.len() == 1;
                 rows.push((if single { "Label" } else { "Labels" }, lane.title.clone()));
@@ -4240,11 +3647,11 @@ fn lane_title_tooltip(
             _ => rows.push(("Lane", lane.title.clone())),
         }
         // Workspaces per host, most first.
-        let mut per_host: Vec<(&str, usize)> = Vec::new();
+        let mut per_host: Vec<(&HostId, usize)> = Vec::new();
         for workspace in &lane.workspaces {
             match per_host
                 .iter_mut()
-                .find(|(host, _)| *host == workspace.host)
+                .find(|(host, _)| **host == workspace.host)
             {
                 Some((_, count)) => *count += 1,
                 None => per_host.push((&workspace.host, 1)),
@@ -4254,7 +3661,7 @@ fn lane_title_tooltip(
         if !per_host.is_empty() {
             let spread: Vec<String> = per_host
                 .iter()
-                .map(|(host, count)| format!("{count} on {host}"))
+                .map(|(host, count)| format!("{count} on {}", fleet.host_name(host)))
                 .collect();
             rows.push(("Workspaces", spread.join(" · ")));
         }
@@ -4345,14 +3752,14 @@ impl Lanes {
     /// menu already open. Dismissing it returns focus to the board.
     fn open_card_menu(
         &mut self,
-        host: &str,
+        host: &HostId,
         agent: &str,
         position: Point<Pixels>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let core = self.core.clone();
-        let (host, agent) = (host.to_string(), agent.to_string());
+        let (host, agent) = (host.clone(), agent.to_string());
         let menu = PopupMenu::build(window, cx, move |menu, _, cx| {
             let fleet = &core.store.read(cx).fleet;
             let record = fleet.agent(&host, &agent);
@@ -4387,7 +3794,7 @@ impl Lanes {
     fn open_workspace_menu(
         &mut self,
         lane: &Rc<Lane>,
-        host: &str,
+        host: &HostId,
         workspace: &str,
         position: Point<Pixels>,
         window: &mut Window,
@@ -4396,7 +3803,7 @@ impl Lanes {
         let core = self.core.clone();
         let board = cx.entity().downgrade();
         let lane = Rc::clone(lane);
-        let (host, workspace) = (host.to_string(), workspace.to_string());
+        let (host, workspace) = (host.clone(), workspace.to_string());
         let menu = PopupMenu::build(window, cx, move |menu, _, cx| {
             let target = (host.clone(), workspace.clone());
             let path = (core.store.read(cx).fleet.workspace(&host, &workspace))
@@ -4406,10 +3813,20 @@ impl Lanes {
                 let (board, lane, target) = (board.clone(), lane.clone(), target.clone());
                 move |_, window, cx| {
                     let _ = board.update(cx, |board, cx| {
-                        board.open_draft_in(&lane, Some(target.clone()), window, cx);
+                        board.open_draft_in(&lane, target.clone(), window, cx);
                     });
                 }
             }));
+            let menu = menu.item(
+                PopupMenuItem::new("New workspace in this project…").on_click({
+                    let (board, lane, target) = (board.clone(), lane.clone(), target.clone());
+                    move |_, window, cx| {
+                        let _ = board.update(cx, |board, cx| {
+                            board.open_new_workspace_draft(&lane, target.clone(), window, cx);
+                        });
+                    }
+                }),
+            );
             let menu = menu.item(
                 PopupMenuItem::new("New terminal in this workspace").on_click({
                     let (board, lane_key, (host, workspace)) =
@@ -4676,82 +4093,22 @@ impl Lanes {
             .into_any_element()
     }
 
+    /// The width pill, led by Collapse all while any card is open.
     fn width_control(&self, cx: &mut Context<Self>) -> AnyElement {
-        let p = palette();
-        let nav_state = self.core.nav.read(cx);
-        let width_label = if nav_state.lane_fit {
-            format!("Fit · {:.0}", self.column_width / px(1.))
-        } else {
-            format!("Width · {:.0}", nav_state.lane_width)
-        };
-        let slider = self.width_slider.clone();
-        let nav = self.core.nav.clone();
-        let any_expanded = !self.expanded.is_empty();
-        div()
-            .absolute()
-            .right(px(16.))
-            .bottom(px(22.))
-            .bg(p.surface2)
-            .rounded(px(6.))
-            .border_1()
-            .border_color(p.border)
-            .flex()
-            .items_center()
-            .when(any_expanded, |pill| {
-                pill.child(
-                    Button::new("lanes-collapse-all")
-                        .small()
-                        .ghost()
-                        .label("Collapse all cards")
-                        .icon(Icon::empty().path("icons/chevrons-down-up.svg"))
-                        .accessibility_label("Collapse all expanded cards")
-                        .tooltip("Collapse every expanded agent card")
-                        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                            this.collapse_all(window, cx)
-                        })),
+        let collapse = (!self.expanded.is_empty()).then(|| {
+            Button::new("lanes-collapse-all")
+                .small()
+                .ghost()
+                .label("Collapse all cards")
+                .icon(Icon::empty().path("icons/chevrons-down-up.svg"))
+                .accessibility_label("Collapse all expanded cards")
+                .tooltip("Collapse every expanded agent card")
+                .on_click(
+                    cx.listener(|this, _: &ClickEvent, window, cx| this.collapse_all(window, cx)),
                 )
-            })
-            .child(
-                Popover::new("lane-width-popover")
-                    .anchor(Anchor::BottomRight)
-                    .trigger(
-                        Button::new("lane-width-settings")
-                            .small()
-                            .ghost()
-                            .label(width_label)
-                            .icon(Icon::empty().path("icons/settings-2.svg"))
-                            .accessibility_label("Column width and Fit")
-                            .tooltip("Column width and Fit · Cmd/Ctrl+wheel also resizes"),
-                    )
-                    .content(move |_, _, cx| {
-                        let fit = nav.read(cx).lane_fit;
-                        let nav = nav.clone();
-                        div()
-                            .w(px(240.))
-                            .flex()
-                            .flex_col()
-                            .gap(px(12.))
-                            .child(
-                                div()
-                                    .text_size(size::sm())
-                                    .text_color(p.muted)
-                                    .child("Column width"),
-                            )
-                            .child(Slider::new(&slider))
-                            .child(
-                                Button::new("lanes-fit")
-                                    .small()
-                                    .ghost()
-                                    .label("Fit columns")
-                                    .selected(fit)
-                                    .tooltip("Narrow columns so they all fit in view")
-                                    .on_click(move |_, _, cx| {
-                                        nav.update(cx, |nav, cx| nav.set_lane_fit(!fit, cx))
-                                    }),
-                            )
-                    }),
-            )
-            .into_any_element()
+                .into_any_element()
+        });
+        self.width.control(self.column_width, collapse, cx)
     }
 
     /// Whether lane has a card or a terminal open in it, which makes it
@@ -4772,7 +4129,7 @@ impl Lanes {
     }
 
     /// The ordinary column width: the user's, or narrower when fitting every
-    /// column into `visible` (never below [`FIT_MIN_WIDTH`]; past that, scroll).
+    /// column into `visible`. Open lanes keep their own widths.
     fn fit_width(
         &self,
         lanes: &[Rc<Lane>],
@@ -4780,11 +4137,6 @@ impl Lanes {
         visible: Pixels,
         cx: &App,
     ) -> Pixels {
-        let nav = self.core.nav.read(cx);
-        let chosen = px(nav.lane_width);
-        if !nav.lane_fit {
-            return chosen;
-        }
         let mut fixed = px(0.);
         let mut ordinary = 0usize;
         for lane in lanes {
@@ -4794,53 +4146,20 @@ impl Lanes {
                 ordinary += 1;
             }
         }
-        if ordinary == 0 {
-            return chosen;
-        }
-        let gaps = px(COLUMN_GAP) * lanes.len().saturating_sub(1) as f32;
-        let room = visible - px(COLUMNS_PADDING * 2.) - gaps - fixed;
-        let fit = room / ordinary as f32;
-        if fit > chosen {
-            chosen
-        } else if fit < px(FIT_MIN_WIDTH) {
-            px(FIT_MIN_WIDTH)
-        } else {
-            fit
-        }
+        columns::fit_width(
+            self.width.chosen(cx),
+            self.width.fit(cx),
+            ordinary,
+            lanes.len(),
+            fixed,
+            visible,
+        )
     }
 
     /// Ctrl+wheel makes every column wider or narrower, like zooming.
     /// Returns whether the event was a resize.
     fn wheel_resize(&mut self, event: &ScrollWheelEvent, cx: &mut Context<Self>) -> bool {
-        if !(event.modifiers.control || event.modifiers.platform) {
-            return false;
-        }
-        let dy = event.delta.pixel_delta(px(16.)).y / px(1.);
-        if dy == 0. {
-            return false;
-        }
-        let lines = (dy / 16.).clamp(-3., 3.);
-        // Save wheel notches now; coalesce trackpad updates into a trailing save.
-        let persist = matches!(event.delta, ScrollDelta::Lines(_));
-        let nav = self.core.nav.clone();
-        let width = nav.read(cx).lane_width + lines * WHEEL_WIDTH_STEP;
-        nav.update(cx, |nav, cx| nav.set_lane_width(width, persist, cx));
-        self.width_save_generation += 1;
-        if !persist {
-            let generation = self.width_save_generation;
-            cx.spawn(async move |this, cx| {
-                cx.background_executor()
-                    .timer(Duration::from_millis(300))
-                    .await;
-                let _ = this.update(cx, |this, cx| {
-                    if this.width_save_generation == generation {
-                        this.core.nav.read(cx).save();
-                    }
-                });
-            })
-            .detach();
-        }
-        true
+        self.width.wheel(event, |this| &mut this.width, cx)
     }
 
     fn lane_decor(&self, lane: &Lane) -> LaneDecor {
@@ -4952,10 +4271,20 @@ impl Lanes {
         if focused_here {
             self.focused_agent.hash(&mut hash);
             self.focused_row.hash(&mut hash);
-            self.draft_focused.hash(&mut hash);
         }
         let expanded = self.expanded.get(key);
         expanded.hash(&mut hash);
+        // Its open card's bar shows a colour pinned for its agent.
+        (expanded.and_then(|(host, agent)| self.core.nav.read(cx).agent_color(host, agent)))
+            .hash(&mut hash);
+        // Cards out in their own windows are marked.
+        (self.core.nav.read(cx).popouts.keys())
+            .filter(|(host, agent)| {
+                lane.cards
+                    .iter()
+                    .any(|c| &c.host == host && &c.agent_id == agent)
+            })
+            .for_each(|key| key.hash(&mut hash));
         // Its open card blinking after a notification.
         expanded
             .is_some_and(|(host, agent)| self.flash_lit(host, agent))
@@ -5018,18 +4347,9 @@ impl Lanes {
             .as_ref()
             .map(|(editor, _)| editor.entity_id())
             .hash(&mut hash);
-        let draft = self.draft.as_ref().filter(|draft| draft.lane == key);
-        if let Some(draft) = draft {
-            draft.workspace.hash(&mut hash);
-            draft.provider.hash(&mut hash);
-            draft.model.hash(&mut hash);
-            draft.thinking.hash(&mut hash);
-            draft.creating.hash(&mut hash);
-            draft.error.hash(&mut hash);
-        }
-        if expanded.is_some() || draft.is_some() {
-            // An open card or draft reads live store state (archive
-            // availability, providers) beyond its lane's cards.
+        if expanded.is_some() {
+            // An open card reads live store state (archive availability)
+            // beyond its lane's cards.
             self.relabel_pending.is_some().hash(&mut hash);
             self.core.store.read(cx).revision.hash(&mut hash);
         }
@@ -5077,13 +4397,6 @@ impl Lanes {
             .px(px(4.))
             .py(px(6.))
             .relative();
-        if self
-            .draft
-            .as_ref()
-            .is_some_and(|draft| draft.lane == lane.key)
-        {
-            body = body.child(self.draft_card(lane, style, cx));
-        }
         let open_terminal = self.expanded_terminals.get(&lane.key).cloned();
         if let Some((host, terminal)) = open_terminal {
             let box_single = self.core.nav.read(cx).box_single_workspaces;
@@ -5092,9 +4405,10 @@ impl Lanes {
                 let store = self.core.store.read(cx);
                 rows.iter().position(|row| match *row {
                     Row::Terminal { owner, index, .. } => {
-                        let (h, w) = owner.workspace(lane);
-                        h == host
-                            && store.workspace_terminal_ids(h, w).nth(index) == Some(&terminal)
+                        owner.workspace(lane).is_some_and(|(h, w)| {
+                            *h == host
+                                && store.workspace_terminal_ids(h, w).nth(index) == Some(&terminal)
+                        })
                     }
                     _ => false,
                 })
@@ -5161,48 +4475,21 @@ impl Lanes {
                 }
             }
         } else if let Some((host, agent)) = expanded {
-            let box_single = self.core.nav.read(cx).box_single_workspaces;
-            let rows = self.rows(lane, box_single, cx);
-            // The expanded card opens in place inside its workspace's box,
-            // with the rest of the lane compact above and below.
-            let at = rows.iter().position(|row| {
-                matches!(row, Row::Card { card, .. }
-                    if lane.cards[*card].host == host && lane.cards[*card].agent_id == agent)
-            });
-            let (start, end) = match at {
-                Some(at) => {
-                    let start = match rows[at] {
-                        Row::Card { boxed: true, .. } => rows[..at]
-                            .iter()
-                            .rposition(|row| matches!(row, Row::Header { .. }))
-                            .unwrap_or(at),
-                        _ => at,
-                    };
-                    let end = rows[at..]
-                        .iter()
-                        .position(|row| row.ends_box())
-                        .map_or(rows.len(), |ix| at + ix + 1);
-                    (start, end)
-                }
-                None => (0, 0),
-            };
+            // The open card at the top of its lane, outside its workspace's
+            // box, and the lane's other cards under it as one-line rows:
+            // those needing the user first, then running ones, then the rest.
             let lane = &lanes[lane_ix];
-            if start > 0 {
-                body = body.child(self.compact_strip(
-                    lane,
-                    &rows[..start],
-                    "above",
-                    false,
-                    style,
-                    window,
-                    cx,
-                ));
-            }
-            let open = self.expanded_box(lane, &rows[start..end], &host, &agent, style, window, cx);
-            let below = end < rows.len();
+            let in_focus = self.in_focus_mode(&lane.key, &host, &agent);
+            let open = if in_focus {
+                self.focus_placeholder(&lane.key, &host, &agent, true, cx)
+            } else {
+                let card = self.expanded_card(lane, &host, &agent, style, true, window, cx);
+                self.measured_card(&lane.key, card)
+            };
+            let others = open_lane_order(lane, &(host.clone(), agent.clone()));
+            let below = !others.is_empty();
             // Its placeholder in focus mode keeps its own size.
-            let height = (!self.in_focus_mode(&lane.key, &host, &agent))
-                .then(|| self.expanded_heights.get(&lane.key).copied());
+            let height = (!in_focus).then(|| self.expanded_heights.get(&lane.key).copied());
             body = match height {
                 Some(height) => body
                     .child(self.measure_body(&lane.key))
@@ -5217,17 +4504,9 @@ impl Lanes {
                 None => body.child(open),
             };
             if below {
-                // A card made shorter leaves the rest of the lane to these.
-                let fill = matches!(height, Some(Some(_)));
-                body = body.child(self.compact_strip(
-                    lane,
-                    &rows[end..],
-                    "below",
-                    fill,
-                    style,
-                    window,
-                    cx,
-                ));
+                // A card made shorter leaves the rest of the lane to the list.
+                let fill = matches!(height, Some(Some(_)) | None);
+                body = body.child(self.open_lane_list(lanes, lane_ix, others, fill, style, cx));
             }
         } else {
             body = body.child(self.card_list(lanes, lane_ix, style, cx));
@@ -5735,8 +5014,61 @@ impl Lanes {
                         },
                     )),
             )
-            .child(header_hosts(lane, narrow))
+            .child(header_hosts(lane, narrow, &self.core.store.read(cx).fleet))
+            .on_mouse_down(MouseButton::Right, {
+                let lane = Rc::clone(lane);
+                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                    cx.stop_propagation();
+                    this.open_lane_menu(&lane, event.position, window, cx);
+                })
+            })
             .into_any_element()
+    }
+
+    /// Opens a lane's menu at `position`, replacing any menu open: grouped
+    /// by project, removing the lane's project from a host.
+    fn open_lane_menu(
+        &mut self,
+        lane: &Rc<Lane>,
+        position: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.core.nav.read(cx).lane_grouping != LaneGrouping::Project {
+            return;
+        }
+        // Its workspaces' projects, one per host it spans.
+        let mut projects: Vec<(HostId, String)> = Vec::new();
+        for ws in &lane.workspaces {
+            let fleet = &self.core.store.read(cx).fleet;
+            if let Some(workspace) = fleet.workspace(&ws.host, &ws.workspace_id) {
+                let pair = (ws.host.clone(), workspace.project_id.clone());
+                if !projects.contains(&pair) {
+                    projects.push(pair);
+                }
+            }
+        }
+        let fleet = &self.core.store.read(cx).fleet;
+        if !(projects.iter())
+            .any(|(host, _)| fleet.host(host).is_some_and(project_remove::supported))
+        {
+            return;
+        }
+        let core = self.core.clone();
+        let menu = PopupMenu::build(window, cx, move |menu, _, cx| {
+            crate::widgets::remove_project::menu_items(menu, &core, &projects, cx)
+        });
+        let _dismiss = cx.subscribe_in(&menu, window, |this, _, _: &DismissEvent, window, cx| {
+            this.card_menu = None;
+            this.focus.focus(window, cx);
+            cx.notify();
+        });
+        self.card_menu = Some(CardMenu {
+            position,
+            menu,
+            _dismiss,
+        });
+        cx.notify();
     }
 
     /// A virtual list: only the cards in view (plus overdraw) are built and
@@ -5757,6 +5089,7 @@ impl Lanes {
         self.lists.insert(key.clone(), entry);
         let lanes = lanes.clone();
         let fades = edges::list_fades(state.clone());
+        let bar = Scrollbar::vertical(&state);
         let list = list(
             state,
             cx.processor(move |this, ix: usize, window, cx| {
@@ -5791,6 +5124,74 @@ impl Lanes {
             .relative()
             .child(list)
             .child(fades)
+            .child(lane_scrollbar(bar))
+            .into_any_element()
+    }
+
+    /// The cards under a lane's open card, one line each in `order` (see
+    /// [`open_lane_order`]), scrolling with fades and a thin bar. It holds
+    /// a few rows, or with `fill` the rest of the lane.
+    fn open_lane_list(
+        &mut self,
+        lanes: &LaneSet,
+        lane_ix: usize,
+        order: Vec<usize>,
+        fill: bool,
+        style: LaneStyle,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let lane = &lanes[lane_ix];
+        let cards: Vec<(HostId, String)> = (order.iter())
+            .map(|&ix| (lane.cards[ix].host.clone(), lane.cards[ix].agent_id.clone()))
+            .collect();
+        let entry = self
+            .open_lists
+            .entry(lane.key.clone())
+            .or_insert_with(OpenList::new);
+        entry.sync(cards);
+        let state = entry.state.clone();
+        let count = order.len();
+        let fades = edges::list_fades(state.clone());
+        let bar = Scrollbar::vertical(&state);
+        let (lanes, order) = (lanes.clone(), Rc::new(order));
+        let list = list(
+            state,
+            cx.processor(move |this, ix: usize, window, cx| {
+                let lane = &lanes[lane_ix];
+                let Some(&card) = order.get(ix) else {
+                    return div().into_any_element();
+                };
+                let row = Row::Card {
+                    card,
+                    boxed: false,
+                    last: true,
+                    depth: 0,
+                };
+                div()
+                    .w_full()
+                    .pb(px(CARD_GAP))
+                    .child(this.row_element(lane, row, true, true, style, window, cx))
+                    .into_any_element()
+            }),
+        )
+        .flex_1()
+        .min_h(px(0.))
+        .w_full();
+        let rows = count.min(OPEN_LIST_ROWS) as f32;
+        div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .relative()
+            .map(|box_| match fill {
+                true => box_.flex_1().min_h(px(COMPACT_HEIGHT + CARD_GAP)),
+                false => box_
+                    .flex_shrink_0()
+                    .h(px(rows * (COMPACT_HEIGHT + CARD_GAP))),
+            })
+            .child(list)
+            .child(fades)
+            .child(lane_scrollbar(bar))
             .into_any_element()
     }
 
@@ -5813,7 +5214,7 @@ impl Lanes {
         let lane_key = lane.key.clone();
         let host = card.host.clone();
         let agent_id = card.agent_id.clone();
-        let scope = element_scope(&[&lane.key, &card.host, &card.agent_id]);
+        let scope = element_scope(&[&lane.key, card.host.as_str(), &card.agent_id]);
         let activity = activity::label(
             card.updated_at
                 .as_deref()
@@ -5851,7 +5252,8 @@ impl Lanes {
                             .truncate()
                             .text_color(p.foreground)
                             .child(card.title.clone()),
-                    ),
+                    )
+                    .when(self.popped_out(card, cx), |row| row.child(popped_mark())),
             )
             .child(
                 div()
@@ -5861,7 +5263,11 @@ impl Lanes {
                     .text_size(size::sm())
                     .text_color(p.muted)
                     .truncate()
-                    .child(meta(card, matches!(frame, Frame::Boxed { .. }))),
+                    .child(meta(
+                        card,
+                        matches!(frame, Frame::Boxed { .. }),
+                        &store.fleet,
+                    )),
             )
             .child(
                 div()
@@ -5890,7 +5296,7 @@ impl Lanes {
                             div()
                                 .id(eid_parts(
                                     "lane-actions",
-                                    &[&lane.key, &card.host, &card.agent_id],
+                                    &[&lane.key, card.host.as_str(), &card.agent_id],
                                 ))
                                 .min_w(px(0.))
                                 .max_w(gpui_kit::gpui::relative(0.75))
@@ -5900,7 +5306,10 @@ impl Lanes {
                         )
                     }),
             );
-        let id = eid_parts("lane-card", &[&lane.key, &card.host, &card.agent_id]);
+        let id = eid_parts(
+            "lane-card",
+            &[&lane.key, card.host.as_str(), &card.agent_id],
+        );
         let shell = card_frame(id, CARD_HEIGHT, focused, frame, look, content);
         self.reorderable(shell, lane, card, frame, cx)
             .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
@@ -5923,8 +5332,11 @@ impl Lanes {
         })
     }
 
-    /// Rows of a lane with an expanded card, compact, in a short scrolling
-    /// strip.
+    /// Whether `card`'s agent is out in a window of its own.
+    fn popped_out(&self, card: &LaneCard, cx: &App) -> bool {
+        (self.core.nav.read(cx).popouts).contains_key(&(card.host.clone(), card.agent_id.clone()))
+    }
+
     /// An open card, recording where it is drawn, for dragging its height.
     fn measured_card(&self, lane: &str, card: AnyElement) -> AnyElement {
         let bounds = self.open_bounds.clone();
@@ -6216,6 +5628,7 @@ impl Lanes {
         let lane_key = lane.key.clone();
         let host = card.host.clone();
         let agent_id = card.agent_id.clone();
+        let alone = matches!(frame, Frame::Alone);
         let content = div()
             .pl(px(8. + SUBAGENT_INDENT * depth.saturating_sub(1) as f32))
             .pr(px(8.))
@@ -6226,15 +5639,51 @@ impl Lanes {
             .child(ui::agent_dot(card.bucket))
             .child(
                 div()
-                    .flex_1()
                     .min_w(px(0.))
                     .truncate()
                     .text_size(size::sm())
                     .text_color(p.foreground)
                     .child(card.title.clone()),
-            );
-        let id = eid_parts("lane-compact", &[&lane.key, &card.host, &card.agent_id]);
-        let shell = card_frame(id, COMPACT_HEIGHT, focused, frame, look, content);
+            )
+            // Outside a box, its workspace follows its name, smaller; the
+            // title gives way first.
+            .when(alone && !card.workspace_name.is_empty(), |row| {
+                row.child(
+                    div()
+                        .flex_shrink_0()
+                        .max_w(gpui_kit::gpui::relative(0.45))
+                        .truncate()
+                        .text_size(px(11.))
+                        .text_color(p.muted)
+                        .child(card.workspace_name.clone()),
+                )
+            })
+            .child(div().flex_1())
+            .when(self.popped_out(card, cx), |row| row.child(popped_mark()));
+        let id = eid_parts(
+            "lane-compact",
+            &[&lane.key, card.host.as_str(), &card.agent_id],
+        );
+        // Where it is, on hover: a one-line row has no room for it.
+        let place = {
+            let store = self.core.store.read(cx);
+            let host = store.fleet.host_name(&card.host).to_string();
+            let model = (store.fleet.agent(&card.host, &card.agent_id))
+                .and_then(|agent| agent.model_label())
+                .map(str::to_string);
+            let workspace = (!card.workspace_name.is_empty()).then(|| card.workspace_name.clone());
+            let line = [workspace, Some(host), model]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>()
+                .join(" · ");
+            match agent_folder(&self.core, &card.host, &card.agent_id, cx) {
+                Some((folder, _)) => format!("{line}\n{}", tilde(&folder)),
+                None => line,
+            }
+        };
+        let shell = card_frame(id, COMPACT_HEIGHT, focused, frame, look, content)
+            .tooltip(move |window, cx| Tooltip::new(place.clone()).build(window, cx));
         let shell = if depth == 0 {
             self.reorderable(shell, lane, card, frame, cx)
         } else {
@@ -6265,7 +5714,7 @@ impl Lanes {
         let agent = store.fleet.agent(&card.host, &card.agent_id);
         let blurb = blurb(store, card, cx);
         let focused = self.card_focused(&lane.key, card);
-        let scope = element_scope(&[&lane.key, &card.host, &card.agent_id]);
+        let scope = element_scope(&[&lane.key, card.host.as_str(), &card.agent_id]);
         let footer = blurb.clone().unwrap_or_else(|| {
             activity::label(
                 card.updated_at
@@ -6338,7 +5787,7 @@ impl Lanes {
                             div()
                                 .id(eid_parts(
                                     "lane-sub-actions",
-                                    &[&lane.key, &card.host, &card.agent_id],
+                                    &[&lane.key, card.host.as_str(), &card.agent_id],
                                 ))
                                 .min_w(px(0.))
                                 .max_w(gpui_kit::gpui::relative(0.75))
@@ -6348,7 +5797,10 @@ impl Lanes {
                         )
                     }),
             );
-        let id = eid_parts("lane-subagent", &[&lane.key, &card.host, &card.agent_id]);
+        let id = eid_parts(
+            "lane-subagent",
+            &[&lane.key, card.host.as_str(), &card.agent_id],
+        );
         card_frame(id, SUBAGENT_HEIGHT, focused, frame, look, content)
             .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                 this.expand(&lane_key, &host, &agent_id, window, cx);
@@ -6410,7 +5862,7 @@ impl Lanes {
             .child(div().flex_1().min_w(px(0.)).truncate().child(label));
         let id = eid_parts(
             "lane-subagents",
-            &[&lane.key, &parent.host, &parent.agent_id],
+            &[&lane.key, parent.host.as_str(), &parent.agent_id],
         );
         let (lane_key, host, agent) = (
             lane.key.clone(),
@@ -6437,7 +5889,9 @@ impl Lanes {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let p = palette();
-        let (host, workspace) = owner.workspace(lane);
+        let Some((host, workspace)) = owner.workspace(lane) else {
+            return div().h(px(COMPACT_HEIGHT)).into_any_element();
+        };
         let store = self.core.store.read(cx);
         let Some(id) = store
             .workspace_terminal_ids(host, workspace)
@@ -6451,10 +5905,10 @@ impl Lanes {
             .terminal_session(host, &id)
             .and_then(|session| session.read(cx).error.clone());
         let look = self.box_look(&lane.key, Some((host, workspace)), style, cx);
-        let open = self.expanded_terminals.get(&lane.key) == Some(&(host.to_string(), id.clone()));
+        let open = self.expanded_terminals.get(&lane.key) == Some(&(host.clone(), id.clone()));
         let focused = open
             || (self.focused_lane.as_deref() == Some(lane.key.as_str())
-                && self.focused_row == Some(RowFocus::Terminal(host.to_string(), id.clone())));
+                && self.focused_row == Some(RowFocus::Terminal(host.clone(), id.clone())));
         let content = div()
             .px(px(8.))
             .flex()
@@ -6473,8 +5927,8 @@ impl Lanes {
             .when_some(gone, |row, _| {
                 row.child(div().text_color(p.extra_muted).child("exited"))
             });
-        let (lane_key, host, terminal) = (lane.key.clone(), host.to_string(), id.clone());
-        let element_id = eid_parts("lane-terminal", &[&lane_key, &host, &terminal]);
+        let (lane_key, host, terminal) = (lane.key.clone(), host.clone(), id.clone());
+        let element_id = eid_parts("lane-terminal", &[&lane_key, host.as_str(), &terminal]);
         card_frame(element_id, COMPACT_HEIGHT, focused, frame, look, content)
             .cursor_pointer()
             .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
@@ -6488,7 +5942,7 @@ impl Lanes {
     fn box_look(
         &self,
         lane: &str,
-        workspace: Option<(&str, &str)>,
+        workspace: Option<(&HostId, &str)>,
         style: LaneStyle,
         cx: &App,
     ) -> BoxLook {
@@ -6497,7 +5951,7 @@ impl Lanes {
             && self
                 .selected_workspace(cx)
                 .as_ref()
-                .map(|(host, workspace)| (host.as_str(), workspace.as_str()))
+                .map(|(host, workspace)| (host, workspace.as_str()))
                 == workspace;
         let here = self.focused_lane.as_deref() == Some(lane);
         let tinted = selected && !here;
@@ -6551,12 +6005,13 @@ impl Lanes {
         let p = palette();
         let first = &lane.cards[card];
         let host = first.host.clone();
+        let host_name = self.core.store.read(cx).fleet.host_name(&host).to_string();
         let workspace = first.workspace_id.clone().unwrap_or_default();
         let look = self.box_look(&lane.key, card_workspace(first), style, cx);
-        let name = lane
-            .workspaces
-            .iter()
-            .find(|ws| ws.host == host && ws.workspace_id == workspace)
+        let entry =
+            (lane.workspaces.iter()).find(|ws| ws.host == host && ws.workspace_id == workspace);
+        let background = tag_background(lane, entry.is_some_and(|ws| ws.background));
+        let name = entry
             .map(|ws| ws.name.clone())
             .filter(|name| !name.is_empty())
             .unwrap_or_else(|| first.workspace_name.clone());
@@ -6571,7 +6026,10 @@ impl Lanes {
             cx,
         );
         div()
-            .id(eid_parts("lane-box", &[&lane.key, &host, &workspace]))
+            .id(eid_parts(
+                "lane-box",
+                &[&lane.key, host.as_str(), &workspace],
+            ))
             .h(px(BOX_HEADER_HEIGHT))
             .flex_shrink_0()
             .when(framed, |header| {
@@ -6602,7 +6060,7 @@ impl Lanes {
                         div()
                             .id(eid_parts(
                                 "lane-box-pinned",
-                                &[&lane.key, &host, &workspace],
+                                &[&lane.key, host.as_str(), &workspace],
                             ))
                             .flex_shrink_0()
                             .child(ui::icon("pin", 11., p.muted))
@@ -6613,15 +6071,19 @@ impl Lanes {
                 },
             )
             .child(self.workspace_name(&lane.key, &host, &workspace, name, p.muted, cx))
+            .when(background, |header| header.child(ui::background_tag()))
             .child(
                 div()
-                    .id(eid_parts("lane-box-host", &[&lane.key, &host, &workspace]))
+                    .id(eid_parts(
+                        "lane-box-host",
+                        &[&lane.key, host.as_str(), &workspace],
+                    ))
                     .flex_shrink_0()
                     .max_w(px(96.))
                     .truncate()
                     .text_color(p.extra_muted)
                     .tooltip(workspace_host_tooltip(&self.core, &host, &workspace))
-                    .child(host.clone()),
+                    .child(host_name.clone()),
             )
             .child(actions)
             .on_mouse_down(
@@ -6638,7 +6100,7 @@ impl Lanes {
     fn workspace_actions(
         &mut self,
         lane: &Rc<Lane>,
-        host: &str,
+        host: &HostId,
         workspace: &str,
         agent: Option<&str>,
         shown: bool,
@@ -6646,10 +6108,10 @@ impl Lanes {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let p = palette();
-        let parts = [lane.key.as_str(), host, workspace];
+        let parts = [lane.key.as_str(), host.as_str(), workspace];
         let add = {
             let lane = Rc::clone(lane);
-            let target = (host.to_string(), workspace.to_string());
+            let target = (host.clone(), workspace.to_string());
             Button::new(eid_parts("lane-box-add", &parts))
                 .icon(Icon::empty().path("icons/plus.svg"))
                 .ghost()
@@ -6657,7 +6119,7 @@ impl Lanes {
                 .tooltip("New agent in this workspace")
                 .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                     cx.stop_propagation();
-                    this.open_draft_in(&lane, Some(target.clone()), window, cx);
+                    this.open_draft_in(&lane, target.clone(), window, cx);
                 }))
         };
         let supported = self
@@ -6667,17 +6129,24 @@ impl Lanes {
             .fleet
             .host(host)
             .is_some_and(|host| host.has("workspaceLabels"));
+        let reef_mode = self.core.store.read(cx).fleet.labels.is_some();
+        let tip = match reef_mode {
+            true => "Relabel this workspace's agents in this lane",
+            false => "Relabel this workspace: all its agents move together",
+        };
         let tag = Button::new(eid_parts("lane-box-relabel-button", &parts))
             .icon(Icon::empty().path("icons/tag.svg"))
             .ghost()
             .xsmall()
-            .tooltip("Relabel this workspace: all its agents move together")
-            .disabled(!supported || self.relabel_pending.is_some());
+            .tooltip(tip)
+            .disabled(
+                !(supported || reef_mode && agent.is_some()) || self.relabel_pending.is_some(),
+            );
         let open_picker = self
             .box_picker
             .as_ref()
             .filter(|open| {
-                open.lane == lane.key && open.host == host && open.workspace == workspace
+                open.lane == lane.key && &open.host == host && open.workspace == workspace
             })
             .map(|open| open.picker.clone());
         let relabel = match open_picker {
@@ -6707,7 +6176,7 @@ impl Lanes {
             }
             None => {
                 let (lane_key, host, workspace) =
-                    (lane.key.clone(), host.to_string(), workspace.to_string());
+                    (lane.key.clone(), host.clone(), workspace.to_string());
                 let agent = agent.map(str::to_string);
                 tag.on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                     cx.stop_propagation();
@@ -6724,11 +6193,11 @@ impl Lanes {
             }
         };
         let picking = self.box_picker.as_ref().is_some_and(|open| {
-            open.lane == lane.key && open.host == host && open.workspace == workspace
+            open.lane == lane.key && &open.host == host && open.workspace == workspace
         });
         let last = if agent.is_some() {
             let lane = Rc::clone(lane);
-            let (host, workspace) = (host.to_string(), workspace.to_string());
+            let (host, workspace) = (host.clone(), workspace.to_string());
             Button::new(eid_parts("lane-box-menu", &parts))
                 .icon(Icon::empty().path("icons/ellipsis-vertical.svg"))
                 .ghost()
@@ -6736,15 +6205,14 @@ impl Lanes {
                 .tooltip("Workspace actions")
                 .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                     cx.stop_propagation();
-                    let at = this.pointer;
+                    let at = this.side.pointer();
                     this.open_workspace_menu(&lane, &host, &workspace, at, window, cx);
                 }))
                 .into_any_element()
         } else {
             let enabled =
                 crate::workspace_archive::available(&self.core, host, workspace, None, cx);
-            let (core, host, workspace) =
-                (self.core.clone(), host.to_string(), workspace.to_string());
+            let (core, host, workspace) = (self.core.clone(), host.clone(), workspace.to_string());
             Button::new(eid_parts("lane-box-archive", &parts))
                 .icon(Icon::empty().path("icons/archive.svg"))
                 .ghost()
@@ -6779,12 +6247,12 @@ impl Lanes {
     fn workspace_menu_listener(
         &self,
         lane: &Rc<Lane>,
-        host: &str,
+        host: &HostId,
         workspace: &str,
         cx: &mut Context<Self>,
     ) -> impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static {
         let lane = Rc::clone(lane);
-        let (host, workspace) = (host.to_string(), workspace.to_string());
+        let (host, workspace) = (host.clone(), workspace.to_string());
         cx.listener(move |this, event: &MouseDownEvent, window, cx| {
             this.open_workspace_menu(&lane, &host, &workspace, event.position, window, cx);
             cx.stop_propagation();
@@ -6810,13 +6278,17 @@ impl Lanes {
         let p = palette();
         let ws = &lane.workspaces[ix];
         let (host, workspace) = (ws.host.clone(), ws.workspace_id.clone());
+        let host_name = self.core.store.read(cx).fleet.host_name(&host).to_string();
         let look = self.box_look(&lane.key, Some((&host, &workspace)), style, cx);
         let actions =
             self.workspace_actions(lane, &host, &workspace, None, look.outlined, window, cx);
         let focus = RowFocus::Workspace(host.clone(), workspace.clone());
         let lane_key = lane.key.clone();
         let row = div()
-            .id(eid_parts("lane-empty", &[&lane.key, &host, &workspace]))
+            .id(eid_parts(
+                "lane-empty",
+                &[&lane.key, host.as_str(), &workspace],
+            ))
             .flex_shrink_0();
         let row = if boxed {
             row.h(px(BOX_HEADER_HEIGHT))
@@ -6859,17 +6331,20 @@ impl Lanes {
                 p.extra_muted,
                 cx,
             ))
+            .when(tag_background(lane, ws.background), |row| {
+                row.child(ui::background_tag())
+            })
             .child(
                 div()
                     .id(eid_parts(
                         "lane-empty-host",
-                        &[&lane.key, &host, &workspace],
+                        &[&lane.key, host.as_str(), &workspace],
                     ))
                     .flex_shrink_0()
                     .max_w(px(96.))
                     .truncate()
                     .tooltip(workspace_host_tooltip(&self.core, &host, &workspace))
-                    .child(host.clone()),
+                    .child(host_name.clone()),
             )
             .child(actions)
             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
@@ -6939,18 +6414,18 @@ impl Lanes {
         lane: &Rc<Lane>,
         rows: &[Row],
         at: usize,
-        host: &str,
+        host: &HostId,
         terminal: &str,
         style: LaneStyle,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let p = palette();
-        let (box_host, box_workspace) = match rows[at] {
+        let owner_workspace = match rows[at] {
             Row::Terminal { owner, .. } => owner.workspace(lane),
-            _ => (host, ""),
+            _ => Some((host, "")),
         };
-        let look = self.box_look(&lane.key, Some((box_host, box_workspace)), style, cx);
+        let look = self.box_look(&lane.key, owner_workspace, style, cx);
         let strip = |this: &mut Self,
                      rows: &[Row],
                      which: &str,
@@ -6980,13 +6455,13 @@ impl Lanes {
             let (core, lane_key, host, terminal) = (
                 self.core.clone(),
                 lane.key.clone(),
-                host.to_string(),
+                host.clone(),
                 terminal.to_string(),
             );
             let board = cx.entity().downgrade();
             Button::new(eid_parts(
                 "lane-terminal-kill",
-                &[&lane.key, &host, &terminal],
+                &[&lane.key, host.as_str(), &terminal],
             ))
             .icon(Icon::empty().path("icons/circle-x.svg"))
             .ghost()
@@ -7026,7 +6501,7 @@ impl Lanes {
             let lane_key = lane.key.clone();
             Button::new(eid_parts(
                 "lane-terminal-collapse",
-                &[&lane.key, host, terminal],
+                &[&lane.key, host.as_str(), terminal],
             ))
             .icon(Icon::empty().path("icons/x.svg"))
             .ghost()
@@ -7084,104 +6559,13 @@ impl Lanes {
             .into_any_element()
     }
 
-    /// The expanded card, inside its workspace's box when it has one: the
-    /// box's header and the card's mates, compact, around it. `rows` are the
-    /// box's rows.
-    #[allow(clippy::too_many_arguments)]
-    fn expanded_box(
-        &mut self,
-        lane: &Rc<Lane>,
-        rows: &[Row],
-        host: &str,
-        agent: &str,
-        style: LaneStyle,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let boxed = rows.iter().any(|row| matches!(row, Row::Header { .. }));
-        if !boxed {
-            if self.in_focus_mode(&lane.key, host, agent) {
-                return self.focus_placeholder(&lane.key, host, agent, true, cx);
-            }
-            let card = self.expanded_card(lane, host, agent, style, true, window, cx);
-            return self.measured_card(&lane.key, card);
-        }
-        let p = palette();
-        let at = rows
-            .iter()
-            .position(|row| {
-                matches!(row, Row::Card { card, .. }
-                    if lane.cards[*card].host == host && lane.cards[*card].agent_id == agent)
-            })
-            .unwrap_or(rows.len());
-        let first = rows.iter().find_map(|row| match row {
-            Row::Card { card, .. } => Some(&lane.cards[*card]),
-            _ => None,
-        });
-        let look = self.box_look(&lane.key, first.and_then(card_workspace), style, cx);
-        let mates = |this: &mut Self,
-                     rows: &[Row],
-                     which: &str,
-                     window: &mut Window,
-                     cx: &mut Context<Self>| {
-            (!rows.is_empty()).then(|| {
-                let mut strip = div()
-                    .id(eid_parts("lane-box-mates", &[&lane.key, which]))
-                    .min_h(px(COMPACT_HEIGHT))
-                    .max_h(px(COMPACT_HEIGHT * 3.5))
-                    .overflow_y_scroll()
-                    .flex()
-                    .flex_col();
-                for &row in rows {
-                    strip =
-                        strip.child(this.row_element(lane, row, true, false, style, window, cx));
-                }
-                strip
-            })
-        };
-        let header = rows
-            .first()
-            .map(|&row| self.row_element(lane, row, true, false, style, window, cx));
-        let before = mates(self, &rows[1.min(at)..at], "before", window, cx);
-        let card = if self.in_focus_mode(&lane.key, host, agent) {
-            self.focus_placeholder(&lane.key, host, agent, false, cx)
-        } else {
-            let card = self.expanded_card(lane, host, agent, style, false, window, cx);
-            self.measured_card(&lane.key, card)
-        };
-        let after = mates(self, &rows[(at + 1).min(rows.len())..], "after", window, cx);
-        // While its card is in focus mode the box holds only a placeholder.
-        let away = self.in_focus_mode(&lane.key, host, agent);
-        div()
-            .when(!away, |d| {
-                d.flex_1()
-                    .min_h(px(EXPANDED_MIN_HEIGHT + BOX_HEADER_HEIGHT))
-            })
-            .rounded(px(BOX_RADIUS))
-            .border_1()
-            .border_color(if look.outlined {
-                look.border
-            } else {
-                p.border_accent.into()
-            })
-            .bg(look.bg)
-            .flex()
-            .flex_col()
-            .overflow_hidden()
-            .children(header)
-            .children(before)
-            .child(card)
-            .children(after)
-            .into_any_element()
-    }
-
     /// An agent's card, open on its conversation. Unless `framed`, its
     /// workspace's box outlines it.
     #[allow(clippy::too_many_arguments)]
     fn expanded_card(
         &mut self,
         lane: &Lane,
-        host: &str,
+        host: &HostId,
         agent: &str,
         style: LaneStyle,
         framed: bool,
@@ -7213,10 +6597,13 @@ impl Lanes {
             .fleet
             .host(host)
             .is_some_and(|host| host.has("workspaceLabels"));
-        // Inside its workspace's box, the box's header relabels it.
+        // Inside its workspace's box, the box's header relabels it; in reef
+        // mode labels are the agent's own, so its card has a tag too, and
+        // any host can carry them.
+        let reef_mode = self.core.store.read(cx).fleet.labels.is_some();
         let picker = workspace
             .clone()
-            .filter(|_| supported && framed)
+            .filter(|_| reef_mode || (supported && framed))
             .map(|workspace| self.label_picker(&lane.key, host, agent, &workspace, window, cx));
         // Closing the tab archives the agent; for a workspace's last agent it
         // offers to archive the workspace instead.
@@ -7233,10 +6620,10 @@ impl Lanes {
                         "Close agent tab (archives the agent)",
                     )
                 };
-            let (core, host, agent) = (self.core.clone(), host.to_string(), agent.to_string());
+            let (core, host, agent) = (self.core.clone(), host.clone(), agent.to_string());
             Button::new(eid_parts(
                 "lane-card-close-tab",
-                &[&lane.key, &host, &agent],
+                &[&lane.key, host.as_str(), &agent],
             ))
             .icon(Icon::empty().path(icon))
             .ghost()
@@ -7268,35 +6655,55 @@ impl Lanes {
                 })
             });
             match agents {
+                // In reef mode labels are the agent's own.
+                _ if store.fleet.labels.is_some() => "Relabel this agent".to_string(),
                 0 | 1 => format!("Relabel the workspace \"{name}\""),
                 n => {
                     format!("Relabel the workspace \"{name}\": all {n} of its agents move together")
                 }
             }
         };
+        let place = framed.then(|| {
+            let store = self.core.store.read(cx);
+            let name = (workspace.as_deref())
+                .and_then(|w| store.fleet.workspace(host, w))
+                .map(|w| w.title.clone().unwrap_or_else(|| w.name.clone()));
+            let host = store.fleet.host_name(host).to_string();
+            match name {
+                Some(name) => format!("{name} · {host}"),
+                None => host,
+            }
+        });
+        let pinned = self.core.nav.read(cx).agent_color(host, agent);
         let measured_picker = picker.clone();
         let relabel_popover = picker.map(|picker| {
             let focus = picker.read(cx).focus_handle(cx);
             let open = picker.read(cx).is_open();
             let opened = picker.clone();
-            Popover::new(eid_parts("lane-relabel", &[&lane.key, host, agent]))
-                .anchor(Anchor::TopRight)
-                .open(open)
-                .p(px(0.))
-                .track_focus(&focus)
-                .trigger(
-                    Button::new(eid_parts("lane-relabel-button", &[&lane.key, host, agent]))
-                        .icon(Icon::empty().path("icons/tag.svg"))
-                        .ghost()
-                        .xsmall()
-                        .tooltip(relabel_tip.clone())
-                        .disabled(self.relabel_pending.is_some()),
-                )
-                .on_open_change(move |open, window, cx| {
-                    opened.update(cx, |picker, cx| picker.set_open(*open, window, cx));
-                })
-                .content(move |_, _, _| picker.clone())
-                .into_any_element()
+            Popover::new(eid_parts(
+                "lane-relabel",
+                &[&lane.key, host.as_str(), agent],
+            ))
+            .anchor(Anchor::TopRight)
+            .open(open)
+            .p(px(0.))
+            .track_focus(&focus)
+            .trigger(
+                Button::new(eid_parts(
+                    "lane-relabel-button",
+                    &[&lane.key, host.as_str(), agent],
+                ))
+                .icon(Icon::empty().path("icons/tag.svg"))
+                .ghost()
+                .xsmall()
+                .tooltip(relabel_tip.clone())
+                .disabled(self.relabel_pending.is_some()),
+            )
+            .on_open_change(move |open, window, cx| {
+                opened.update(cx, |picker, cx| picker.set_open(*open, window, cx));
+            })
+            .content(move |_, _, _| picker.clone())
+            .into_any_element()
         });
         div()
             .relative()
@@ -7319,7 +6726,10 @@ impl Lanes {
             .overflow_hidden()
             .child(
                 div()
-                    .id(eid_parts("lane-card-bar", &[&lane.key, host, agent]))
+                    .id(eid_parts(
+                        "lane-card-bar",
+                        &[&lane.key, host.as_str(), agent],
+                    ))
                     .px(px(10.))
                     .h(px(32.))
                     .flex()
@@ -7327,9 +6737,12 @@ impl Lanes {
                     .gap(px(6.))
                     .border_b_1()
                     .border_color(p.border)
+                    // A colour pinned for the agent shows here too, so its
+                    // card matches its popped-out window.
+                    .when_some(pinned, |bar, index| bar.bg(swatch_tint(p.surface1, index)))
                     .hover(move |bar| bar.bg(style.card_hover))
                     .on_mouse_down(MouseButton::Right, {
-                        let (host, agent) = (host.to_string(), agent.to_string());
+                        let (host, agent) = (host.clone(), agent.to_string());
                         cx.listener(move |this, event: &MouseDownEvent, window, cx| {
                             this.open_card_menu(&host, &agent, event.position, window, cx);
                             cx.stop_propagation();
@@ -7338,7 +6751,7 @@ impl Lanes {
                     .child(match self.rename_editor(&lane.key, host, agent, cx) {
                         Some(editor) => editor.into_any_element(),
                         None => {
-                            let (host, agent) = (host.to_string(), agent.to_string());
+                            let (host, agent) = (host.clone(), agent.to_string());
                             let rename_lane = lane.key.clone();
                             // Only the name itself starts a rename, not the
                             // room beside it.
@@ -7350,7 +6763,7 @@ impl Lanes {
                                     div()
                                         .id(eid_parts(
                                             "lane-card-title",
-                                            &[&lane.key, &host, &agent],
+                                            &[&lane.key, host.as_str(), &agent],
                                         ))
                                         .min_w(px(0.))
                                         .truncate()
@@ -7380,40 +6793,73 @@ impl Lanes {
                                 .into_any_element()
                         }
                     })
+                    // Outside its box it says where it is, as the box's
+                    // header would.
+                    .when_some(place, |bar, place| {
+                        bar.child(place_label(&self.core, host, agent, place, px(180.), cx))
+                    })
                     .children(relabel_popover)
+                    .child({
+                        let (lane_key, host, agent) =
+                            (lane.key.clone(), host.clone(), agent.to_string());
+                        Button::new(eid_parts(
+                            "lane-card-pop-out",
+                            &[&lane_key, host.as_str(), &agent],
+                        ))
+                        .icon(Icon::empty().path("icons/square-arrow-out-up-right.svg"))
+                        .ghost()
+                        .xsmall()
+                        .tooltip("Pop out into its own window")
+                        .on_click(cx.listener(
+                            move |this, _: &ClickEvent, window, cx| {
+                                cx.stop_propagation();
+                                this.pop_out(&lane_key, &host, &agent, window, cx);
+                            },
+                        ))
+                    })
                     .child({
                         let in_focus = self.in_focus_mode(&lane.key, host, agent);
                         let (lane_key, host, agent) =
-                            (lane.key.clone(), host.to_string(), agent.to_string());
-                        Button::new(eid_parts("lane-card-focus", &[&lane_key, &host, &agent]))
-                            .icon(Icon::empty().path(if in_focus {
-                                "icons/minimize-2.svg"
-                            } else {
-                                "icons/maximize-2.svg"
-                            }))
-                            .ghost()
-                            .xsmall()
-                            .tooltip(if in_focus {
-                                "Back to its lane (Esc)"
-                            } else {
-                                "Focus: show this card large (F)"
-                            })
-                            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                            (lane.key.clone(), host.clone(), agent.to_string());
+                        Button::new(eid_parts(
+                            "lane-card-focus",
+                            &[&lane_key, host.as_str(), &agent],
+                        ))
+                        .icon(Icon::empty().path(if in_focus {
+                            "icons/minimize-2.svg"
+                        } else {
+                            "icons/maximize-2.svg"
+                        }))
+                        .ghost()
+                        .xsmall()
+                        .tooltip(if in_focus {
+                            "Back to its lane (Esc)"
+                        } else {
+                            "Focus: show this card large (F)"
+                        })
+                        .on_click(cx.listener(
+                            move |this, _: &ClickEvent, window, cx| {
                                 cx.stop_propagation();
                                 this.toggle_focus_mode(&lane_key, &host, &agent, window, cx);
-                            }))
+                            },
+                        ))
                     })
                     .child(close_button)
                     .child(
-                        Button::new(eid_parts("lane-card-collapse", &[&lane.key, host, agent]))
-                            .icon(Icon::empty().path("icons/x.svg"))
-                            .ghost()
-                            .xsmall()
-                            .accessibility_label("Collapse card")
-                            .tooltip("Collapse card")
-                            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                        Button::new(eid_parts(
+                            "lane-card-collapse",
+                            &[&lane.key, host.as_str(), agent],
+                        ))
+                        .icon(Icon::empty().path("icons/x.svg"))
+                        .ghost()
+                        .xsmall()
+                        .accessibility_label("Collapse card")
+                        .tooltip("Collapse card")
+                        .on_click(cx.listener(
+                            move |this, _: &ClickEvent, window, cx| {
                                 this.collapse_lane(&lane_key, window, cx);
-                            })),
+                            },
+                        )),
                     ),
             )
             .child(div().flex_1().min_h(px(0.)).child(conversation))
@@ -7431,347 +6877,10 @@ impl Lanes {
             })
             .into_any_element()
     }
-
-    fn draft_card(&self, lane: &Lane, style: LaneStyle, cx: &mut Context<Self>) -> AnyElement {
-        let p = palette();
-        let Some(draft) = &self.draft else {
-            return div().into_any_element();
-        };
-        let providers = self.providers(cx);
-        let resolved = self.resolved(cx);
-        let loading = draft
-            .workspace
-            .as_ref()
-            .is_some_and(|(host, _)| !self.core.store.read(cx).providers.contains_key(host));
-        let provider_label = resolved
-            .as_ref()
-            .map(|(provider, _, _)| provider.label.clone())
-            .unwrap_or_else(|| {
-                if loading {
-                    "Loading providers…".into()
-                } else {
-                    "No providers".into()
-                }
-            });
-        let model_label = resolved
-            .as_ref()
-            .and_then(|(provider, model, _)| {
-                let id = model.as_ref()?;
-                provider
-                    .models
-                    .iter()
-                    .find(|model| &model.id == id)
-                    .map(|model| model.label.clone())
-            })
-            .unwrap_or_else(|| "Default model".into());
-        let this = cx.entity().downgrade();
-        let provider_menu = {
-            let providers = providers.clone();
-            let this = this.clone();
-            draft_picker(
-                eid("lane-draft-provider", &lane.key),
-                "Tool",
-                provider_label,
-            )
-            .dropdown_menu(move |mut menu, _, _| {
-                for provider in &providers {
-                    let this = this.clone();
-                    let id = provider.id.clone();
-                    menu = menu.item(PopupMenuItem::new(provider.label.clone()).on_click(
-                        move |_, _, cx| {
-                            let id = id.clone();
-                            let _ = this.update(cx, |this, cx| {
-                                if let Some(draft) = &mut this.draft {
-                                    draft.provider = Some(id);
-                                    draft.model = None;
-                                    draft.thinking = None;
-                                }
-                                cx.notify();
-                            });
-                        },
-                    ));
-                }
-                menu
-            })
-        };
-        let model_menu = {
-            let models = resolved
-                .as_ref()
-                .map(|(provider, _, _)| provider.models.clone())
-                .unwrap_or_default();
-            let this = this.clone();
-            draft_picker(eid("lane-draft-model", &lane.key), "Model", model_label).dropdown_menu(
-                move |mut menu, _, _| {
-                    for model in &models {
-                        let this = this.clone();
-                        let id = model.id.clone();
-                        menu = menu.item(PopupMenuItem::new(model.label.clone()).on_click(
-                            move |_, _, cx| {
-                                let id = id.clone();
-                                let _ = this.update(cx, |this, cx| {
-                                    if let Some(draft) = &mut this.draft {
-                                        draft.model = Some(id);
-                                        draft.thinking = None;
-                                    }
-                                    cx.notify();
-                                });
-                            },
-                        ));
-                    }
-                    menu.max_h(px(320.))
-                },
-            )
-        };
-        let (workspace_menu, new_workspace_row) = self.draft_workspace_controls(lane, draft, cx);
-        let error = draft.error.clone();
-        let creating = draft.creating;
-        let input = draft.input.clone();
-        let bounds = draft.bounds.clone();
-        div()
-            .relative()
-            .p(px(8.))
-            .rounded(px(8.))
-            .bg(style.card)
-            // Outlined while it waits: Enter creates the agent; Escape or a
-            // click anywhere else closes it.
-            .border_1()
-            .border_color(p.accent)
-            .flex()
-            .flex_col()
-            .gap(px(6.))
-            .child(
-                canvas(move |rect, _, _| bounds.set(Some(rect)), |_, _, _, _| {})
-                    .absolute()
-                    .size_full(),
-            )
-            .child(div().flex().min_w(px(0.)).child(workspace_menu))
-            .children(new_workspace_row)
-            .child(
-                Textarea::new(&input)
-                    .appearance(false)
-                    .text_size(size::sm()),
-            )
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(4.))
-                    .flex_wrap()
-                    .child(provider_menu)
-                    .child(model_menu)
-                    .child(div().flex_1())
-                    .child(
-                        Button::new(eid("lane-draft-create", &lane.key))
-                            .icon(Icon::empty().path("icons/arrow-up.svg"))
-                            .primary()
-                            .xsmall()
-                            .loading(creating)
-                            .tooltip("Create agent")
-                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                                this.create_draft(window, cx);
-                            })),
-                    ),
-            )
-            .when_some(error, |card, error| {
-                card.child(
-                    div()
-                        .text_size(size::sm())
-                        .text_color(p.status_danger)
-                        .child(error),
-                )
-            })
-            .into_any_element()
-    }
-}
-
-impl Lanes {
-    /// The draft's workspace dropdown, always shown: the lane's workspaces
-    /// and "New workspace…". With a new workspace picked, also the row that
-    /// says where it goes.
-    fn draft_workspace_controls(
-        &self,
-        lane: &Lane,
-        draft: &DraftState,
-        cx: &mut Context<Self>,
-    ) -> (AnyElement, Option<AnyElement>) {
-        let p = palette();
-        let this = cx.entity().downgrade();
-        let input = draft.input.clone();
-        let label = match &draft.new_workspace {
-            Some(_) => "New workspace".to_string(),
-            None => draft
-                .workspace
-                .as_ref()
-                .and_then(|(host, id)| {
-                    lane.workspaces
-                        .iter()
-                        .find(|ws| ws.host == *host && ws.workspace_id == *id)
-                        .map(|ws| format!("{} · {}", ws.name, ws.host))
-                })
-                .unwrap_or_else(|| "Workspace".into()),
-        };
-        let menu = {
-            let workspaces = lane.workspaces.clone();
-            let (this, input) = (this.clone(), input.clone());
-            let lane = lane.clone();
-            draft_picker(eid("lane-draft-workspace", &lane.key), "Workspace", label)
-                .tooltip("The workspace the agent works in")
-                .dropdown_menu(move |mut menu, _, _| {
-                    for workspace in &workspaces {
-                        let (this, input) = (this.clone(), input.clone());
-                        let (host, id) = (workspace.host.clone(), workspace.workspace_id.clone());
-                        menu = menu.item(
-                            PopupMenuItem::new(format!("{} · {}", workspace.name, workspace.host))
-                                .on_click(move |_, window, cx| {
-                                    let (host, id) = (host.clone(), id.clone());
-                                    let _ = this.update(cx, |this, cx| {
-                                        if let Some(draft) = &mut this.draft {
-                                            draft.workspace = Some((host.clone(), id));
-                                            draft.new_workspace = None;
-                                            draft.error = None;
-                                        }
-                                        this.core.store.update(cx, |store, cx| {
-                                            store.ensure_providers(&host, cx);
-                                        });
-                                        cx.notify();
-                                    });
-                                    input.update(cx, |input, cx| input.focus(window, cx));
-                                }),
-                        );
-                    }
-                    if !workspaces.is_empty() {
-                        menu = menu.separator();
-                    }
-                    let (this, input, lane) = (this.clone(), input.clone(), lane.clone());
-                    menu.item(PopupMenuItem::new("New workspace…").on_click(
-                        move |_, window, cx| {
-                            let _ = this.update(cx, |this, cx| {
-                                let from = this.draft.as_ref().and_then(|d| d.workspace.clone());
-                                let new = this.default_new_workspace(&lane, from.as_ref(), cx);
-                                if let Some(new) = &new {
-                                    let host = new.host.clone();
-                                    this.core.store.update(cx, |store, cx| {
-                                        store.ensure_providers(&host, cx);
-                                    });
-                                }
-                                if let Some(draft) = &mut this.draft {
-                                    draft.error = new
-                                        .is_none()
-                                        .then(|| "No projects on an online host".to_string());
-                                    draft.new_workspace = new;
-                                }
-                                cx.notify();
-                            });
-                            input.update(cx, |input, cx| input.focus(window, cx));
-                        },
-                    ))
-                })
-                .into_any_element()
-        };
-        let Some(new) = draft.new_workspace.clone() else {
-            return (menu, None);
-        };
-        let choices = self.project_choices(lane, cx);
-        let project_label = choices
-            .iter()
-            .find(|(host, project, _)| *host == new.host && *project == new.project)
-            .map(|(_, _, label)| label.clone())
-            .unwrap_or_else(|| "Project".into());
-        let is_git = self
-            .core
-            .store
-            .read(cx)
-            .fleet
-            .host(&new.host)
-            .and_then(|host| host.directory.projects.get(&new.project))
-            .is_some_and(|project| project.project_kind == "git");
-        let projects = {
-            let (this, input) = (this.clone(), input.clone());
-            draft_picker(
-                eid("lane-draft-project", &lane.key),
-                "Project",
-                project_label,
-            )
-            .tooltip("The project the new workspace is made in")
-            .dropdown_menu(move |mut menu, _, _| {
-                for (host, project, label) in &choices {
-                    let (this, input) = (this.clone(), input.clone());
-                    let (host, project) = (host.clone(), project.clone());
-                    menu = menu.item(PopupMenuItem::new(label.clone()).on_click(
-                        move |_, window, cx| {
-                            let (host, project) = (host.clone(), project.clone());
-                            let _ = this.update(cx, |this, cx| {
-                                this.core.store.update(cx, |store, cx| {
-                                    store.ensure_providers(&host, cx);
-                                });
-                                if let Some(new) =
-                                    this.draft.as_mut().and_then(|d| d.new_workspace.as_mut())
-                                {
-                                    new.host = host;
-                                    new.project = project;
-                                }
-                                cx.notify();
-                            });
-                            input.update(cx, |input, cx| input.focus(window, cx));
-                        },
-                    ));
-                }
-                menu.max_h(px(320.))
-            })
-        };
-        let worktree = {
-            let (this, input) = (this.clone(), input.clone());
-            div()
-                .id(eid("lane-draft-worktree", &lane.key))
-                .flex()
-                .items_center()
-                .gap(px(4.))
-                .px(px(4.))
-                .rounded(px(4.))
-                .text_size(size::sm())
-                .text_color(p.muted)
-                .cursor_pointer()
-                .hover(|style| style.text_color(p.foreground))
-                .child(ui::icon(
-                    if new.worktree {
-                        "square-check"
-                    } else {
-                        "square"
-                    },
-                    12.,
-                    p.muted,
-                ))
-                .child("New worktree")
-                .tooltip(|window, cx| {
-                    Tooltip::new("Work on a branch in a worktree of its own").build(window, cx)
-                })
-                .on_click(move |_: &ClickEvent, window, cx| {
-                    let _ = this.update(cx, |this, cx| {
-                        if let Some(new) =
-                            this.draft.as_mut().and_then(|d| d.new_workspace.as_mut())
-                        {
-                            new.worktree = !new.worktree;
-                        }
-                        cx.notify();
-                    });
-                    input.update(cx, |input, cx| input.focus(window, cx));
-                })
-        };
-        let row = div()
-            .flex()
-            .items_center()
-            .gap(px(4.))
-            .flex_wrap()
-            .text_size(size::sm())
-            .child(projects)
-            .when(is_git, |row| row.child(worktree))
-            .into_any_element();
-        (menu, Some(row))
-    }
 }
 
 /// Picks one kind of a [`LaneFilter`]: hosts, tools or labels.
-type FilterField = fn(&mut LaneFilter) -> &mut BTreeSet<String>;
+type FilterField<T> = fn(&mut LaneFilter) -> &mut BTreeSet<T>;
 
 impl Lanes {
     /// Filters for the board: which hosts, tools and labels it shows.
@@ -7779,11 +6888,12 @@ impl Lanes {
         let nav = self.core.nav.clone();
         let filter = nav.read(cx).lane_filter.clone();
         let store = self.core.store.read(cx);
-        let hosts: Vec<(String, String)> = store
+        // Chosen by id, shown by name.
+        let hosts: Vec<(HostId, String)> = store
             .fleet
             .hosts
             .iter()
-            .map(|host| (host.name().to_string(), host.name().to_string()))
+            .map(|host| (host.id().clone(), host.name().to_string()))
             .collect();
         // Tools by what the hosts call them, for those any agent uses.
         let mut tools: BTreeMap<String, String> = BTreeMap::new();
@@ -7801,8 +6911,19 @@ impl Lanes {
                 .unwrap_or_else(|| id.to_string());
             tools.insert(id.to_string(), name);
         }
+        // By lane key: in reef mode Reef's labels by id, else each name once.
         let mut labels: BTreeMap<String, String> = BTreeMap::new();
-        for host in &store.fleet.hosts {
+        if let Some(catalog) = &store.fleet.labels {
+            for label in &catalog.labels {
+                labels.insert(label.id.to_string(), label.name.clone());
+            }
+        }
+        for host in store
+            .fleet
+            .hosts
+            .iter()
+            .filter(|_| store.fleet.labels.is_none())
+        {
             for def in &host.directory.labels {
                 labels
                     .entry(fleet::directory::label_key(&def.name))
@@ -7811,6 +6932,11 @@ impl Lanes {
         }
         let mut labels: Vec<(String, String)> = labels.into_iter().collect();
         labels.sort_by_key(|(_, name)| name.to_lowercase());
+        // After the labels, as their lanes are.
+        labels.push((UNLABELLED.into(), "Unlabelled".into()));
+        if nav.read(cx).show_background() {
+            labels.push((BACKGROUND.into(), "Background".into()));
+        }
         let p = palette();
         let clear = {
             let nav = nav.clone();
@@ -7853,7 +6979,9 @@ impl Lanes {
                 hosts,
                 &filter,
                 |f| &mut f.hosts,
+                false,
                 &nav,
+                cx,
             ))
             .child(filter_picker(
                 "lane-filter-tools",
@@ -7862,7 +6990,9 @@ impl Lanes {
                 tools.into_iter().collect(),
                 &filter,
                 |f| &mut f.tools,
+                false,
                 &nav,
+                cx,
             ))
             .child(filter_picker(
                 "lane-filter-states",
@@ -7874,7 +7004,9 @@ impl Lanes {
                     .collect(),
                 &filter,
                 |f| &mut f.states,
+                false,
                 &nav,
+                cx,
             ))
             .child(filter_picker(
                 "lane-filter-labels",
@@ -7883,7 +7015,9 @@ impl Lanes {
                 labels,
                 &filter,
                 |f| &mut f.labels,
+                true,
                 &nav,
+                cx,
             ))
             .when(!filter.is_empty(), |bar| bar.child(clear))
             .into_any_element()
@@ -7926,7 +7060,7 @@ impl Lanes {
         let p = palette();
         // Agents in that state on the board, and those only in collapsed
         // lanes, which the title bar's count includes.
-        let in_state = |lanes: &LaneSet| -> HashSet<(String, String)> {
+        let in_state = |lanes: &LaneSet| -> HashSet<(HostId, String)> {
             lanes
                 .iter()
                 .flat_map(|lane| lane.cards.iter())
@@ -7998,18 +7132,25 @@ impl Lanes {
 
 /// One kind of filter as a dropdown: its name, what is chosen ("All", one
 /// name, or how many), and a caret. Each choice toggles; "All" clears.
-fn filter_picker(
+/// With `background`, the menu ends with the "Show background" setting,
+/// which the Background choice follows, and says when it is off.
+#[allow(clippy::too_many_arguments)]
+fn filter_picker<T: Ord + Clone + std::fmt::Display + 'static>(
     id: &'static str,
     name: &str,
     many: &str,
-    choices: Vec<(String, String)>,
+    choices: Vec<(T, String)>,
     filter: &LaneFilter,
-    field: FilterField,
+    field: FilterField<T>,
+    background: bool,
     nav: &Entity<crate::app::Nav>,
+    cx: &App,
 ) -> AnyElement {
     let p = palette();
     let chosen = field(&mut filter.clone()).clone();
+    let hidden = background && !nav.read(cx).show_background();
     let value = match chosen.len() {
+        0 if hidden => "All but background".to_string(),
         0 => "All".to_string(),
         1 => {
             let key = chosen.iter().next().expect("one");
@@ -8017,11 +7158,11 @@ fn filter_picker(
                 .iter()
                 .find(|(k, _)| k == key)
                 .map(|(_, name)| name.clone())
-                .unwrap_or_else(|| key.clone())
+                .unwrap_or_else(|| key.to_string())
         }
         n => format!("{n} {many}"),
     };
-    let active = !chosen.is_empty();
+    let active = !chosen.is_empty() || hidden;
     let nav = nav.clone();
     Button::new(id)
         .ghost()
@@ -8037,7 +7178,7 @@ fn filter_picker(
             let current = field(&mut nav.read(cx).lane_filter.clone()).clone();
             let edit = move |nav: &Entity<crate::app::Nav>,
                              cx: &mut App,
-                             change: &dyn Fn(&mut BTreeSet<String>)| {
+                             change: &dyn Fn(&mut BTreeSet<T>)| {
                 nav.update(cx, |nav, cx| {
                     let mut filter = nav.lane_filter.clone();
                     change(field(&mut filter));
@@ -8067,33 +7208,45 @@ fn filter_picker(
                         }),
                 );
             }
-            menu.max_h(px(360.))
+            if background {
+                // One setting for every view, as in the sidebar's display menu.
+                let shown = nav.read(cx).show_background();
+                let nav = nav.clone();
+                menu = menu.separator().item(
+                    PopupMenuItem::new("Show background")
+                        .checked(shown)
+                        .on_click(move |_, _, cx| {
+                            nav.update(cx, |nav, cx| nav.set_show_background(!shown, cx))
+                        }),
+                );
+            }
+            // Scrolls, or a long label list would hide its foot.
+            menu.scrollable(true).max_h(px(360.))
         })
         .into_any_element()
 }
 
-/// One of the draft's choices, as a dropdown: what it chooses, in grey,
-/// the current choice, and a caret that says it opens.
-fn draft_picker(id: SharedString, name: &str, value: impl Into<SharedString>) -> Button {
-    let p = palette();
-    Button::new(id)
-        .ghost()
-        .xsmall()
-        .child(div().text_color(p.muted).child(name.to_string()))
-        .child(
-            div()
-                .min_w(px(0.))
-                .truncate()
-                .text_color(p.foreground)
-                .child(value.into()),
-        )
-        .child(ui::icon("chevron-down", 12., p.muted))
+/// In reef mode, the labels an agent made from `lane` takes so it lands in
+/// that lane: a label lane's, none from Unlabelled. None elsewhere: it
+/// takes its workspace's default.
+fn lane_label_ids(lane: &Lane, fleet: &fleet::Fleet) -> Option<Vec<fleet::labels::LabelId>> {
+    fleet.labels.as_ref()?;
+    match lane.kind {
+        LaneKind::Label | LaneKind::Combination => Some(
+            lane.label_keys
+                .iter()
+                .map(fleet::labels::LabelId::new)
+                .collect(),
+        ),
+        LaneKind::Unlabelled => Some(Vec::new()),
+        _ => None,
+    }
 }
 
 /// The labels a workspace made from `lane` takes so it lands in that lane:
 /// the lane's labels, named and coloured as `host` has them. None for a
 /// lane that is not a label's.
-fn lane_labels(lane: &Lane, host: &str, fleet: &fleet::Fleet) -> Vec<LabelChange> {
+fn lane_labels(lane: &Lane, host: &HostId, fleet: &fleet::Fleet) -> Vec<LabelChange> {
     if !matches!(lane.kind, LaneKind::Label | LaneKind::Combination) {
         return Vec::new();
     }
@@ -8123,23 +7276,6 @@ fn lane_labels(lane: &Lane, host: &str, fleet: &fleet::Fleet) -> Vec<LabelChange
             }
         })
         .collect()
-}
-
-fn prefer_model<'a>(provider: &'a Provider, picked: Option<&String>) -> Option<&'a Model> {
-    if let Some(id) = picked
-        && let Some(model) = provider.models.iter().find(|model| &model.id == id)
-    {
-        return Some(model);
-    }
-    provider
-        .models
-        .iter()
-        .find(|model| {
-            let id = model.id.to_ascii_lowercase();
-            let label = model.label.to_ascii_lowercase();
-            id.contains("haiku") || label.contains("haiku")
-        })
-        .or_else(|| provider.default_model())
 }
 
 fn assistant_blurb(timeline: &fleet::timeline::Timeline) -> Option<String> {
@@ -8188,13 +7324,13 @@ fn subagent_mark() -> AnyElement {
 
 /// A card's workspace, host and model; in a box, whose header names the
 /// workspace and host, only its model.
-fn meta(card: &LaneCard, boxed: bool) -> String {
+fn meta(card: &LaneCard, boxed: bool, fleet: &fleet::Fleet) -> String {
     let mut parts = Vec::new();
     if !boxed {
         if !card.workspace_name.is_empty() {
             parts.push(card.workspace_name.clone());
         }
-        parts.push(card.host.clone());
+        parts.push(fleet.host_name(&card.host).to_string());
     }
     let model = match &card.model {
         Some(model) if !card.provider.is_empty() => format!("{}/{}", card.provider, model),
@@ -8207,8 +7343,14 @@ fn meta(card: &LaneCard, boxed: bool) -> String {
     parts.join(" · ")
 }
 
+/// The names of hosts, comma-separated.
+fn host_names(fleet: &fleet::Fleet, hosts: &[HostId]) -> String {
+    let names: Vec<&str> = hosts.iter().map(|host| fleet.host_name(host)).collect();
+    names.join(", ")
+}
+
 /// Host metadata occupies one bounded row even when a lane has no cards yet.
-fn header_hosts(lane: &Lane, narrow: bool) -> AnyElement {
+fn header_hosts(lane: &Lane, narrow: bool, fleet: &fleet::Fleet) -> AnyElement {
     let p = palette();
     let row = div()
         .h(px(HEADER_HOST_HEIGHT))
@@ -8227,7 +7369,7 @@ fn header_hosts(lane: &Lane, narrow: bool) -> AnyElement {
             .into_any_element();
     }
     if narrow && lane.hosts.len() > 1 {
-        let names = lane.hosts.join(", ");
+        let names = host_names(fleet, &lane.hosts);
         return row
             .child(
                 div()
@@ -8244,9 +7386,9 @@ fn header_hosts(lane: &Lane, narrow: bool) -> AnyElement {
             .into_any_element();
     }
     let row = row.children(lane.hosts.iter().take(2).map(|host| {
-        let name = host.clone();
+        let name = fleet.host_name(host).to_string();
         div()
-            .id(eid_parts("lane-host", &[&lane.key, host]))
+            .id(eid_parts("lane-host", &[&lane.key, host.as_str()]))
             .h(px(HEADER_HOST_HEIGHT))
             .min_w(px(0.))
             .px(px(6.))
@@ -8254,11 +7396,11 @@ fn header_hosts(lane: &Lane, narrow: bool) -> AnyElement {
             .bg(p.surface2)
             .flex()
             .items_center()
-            .child(div().min_w(px(0.)).truncate().child(host.clone()))
+            .child(div().min_w(px(0.)).truncate().child(name.clone()))
             .tooltip(move |window, cx| Tooltip::new(name.clone()).max_w(px(360.)).build(window, cx))
     }));
     let row = if lane.hosts.len() > 2 {
-        let names = lane.hosts[2..].join(", ");
+        let names = host_names(fleet, &lane.hosts[2..]);
         row.child(
             div()
                 .id(eid("lane-host-more", &lane.key))
@@ -8284,7 +7426,7 @@ fn header_hosts(lane: &Lane, narrow: bool) -> AnyElement {
 
 fn color_dot(lane: &Lane) -> AnyElement {
     let p = palette();
-    let color = if lane.key == UNLABELLED {
+    let color = if lane.key == UNLABELLED || lane.key == BACKGROUND {
         p.extra_muted
     } else if let Some(name) = lane.color.as_deref()
         && let Some((fill, _)) = theme::identity_named(name)
@@ -8296,6 +7438,12 @@ fn color_dot(lane: &Lane) -> AnyElement {
     dot(color)
 }
 
+/// Whether a background workspace's header in `lane` says "background":
+/// not in the Background lane, which says it already.
+fn tag_background(lane: &Lane, background: bool) -> bool {
+    background && lane.kind != LaneKind::Background
+}
+
 fn dot(color: Rgba) -> AnyElement {
     div()
         .size(px(8.))
@@ -8305,34 +7453,202 @@ fn dot(color: Rgba) -> AnyElement {
         .into_any_element()
 }
 
+/// `agent`'s colour, as an index into LANE_COLORS: the one pinned for it,
+/// else (with coloured lanes on) its first label's lane colour, as Lanes
+/// draws that lane. None for an agent with neither.
+pub fn agent_swatch(core: &Core, host: &HostId, agent: &str, cx: &App) -> Option<usize> {
+    let nav = core.nav.read(cx);
+    if let Some(index) = nav.agent_color(host, agent) {
+        return Some(index);
+    }
+    if !nav.colored_lanes {
+        return None;
+    }
+    let fleet = &core.store.read(cx).fleet;
+    let record = fleet.agent(host, agent)?;
+    let workspace = (record.workspace_id.as_deref()).and_then(|id| fleet.workspace(host, id));
+    let (key, named) = match &fleet.labels {
+        Some(catalog) => {
+            let id = fleet::labels::effective(record, workspace, catalog)
+                .into_iter()
+                .next()?;
+            let label = catalog.get(&id)?;
+            (id.to_string(), Some(label.color.clone()))
+        }
+        None => {
+            let name = workspace?.labels.first()?;
+            let key = fleet::directory::label_key(name);
+            let named = (fleet.host(host)?.directory.labels.iter())
+                .find(|def| fleet::directory::label_key(&def.name) == key)
+                .map(|def| def.color.clone());
+            (key, named)
+        }
+    };
+    Some(colors::index(
+        &key,
+        named.as_deref(),
+        &nav.lane_color_choices,
+    ))
+}
+
+/// The folder `agent` works in (its own, else its workspace's) and its
+/// workspace's branch, if any.
+pub fn agent_folder(
+    core: &Core,
+    host: &HostId,
+    agent: &str,
+    cx: &App,
+) -> Option<(String, Option<String>)> {
+    let fleet = &core.store.read(cx).fleet;
+    let record = fleet.agent(host, agent)?;
+    let workspace = (record.workspace_id.as_deref()).and_then(|id| fleet.workspace(host, id));
+    let folder = Some(record.cwd.clone())
+        .filter(|cwd| !cwd.trim().is_empty())
+        .or_else(|| workspace.map(|w| w.directory().to_string()))
+        .filter(|dir| !dir.trim().is_empty())?;
+    let branch = workspace.and_then(|w| w.branch()).map(str::to_string);
+    Some((folder, branch))
+}
+
+/// A path with the home folder as `~`, not shortened otherwise.
+fn tilde(path: &str) -> String {
+    let home = ["/home/", "/Users/", r"C:\Users\"]
+        .iter()
+        .find_map(|prefix| {
+            let rest = path.strip_prefix(prefix)?;
+            let cut = rest.find(['/', '\\']).unwrap_or(rest.len());
+            Some(format!("~{}", &rest[cut..]))
+        });
+    home.unwrap_or_else(|| path.to_string())
+}
+
+/// `place` (workspace · host), muted and at most `max` wide. Hovering shows
+/// the agent's folder and branch; a click copies the folder.
+pub fn place_label(
+    core: &Core,
+    host: &HostId,
+    agent: &str,
+    place: String,
+    max: Pixels,
+    cx: &App,
+) -> AnyElement {
+    let p = palette();
+    let folder = agent_folder(core, host, agent, cx);
+    let hint = match &folder {
+        Some((folder, Some(branch))) => format!(
+            "{}\nBranch {branch}\nClick to copy the folder",
+            tilde(folder)
+        ),
+        Some((folder, None)) => format!("{}\nClick to copy the folder", tilde(folder)),
+        None => place.clone(),
+    };
+    let store = core.store.clone();
+    div()
+        .id(SharedString::from(format!("place-{host}-{agent}")))
+        .min_w(px(0.))
+        .max_w(max)
+        .truncate()
+        .text_size(size::sm())
+        .text_color(p.muted)
+        .when(folder.is_some(), |label| {
+            label
+                .cursor_pointer()
+                .hover(move |style| style.text_color(p.foreground))
+        })
+        .child(place)
+        .tooltip(move |window, cx| Tooltip::new(hint.clone()).build(window, cx))
+        .on_click(move |_: &ClickEvent, _, cx| {
+            cx.stop_propagation();
+            if let Some((folder, _)) = &folder {
+                cx.write_to_clipboard(gpui_kit::gpui::ClipboardItem::new_string(folder.clone()));
+                store.update(cx, |store, cx| store.toast(format!("Copied {folder}"), cx));
+            }
+        })
+        .into_any_element()
+}
+
+/// A bar tinted with LANE_COLORS[`index`] over `surface`, as a lane header is.
+pub fn swatch_tint(surface: gpui_kit::gpui::Rgba, index: usize) -> gpui_kit::gpui::Rgba {
+    colors::tint(
+        surface,
+        rgb(theme::LANE_COLORS[index].1),
+        theme::LANE_HEADER_TINT,
+    )
+}
+
+/// The mark on a card whose agent is out in a window of its own.
+fn popped_mark() -> AnyElement {
+    div()
+        .flex_shrink_0()
+        .id("popped-out")
+        .child(ui::icon("square-arrow-out-up-right", 12., palette().muted))
+        .tooltip(|window, cx| {
+            Tooltip::new("In its own window: click to bring it forward").build(window, cx)
+        })
+        .into_any_element()
+}
+
+/// A lane's vertical scrollbar: always shown while there is more to scroll
+/// to, thin, so where the lane is in its cards is plain at a glance.
+fn lane_scrollbar(bar: Scrollbar) -> impl IntoElement {
+    div().absolute().inset_0().child(
+        bar.mode(ScrollbarMode::Always)
+            .styles(|styles| styles.thumb(|thumb| thumb.width(px(4.)).inset(px(1.)))),
+    )
+}
+
+/// The cards of `lane` other than `open`, as the list under an open card
+/// shows them: those needing the user (a permission, a question, an error)
+/// first, then running ones, then the rest, each group in the lane's own
+/// order (most recent first).
+fn open_lane_order(lane: &Lane, open: &(HostId, String)) -> Vec<usize> {
+    use fleet::Bucket;
+    let group = |bucket: Bucket| match bucket {
+        Bucket::NeedsInput | Bucket::Failed => 0,
+        Bucket::Running => 1,
+        Bucket::Attention | Bucket::Done => 2,
+    };
+    let mut order: Vec<usize> = (0..lane.cards.len())
+        .filter(|&ix| {
+            let card = &lane.cards[ix];
+            !(card.host == open.0 && card.agent_id == open.1)
+        })
+        .collect();
+    order.sort_by_key(|&ix| group(lane.cards[ix].bucket));
+    order
+}
+
 /// A cached snapshot for board geometry and its item indices.
 /// `lanes` with only what `filter` lets through: cards whose host, tool
 /// and workspace labels match, and workspaces likewise; a lane left with
-/// neither goes. `labels` gives a workspace's label keys. Lanes the filter
-/// leaves whole keep their identity.
+/// neither goes. `labels` gives what a card (host, workspace, agent) or a
+/// workspace's box (no agent) matches by, as [`fleet::lanes::filter_keys`]
+/// has it. Lanes the filter leaves whole keep their identity.
 fn filter_lanes(
     lanes: &[Rc<Lane>],
     filter: &LaneFilter,
-    labels: impl Fn(&str, &str) -> Vec<String>,
+    labels: impl Fn(&HostId, Option<&str>, Option<&str>) -> Vec<String>,
 ) -> Vec<Rc<Lane>> {
     if filter.is_empty() {
         return lanes.to_vec();
     }
-    let host_ok = |host: &str| filter.hosts.is_empty() || filter.hosts.contains(host);
-    let labels_ok = |host: &str, workspace: Option<&str>| {
+    let host_ok = |host: &HostId| filter.hosts.is_empty() || filter.hosts.contains(host);
+    let labels_ok = |host: &HostId, workspace: Option<&str>, agent: Option<&str>| {
         filter.labels.is_empty()
-            || workspace.is_some_and(|workspace| {
-                labels(host, workspace)
-                    .iter()
-                    .any(|label| filter.labels.contains(label))
-            })
+            || labels(host, workspace, agent)
+                .iter()
+                .any(|label| filter.labels.contains(label))
     };
     let card_ok = |card: &LaneCard| {
         let tool = card.provider.split('/').next().unwrap_or(&card.provider);
         host_ok(&card.host)
             && (filter.tools.is_empty() || filter.tools.contains(tool))
             && (filter.states.is_empty() || filter.states.contains(card.bucket.as_str()))
-            && labels_ok(&card.host, card.workspace_id.as_deref())
+            && labels_ok(
+                &card.host,
+                card.workspace_id.as_deref(),
+                Some(&card.agent_id),
+            )
     };
     lanes
         .iter()
@@ -8345,7 +7661,7 @@ fn filter_lanes(
                 .iter()
                 .filter(|ws| {
                     host_ok(&ws.host)
-                        && labels_ok(&ws.host, Some(&ws.workspace_id))
+                        && labels_ok(&ws.host, Some(&ws.workspace_id), None)
                         && ((filter.tools.is_empty() && filter.states.is_empty())
                             || cards.iter().any(|card| {
                                 card.host == ws.host
@@ -8440,7 +7756,7 @@ mod box_tests {
 
     fn card(agent: &str, workspace: Option<&str>) -> LaneCard {
         LaneCard {
-            host: "h".into(),
+            host: HostId::new("h"),
             agent_id: agent.into(),
             workspace_id: workspace.map(str::to_string),
             workspace_name: workspace.unwrap_or_default().into(),
@@ -8461,14 +7777,15 @@ mod box_tests {
             title: "l".into(),
             color: None,
             label_keys: Vec::new(),
-            hosts: vec!["h".into()],
+            hosts: vec![HostId::new("h")],
             cards,
             workspaces: workspaces
                 .iter()
                 .map(|id| LaneWorkspace {
-                    host: "h".into(),
+                    host: HostId::new("h"),
                     workspace_id: (*id).into(),
                     name: (*id).into(),
+                    background: false,
                 })
                 .collect(),
             collapsed: false,
@@ -8713,7 +8030,7 @@ mod box_tests {
     #[test]
     fn terminals_close_their_workspaces_box() {
         let lane = lane(vec![card("a1", Some("a"))], &["a", "shell", "bare"]);
-        let terminals = |_: &str, workspace: &str| match workspace {
+        let terminals = |_: &HostId, workspace: &str| match workspace {
             "a" => 2,
             "shell" => 1,
             _ => 0,
@@ -8761,7 +8078,10 @@ mod box_tests {
         );
         assert!(!rows[4].ends_box());
         assert!(rows[5].ends_box());
-        assert_eq!(Owner::Workspace(1).workspace(&lane), ("h", "shell"));
+        assert_eq!(
+            Owner::Workspace(1).workspace(&lane),
+            Some((&HostId::new("h"), "shell"))
+        );
     }
 
     #[test]
@@ -8806,7 +8126,7 @@ mod filter_tests {
 
     fn card(host: &str, provider: &str, workspace: &str) -> LaneCard {
         LaneCard {
-            host: host.into(),
+            host: HostId::new(host),
             agent_id: format!("{host}-{provider}-{workspace}"),
             workspace_id: Some(workspace.into()),
             workspace_name: workspace.into(),
@@ -8828,17 +8148,38 @@ mod filter_tests {
             color: None,
             label_keys: vec![key.into()],
             collapsed: false,
-            hosts: vec!["mac".into(), "box".into()],
+            hosts: vec![HostId::new("mac"), HostId::new("box")],
             cards,
             workspaces: workspaces
                 .iter()
                 .map(|(host, id)| LaneWorkspace {
-                    host: (*host).into(),
+                    host: HostId::new(*host),
                     workspace_id: (*id).into(),
                     name: (*id).into(),
+                    background: false,
                 })
                 .collect(),
         })
+    }
+
+    #[test]
+    fn under_an_open_card_those_needing_you_come_first_then_running_then_the_rest() {
+        let mut cards = vec![
+            card("mac", "claude", "w1"),
+            card("mac", "codex", "w2"),
+            card("box", "codex", "w3"),
+            card("box", "pi", "w4"),
+            card("mac", "pi", "w5"),
+        ];
+        cards[0].bucket = fleet::Bucket::Done;
+        cards[1].bucket = fleet::Bucket::Running;
+        cards[2].bucket = fleet::Bucket::Attention;
+        cards[3].bucket = fleet::Bucket::Failed;
+        cards[4].bucket = fleet::Bucket::NeedsInput;
+        let open = (cards[2].host.clone(), cards[2].agent_id.clone());
+        let lane = lane("ux", cards, &[]);
+        // The lane's own order holds inside each group; the open card is not listed.
+        assert_eq!(open_lane_order(&lane, &open), [3, 4, 1, 0]);
     }
 
     #[test]
@@ -8851,11 +8192,11 @@ mod filter_tests {
             ),
             lane("b", vec![card("box", "codex", "w3")], &[("box", "w3")]),
         ];
-        let labels = |_: &str, workspace: &str| -> Vec<String> {
-            if workspace == "w1" {
-                vec!["infra".into()]
-            } else {
-                vec![]
+        let labels = |_: &HostId, workspace: Option<&str>, _: Option<&str>| -> Vec<String> {
+            match workspace {
+                Some("w1") => vec!["infra".into()],
+                Some("w3") => vec![BACKGROUND.into()],
+                _ => vec![UNLABELLED.into()],
             }
         };
         let none = LaneFilter::default();
@@ -8864,14 +8205,14 @@ mod filter_tests {
 
         // A host: only its cards and workspaces, and lane b goes.
         let mac = LaneFilter {
-            hosts: ["mac".to_string()].into(),
+            hosts: [HostId::new("mac")].into(),
             ..Default::default()
         };
         let shown = filter_lanes(&lanes, &mac, labels);
         assert_eq!(shown.len(), 1);
         assert_eq!(shown[0].cards.len(), 1);
         assert_eq!(shown[0].workspaces.len(), 2);
-        assert_eq!(shown[0].hosts, ["mac"]);
+        assert_eq!(shown[0].hosts, [HostId::new("mac")]);
 
         // A tool: by provider id, ignoring the model; an empty workspace
         // has no agent of that tool, so it goes.
@@ -8892,9 +8233,27 @@ mod filter_tests {
         assert_eq!(shown.len(), 1);
         assert_eq!(shown[0].cards[0].workspace_id.as_deref(), Some("w1"));
 
+        // Background: exactly the background workspace, and Unlabelled the
+        // others with no label, empty ones included.
+        let background = LaneFilter {
+            labels: [BACKGROUND.to_string()].into(),
+            ..Default::default()
+        };
+        let shown = filter_lanes(&lanes, &background, labels);
+        assert_eq!(shown.len(), 1);
+        assert_eq!(shown[0].key, "b");
+        let unlabelled = LaneFilter {
+            labels: [UNLABELLED.to_string()].into(),
+            ..Default::default()
+        };
+        let shown = filter_lanes(&lanes, &unlabelled, labels);
+        assert_eq!(shown.len(), 1);
+        assert_eq!(shown[0].cards.len(), 1);
+        assert_eq!(shown[0].workspaces.len(), 2, "w2 and the empty one");
+
         // Kinds combine: codex on mac matches nothing.
         let both = LaneFilter {
-            hosts: ["mac".to_string()].into(),
+            hosts: [HostId::new("mac")].into(),
             tools: ["codex".to_string()].into(),
             ..Default::default()
         };
@@ -8905,6 +8264,19 @@ mod filter_tests {
 #[cfg(test)]
 mod path_tests {
     use super::short_path;
+
+    #[test]
+    fn a_folder_on_hover_shows_home_as_a_tilde_and_keeps_the_rest_whole() {
+        let long =
+            "/home/sam/src/a-very-long-project-name/worktrees/feature-branch-with-a-long-name";
+        assert_eq!(
+            super::tilde(long),
+            "~/src/a-very-long-project-name/worktrees/feature-branch-with-a-long-name"
+        );
+        assert_eq!(super::tilde("/Users/sam"), "~");
+        assert_eq!(super::tilde(r"C:\Users\sam\src\app"), r"~\src\app");
+        assert_eq!(super::tilde("/srv/app"), "/srv/app");
+    }
 
     #[test]
     fn home_folders_read_as_a_tilde_and_long_paths_lose_their_middle() {
@@ -8937,10 +8309,13 @@ mod header_fit_tests {
             steps: true,
             ends: true,
         };
-        assert_eq!(at(LANE_WIDTH_MAX), all);
+        assert_eq!(at(crate::app::nav::COLUMN_WIDTH_MAX), all);
         let mut last = all;
         // Narrowing never brings a control back, and the ends go first.
-        for width in (LANE_WIDTH_MIN as i32..LANE_WIDTH_MAX as i32).rev() {
+        for width in (crate::app::nav::COLUMN_WIDTH_MIN as i32
+            ..crate::app::nav::COLUMN_WIDTH_MAX as i32)
+            .rev()
+        {
             let fit = at(width as f32);
             let shown = [fit.count, fit.add, fit.collapse, fit.steps, fit.ends];
             let before = [last.count, last.add, last.collapse, last.steps, last.ends];
@@ -8950,7 +8325,7 @@ mod header_fit_tests {
             last = fit;
         }
         // The narrowest lane still shows its title, count and new agent.
-        let narrowest = at(LANE_WIDTH_MIN);
+        let narrowest = at(crate::app::nav::COLUMN_WIDTH_MIN);
         assert!(narrowest.count && narrowest.add && !narrowest.ends);
     }
 }

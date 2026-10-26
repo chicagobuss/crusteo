@@ -28,6 +28,10 @@ pub struct Directory {
     pub projects: BTreeMap<String, Project>,
     pub agents: HashMap<String, Agent>,
     pub labels: Vec<LabelDef>,
+    /// Where the last fetch reply left each list. Pushes never move them:
+    /// a daemon numbers changes for every client at once, and a change made
+    /// by another client's fetch (an agent it no longer lists) is never
+    /// pushed, so a cursor moved past it would skip that removal for good.
     pub workspace_cursor: Option<Cursor>,
     pub agent_cursor: Option<Cursor>,
     pub project_cursor: Option<Cursor>,
@@ -81,6 +85,7 @@ fn same_shape(a: &Workspace, b: &Workspace) -> bool {
         && a.pinned_at == b.pinned_at
         && a.labels == b.labels
         && a.archiving_at == b.archiving_at
+        && a.background == b.background
         && a.project == b.project
 }
 
@@ -304,7 +309,6 @@ impl Directory {
             }
             _ => return Changed::default(),
         }
-        advance(&mut self.workspace_cursor, payload);
         changed
     }
 
@@ -346,7 +350,6 @@ impl Directory {
             }
             _ => return Changed::default(),
         }
-        advance(&mut self.agent_cursor, payload);
         Changed {
             agents: true,
             workspaces: true,
@@ -381,7 +384,6 @@ impl Directory {
             }
             _ => return Changed::default(),
         }
-        advance(&mut self.project_cursor, payload);
         self.journal.push(DirChange::Bulk);
         Changed {
             projects: true,
@@ -445,7 +447,8 @@ impl Directory {
         self.agents.insert(agent.id.clone(), agent);
     }
 
-    fn upsert_workspace(&mut self, workspace: Workspace) {
+    fn upsert_workspace(&mut self, mut workspace: Workspace) {
+        workspace.labels = named_once(std::mem::take(&mut workspace.labels));
         if self.projects_from_workspaces || !self.projects.contains_key(&workspace.project_id) {
             self.projects
                 .entry(workspace.project_id.clone())
@@ -455,6 +458,16 @@ impl Directory {
     }
 
     // ---- derived -------------------------------------------------------
+
+    /// Whether an agent lives in a background workspace. An agent whose
+    /// workspace has not arrived yet counts as not background.
+    pub fn in_background(&self, agent: &Agent) -> bool {
+        agent
+            .workspace_id
+            .as_deref()
+            .and_then(|id| self.workspaces.get(id))
+            .is_some_and(|workspace| workspace.background)
+    }
 
     pub fn label(&self, name: &str) -> Option<&LabelDef> {
         let key = label_key(name);
@@ -583,25 +596,24 @@ impl Directory {
     }
 }
 
-fn advance(cursor: &mut Option<Cursor>, payload: &Value) {
-    let (Some(generation), Some(seq)) = (payload["generation"].as_str(), payload["seq"].as_u64())
-    else {
-        return;
-    };
-    match cursor {
-        Some(current) if current.generation == generation && current.after_seq >= seq => {}
-        _ => {
-            *cursor = Some(Cursor {
-                generation: generation.to_string(),
-                after_seq: seq,
-            })
-        }
-    }
+/// A daemon's labels as the views may group by them: blank names dropped (their
+/// key would be no label's), and each name once as labels match.
+fn named_once(labels: Vec<String>) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    (labels.into_iter())
+        .filter(|name| {
+            let key = label_key(name);
+            !key.is_empty() && seen.insert(key)
+        })
+        .collect()
 }
 
 fn label_def(value: &Value) -> Option<LabelDef> {
     Some(LabelDef {
-        name: value["name"].as_str()?.to_string(),
+        name: value["name"]
+            .as_str()
+            .filter(|name| !label_key(name).is_empty())?
+            .to_string(),
         color: value["color"].as_str().unwrap_or("violet").to_string(),
     })
 }
@@ -670,10 +682,35 @@ mod tests {
         let mut dir = Directory::default();
         dir.apply_push(&json!({"type": "workspace_update", "payload": {"kind": "upsert", "workspace": ws("w1", "p", "running"), "generation": "g", "seq": 3}}));
         assert_eq!(dir.workspaces["w1"].status, "running");
-        assert_eq!(dir.workspace_cursor.as_ref().unwrap().after_seq, 3);
         dir.apply_push(&json!({"type": "workspace_update", "payload": {"kind": "remove", "id": "w1", "removedProjectId": "p"}}));
         assert!(dir.workspaces.is_empty());
         assert!(dir.projects.is_empty());
+    }
+
+    /// The daemon dropped `gone` at seq 6 while answering another client's
+    /// fetch, so no push said so; a push at seq 7 must not carry the cursor
+    /// past it, or the next delta would leave `gone` here for good.
+    #[test]
+    fn an_agent_removed_without_a_push_goes_at_the_next_delta() {
+        let agent = |id: &str| json!({"agent": {"id": id, "workspaceId": "w1", "status": "idle", "updatedAt": "2026-10-01T00:00:00Z"}});
+        let mut dir = Directory::default();
+        dir.apply_agents_reply(
+            &json!({"entries": [agent("gone"), agent("kept")],
+                    "sync": {"generation": "g", "headSeq": 5, "mode": "snapshot", "removals": []}}),
+            true,
+        );
+        dir.apply_push(&json!({"type": "agent_update", "payload": {"kind": "upsert", "generation": "g", "seq": 7,
+                                "agent": {"id": "kept", "workspaceId": "w1", "status": "running", "updatedAt": "2026-10-01T00:01:00Z"}}}));
+        let cursor = dir.agent_cursor.clone().unwrap();
+        assert_eq!((cursor.generation.as_str(), cursor.after_seq), ("g", 5));
+
+        dir.apply_agents_reply(
+            &json!({"entries": [agent("kept")],
+                    "sync": {"generation": "g", "headSeq": 7, "mode": "changes", "removals": [{"id": "gone", "seq": 6}]}}),
+            true,
+        );
+        let ids: Vec<_> = dir.agents.keys().cloned().collect();
+        assert_eq!(ids, vec!["kept"]);
     }
 
     #[test]
@@ -755,5 +792,20 @@ mod tests {
         dir.apply_push(&json!({"type": "workspace.label.update", "payload": {"kind": "upsert", "label": {"name": "Stuck", "color": "red"}, "previousName": "blocked", "generation": "g", "seq": 1}}));
         assert_eq!(dir.workspaces["w1"].labels, vec!["Stuck"]);
         assert_eq!(dir.labels.len(), 1);
+    }
+
+    #[test]
+    fn blank_and_repeated_labels_from_a_daemon_are_dropped() {
+        let mut dir = Directory::default();
+        let mut w = ws("w1", "p", "done");
+        // A blank name's key is no label's; "UX" and " ux " are one label.
+        w["labels"] = json!(["UX", "  ", "", " ux ", "Blocked"]);
+        dir.apply_push(
+            &json!({"type": "workspace_update", "payload": {"kind": "upsert", "workspace": w}}),
+        );
+        assert_eq!(dir.workspaces["w1"].labels, vec!["UX", "Blocked"]);
+        dir.apply_labels_reply(&json!({"labels": [{"name": " ", "color": "red"}, {"name": "UX"}]}));
+        let names: Vec<&str> = dir.labels.iter().map(|l| l.name.as_str()).collect();
+        assert_eq!(names, ["UX"]);
     }
 }

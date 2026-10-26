@@ -3,24 +3,19 @@
 //! an extension that gets numbers some other way, such as from the
 //! daemons, hands them over with [`Usage::set_reading`].
 //!
-//! A failed poll leaves that source's previous reading in place; the title
-//! bar dims a gauge once its own numbers are older than ten minutes.
+//! A failed poll leaves that source's previous reading in place; an
+//! account whose own read failed keeps its last numbers, marked as such
+//! (as Paseo 0.12 keeps them). The title bar dims a gauge once its own
+//! numbers are older than ten minutes. Nothing is kept on disk.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use gpui_kit::gpui::Context;
+pub use usage_source::Reading;
 use usage_source::{Eligibility, UsageSnapshot};
 
 use crate::extensions::UsageSource;
-
-/// One source's numbers.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Reading {
-    pub snapshot: UsageSnapshot,
-    /// Which pools are worth spending now; empty when the source cannot say.
-    pub eligibility: Vec<Eligibility>,
-}
 
 #[derive(Default)]
 pub struct Usage {
@@ -55,7 +50,11 @@ impl Usage {
                         .update(cx, |usage, cx| {
                             match polled {
                                 Ok(reading) => {
-                                    usage.readings.insert(key.clone(), reading);
+                                    usage_source::merge::set(
+                                        &mut usage.readings,
+                                        &key,
+                                        Some(reading),
+                                    );
                                     usage.last_error = None;
                                     usage.merge();
                                 }
@@ -79,133 +78,66 @@ impl Usage {
         }
     }
 
-    /// Sets, or with `None` clears, the reading under `key`.
+    /// Sets, or with `None` clears, the reading under `key`. Accounts
+    /// whose read failed keep their last numbers, and every account its
+    /// place ([`usage_source::merge::set`]).
     pub fn set_reading(&mut self, key: &str, reading: Option<Reading>, cx: &mut Context<Self>) {
-        match reading {
-            Some(reading) => self.readings.insert(key.to_string(), reading),
-            None => self.readings.remove(key),
-        };
+        usage_source::merge::set(&mut self.readings, key, reading);
         self.merge();
         cx.notify();
     }
 
-    /// The readings as one snapshot: all pools, each with the time of the
-    /// freshest source reporting it, and the newest source's time.
+    /// The readings as one snapshot, by the rules every screen shares
+    /// ([`usage_source::merge`]).
     fn merge(&mut self) {
-        // Polled sources first: they name their accounts, where the
-        // daemons only name hosts, so theirs win when both report one.
-        let (polled, pushed): (Vec<_>, Vec<_>) =
-            (self.readings.iter()).partition(|(key, _)| key.starts_with("source:"));
-        let readings: Vec<&Reading> = (polled.into_iter().chain(pushed))
-            .map(|(_, reading)| reading)
-            .collect();
-        let Some(newest) = readings
-            .iter()
-            .max_by_key(|reading| reading.snapshot.served_at_unix)
-        else {
-            self.snapshot = None;
-            self.eligibility.clear();
-            self.pool_served.clear();
-            return;
+        let merged = usage_source::merge::merge(&self.readings);
+        self.snapshot = merged.snapshot;
+        self.eligibility = merged.eligibility;
+        self.pool_served = merged.pool_served;
+    }
+
+    /// Each account's gauge, as Reef's phones get it too.
+    pub fn rows(&self, now: i64) -> Vec<usage_source::view::Row> {
+        let merged = usage_source::merge::Merged {
+            snapshot: self.snapshot.clone(),
+            eligibility: self.eligibility.clone(),
+            pool_served: self.pool_served.clone(),
         };
-        let reported: Vec<(&usage_source::Pool, i64)> = (readings.iter())
-            .flat_map(|r| (r.snapshot.pools.iter()).map(|pool| (pool, r.snapshot.served_at_unix)))
-            .collect();
-        // The same account reported by several sources, or through several
-        // hosts, shows once.
-        let pools =
-            usage_source::dedupe_pools(reported.iter().map(|(pool, _)| (*pool).clone()).collect());
-        // Its numbers are as fresh as the freshest source reporting it.
-        self.pool_served = (pools.iter())
-            .map(|pool| {
-                let served = (reported.iter())
-                    .filter(|(other, _)| usage_source::same_account(pool, other))
-                    .map(|(_, served)| *served)
-                    .max()
-                    .unwrap_or(newest.snapshot.served_at_unix);
-                (pool.id.clone(), served)
-            })
-            .collect();
-        self.snapshot = Some(UsageSnapshot {
-            revision: readings.iter().map(|r| r.snapshot.revision).sum(),
-            served_at: newest.snapshot.served_at.clone(),
-            served_at_unix: newest.snapshot.served_at_unix,
-            pools,
-        });
-        self.eligibility = readings
-            .iter()
-            .flat_map(|r| r.eligibility.iter().cloned())
-            .collect();
+        usage_source::view::rows(&merged, now)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use usage_source::{Pool, Window};
 
-    fn reading(served: i64, pools: &[(&str, &str, f64, f64)]) -> Reading {
-        Reading {
-            snapshot: UsageSnapshot {
-                revision: 0,
-                served_at: String::new(),
-                served_at_unix: served,
-                pools: (pools.iter())
-                    .map(|(id, provider, used, resets)| Pool {
-                        id: id.to_string(),
-                        provider: provider.to_string(),
-                        account_label: id.to_string(),
-                        status: "ok".into(),
-                        windows: vec![Window {
-                            key: "weekly".into(),
-                            label: "Weekly".into(),
-                            used_percent: *used,
-                            remaining_percent: 100. - used,
-                            window_seconds: 604_800.,
-                            resets_at: *resets,
-                        }],
-                    })
-                    .collect(),
+    /// Reef's `usage` view checks its rows against the same file
+    /// (`crates/reef/src/usage.rs`), so the title bar and the phones agree.
+    #[test]
+    fn the_gauges_make_the_rows_reef_sends() {
+        const NOW: i64 = 1_800_000_000;
+        let dir = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/crates/usage-source/tests/fixtures/agreement"
+        );
+        let read = |name: &str| std::fs::read_to_string(format!("{dir}/{name}")).unwrap();
+        let mut usage = Usage::default();
+        // A usage feed, polled as the first usage source, and a daemon's
+        // reports, as the daemon extension keys them.
+        let snapshot = usage_source::feed::parse_usage(&read("feed.json")).unwrap();
+        usage.readings.insert(
+            "source:0".into(),
+            Reading {
+                snapshot,
+                eligibility: Vec::new(),
             },
-            eligibility: Vec::new(),
-        }
-    }
-
-    #[test]
-    fn a_stale_source_dims_only_its_own_pools() {
-        let mut usage = Usage::default();
-        // A daemon that went quiet an hour ago, and a hub read just now.
-        usage.readings.insert(
-            "paseo:old".into(),
-            reading(1_000, &[("paseo:old:claude", "claude", 40., 9e6)]),
         );
-        usage.readings.insert(
-            "source:0".into(),
-            reading(4_600, &[("hub:codex", "codex", 10., 8e6)]),
-        );
+        let updates: Vec<serde_json::Value> = serde_json::from_str(&read("reports.json")).unwrap();
+        let daemon = usage_source::reports::parse_reports("alpha", &updates, NOW).unwrap();
+        usage.readings.insert("paseo:alpha".into(), daemon);
         usage.merge();
-        assert_eq!(usage.pool_served["paseo:old:claude"], 1_000);
-        assert_eq!(usage.pool_served["hub:codex"], 4_600);
-        assert_eq!(usage.snapshot.as_ref().unwrap().served_at_unix, 4_600);
-    }
-
-    #[test]
-    fn an_account_is_as_fresh_as_its_freshest_report() {
-        let mut usage = Usage::default();
-        // The hub's reading of an account is old; a daemon reports the same
-        // account (same use, same reset) freshly.
-        usage.readings.insert(
-            "source:0".into(),
-            reading(1_000, &[("hub:claude", "claude", 40., 9e6)]),
-        );
-        usage.readings.insert(
-            "paseo:host".into(),
-            reading(4_600, &[("paseo:claude:1", "claude", 40., 9e6)]),
-        );
-        usage.merge();
-        let pools = &usage.snapshot.as_ref().unwrap().pools;
-        assert_eq!(pools.len(), 1, "one account shows once");
-        assert_eq!(pools[0].id, "hub:claude", "the hub names it");
-        assert_eq!(usage.pool_served["hub:claude"], 4_600);
+        let rows: Vec<serde_json::Value> = usage.rows(NOW).iter().map(|r| r.to_json()).collect();
+        let pinned: serde_json::Value = serde_json::from_str(&read("rows.json")).unwrap();
+        assert_eq!(serde_json::Value::Array(rows), pinned);
     }
 }

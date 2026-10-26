@@ -36,6 +36,28 @@ gpui-component gives every notification a fixed 5 s. `set_next_toast_timeout`
 gives the next toast pushed its own, `None` being until closed, so the app can
 time its notifications without changing its other toasts.
 
+## A lost mouse release no longer leaves text selecting
+
+The window's text selection (text_selection.rs) ended a drag only on a left
+button release seen in the bubble phase. A release stopped on its way, or let
+go outside the window, never arrived, and the drag stayed live: every later
+mouse move, with no button held, moved the selection across whatever text the
+pointer passed, in every card, and the next press skipped clearing the old
+selections. The release is now taken in the capture phase, before anything
+can stop it, and a move without the left button ends a drag still running
+(a long press held by touch excepted).
+
+## Selection groups: a selection stays in the group it began in
+
+`TextSelectionGroupId` with `ElementExt::text_selection_group` marks a
+subtree's text as one group, as `text_selection_scope` marks scopes. A
+gesture that starts in a grouped participant only hit-tests that group's
+participants: past them, the pointer resolves to the nearest end of the
+group, so the selection stops there. Unlike scopes, every group stays
+selectable. Text in no group selects across the window as before. crusteo
+groups each conversation turn, so a drag never runs on into the next turn or
+across other cards.
+
 ## Up and Down at the first or last line go to the start or end
 
 `move_vertical` (input/base/movement.rs) kept the cursor where it was when

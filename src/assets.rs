@@ -35,6 +35,9 @@ gpui_kit::assets::icon_assets!(
         Eye,
         Pencil,
         Bot,
+        BotMessageSquare,
+        Send,
+        Hand,
         CornerDownRight,
         Maximize2,
         Minimize2,
@@ -45,6 +48,7 @@ gpui_kit::assets::icon_assets!(
         TriangleAlert,
         X,
         ArrowUp,
+        ArrowDown,
         ArrowLeft,
         Square,
         Copy,
@@ -79,6 +83,8 @@ gpui_kit::assets::icon_assets!(
         Aperture,
         Sparkle,
         Menu,
+        SquareArrowOutUpRight,
+        SquareArrowDownLeft,
     ]
 );
 

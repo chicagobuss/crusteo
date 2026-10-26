@@ -14,6 +14,25 @@ the same data (Lanes, Fleet, Board) for keeping an eye on lots of agents across 
 > Paseo project. It speaks Paseo's daemon protocol version 1, and is tested against daemons from
 > Paseo 0.10.1 through 0.11.2.
 
+## Three parts
+
+```
+Crusteo (desktop) ───────────────────────┐
+                                         ├──▶ a daemon on each host: Paseo's (6767) or Burrow (6797)
+phone: Skiff ──▶ Reef (6798) ────────────┘
+```
+
+| Part | Binary | Runs on | Does |
+|---|---|---|---|
+| **Crusteo** | `crusteo` | your computer | The desktop app: every daemon at once, in one window. |
+| **Reef** | `reef` | one always-on machine | The fleet service: connects to every daemon and serves phones **Skiff**, a single-file web page, over a compact protocol. [Install](docs/reef/install.md) |
+| **Burrow** | `burrow` | each host that runs agents | Crusteo's own daemon, speaking Paseo's protocol. Runs Claude Code, Codex, Antigravity, pi and Cursor agents; runs next to Paseo's daemon or replaces it. [Install](docs/burrow/install.md) |
+
+Each part is optional and works with the others' Paseo counterparts: the desktop app and Reef
+connect to Paseo's daemons and Burrow alike, and the Paseo apps connect to Burrow. All three
+are in every release, with the same version. Burrow was called carapace, and Reef crusteo-hub,
+before 0.1.0-beta.1; their install guides say how to upgrade.
+
 ## Screenshots
 
 | | |
@@ -30,6 +49,14 @@ All four show the synthetic `CRUSTEO_STRESS` fleet.
 - **Paseo-style navigation.** Sidebar with projects and workspaces merged across hosts, pinning,
   status grouping and filters; per-workspace agent tabs; New workspace, History, Hosts and Settings
   screens.
+- **Add project and New workspace.** Add a folder on any host as a project, searching the host's
+  folders as you type. A new workspace opens in the project's folder or in a new git worktree, on a
+  branch you name, an existing branch, or one named after the first prompt, starting from a branch
+  or a pull request; one line says what will be made, and on which host. The draft composer in
+  Lanes and the New workspace screen make the workspace and its first agent together.
+- **Remove project.** From the sidebar's project menu, a Lanes lane grouped by project, or the
+  command palette, one host at a time. It says first what goes: the project from that host's list,
+  its open workspaces archived with their agents; files, worktrees and branches stay on disk.
 - **Many daemons at once.** Every saved host connects concurrently and reconnects with backoff.
   Switching views never reconnects or loses your place.
 - **Live conversations.** Streamed assistant text, tool-call rows with Paseo's names, summaries,
@@ -48,7 +75,8 @@ All four show the synthetic `CRUSTEO_STRESS` fleet.
 - **Layouts.** Paseo, Lanes, Fleet and Board, all reading the same shared state. Lanes can be
   filtered, searched (Ctrl/Cmd+F), dragged, collapsed into tabs, and resized, open cards included.
 - **Usage gauges.** One pace dial per subscription account in the title bar, from the daemons' own
-  usage reports (Paseo 0.11 names each account), or from an extension's source.
+  usage reports (Paseo 0.11 names each account), or from an extension's source. A refresh that
+  fails keeps the last numbers on the gauge, marked, as Paseo 0.12 does.
 - **Command palette** (Ctrl/Cmd+K) over workspaces, agents and actions across every host.
 - **Yours to arrange.** Every toolbar can be rearranged, and Lua scripts add items of their own. An
   optional window border (Settings → Window) sets crusteo apart from the windows beside it.
@@ -76,6 +104,11 @@ attached to each [GitHub release](https://github.com/chicagobuss/crusteo/release
 
 - **Windows:** unzip and run `crusteo.exe`. The binary is not code-signed, so SmartScreen may warn
   on first launch; choose **More info → Run anyway**.
+
+The same releases have `reef` and `burrow` archives, static on Linux (x86_64 and arm64),
+for macOS and for Windows; see their install guides, [docs/reef/install.md](docs/reef/install.md)
+and [docs/burrow/install.md](docs/burrow/install.md). `SHA256SUMS.txt` covers every archive, and
+`--version` prints each binary's version and commit.
 
 ### Build from source
 
@@ -111,6 +144,9 @@ saved in `hosts.json` in the data directory:
 ```
 
 - `name` is a display name; `endpoint` is `host:port`.
+- `id` identifies the host; Crusteo adds it when it saves the file. A host saved before ids existed
+  takes its name of the time as its id, so tabs, pins and filters saved for it still apply; hosts
+  added later get a generated `hst_…` id. Saved state follows the id, not the name.
 - `password` is optional, for daemons configured to require one.
 - On first launch Crusteo writes a default list containing only `localhost:6767`. After that the file
   in the data directory is the source of truth. Edit it there, or use the **Hosts** screen (sidebar
@@ -168,7 +204,7 @@ extension with no settings stays off and makes no requests.
 | Ctrl/Cmd+B | Toggle sidebar |
 | Ctrl/Cmd+1…9 | Jump to the Nth workspace in the sidebar |
 | Ctrl/Cmd+[ / ] | Previous / next workspace |
-| Ctrl/Cmd+T | New agent tab |
+| Ctrl/Cmd+T | New agent |
 | Ctrl/Cmd+Shift+T | New terminal |
 | Ctrl/Cmd+W | Close tab (archives the agent, as in Paseo) |
 | Ctrl/Cmd+N | New workspace |
@@ -221,6 +257,9 @@ src/extensions        The extension points, and the built-in extensions: Needs y
 src/app               GPUI glue: FleetStore (connections + sessions), Nav (where the user is), config.
 src/layouts           Views over the shared state, one per layout.
 src/shell.rs          Window, title bar, layout switcher, command palette, shortcuts, toasts.
+crates/reef           Reef: the fleet for phones, and Skiff, the page it serves (docs/reef/).
+crates/burrow-*       Burrow, Crusteo's own daemon (see below and docs/burrow/).
+packaging/            Example service files for Reef and Burrow, shipped in their archives.
 vendor/gpui-pre       GPUI with Crusteo's rendering fixes; see vendor/gpui-pre/PATCHES.md.
 docs/protocol         Wire protocol notes, read from Paseo v0.10.1, checked against live daemons, and
                       diffed against v0.11.2 (see transport.md, version notes).
@@ -268,13 +307,35 @@ Paste screenshots or copied images directly into the message box with Cmd+V on m
 
 ## Lanes preferences
 
-When grouping by label, the toolbar’s **Labels · Combinations · Both** control chooses individual-label lanes, one lane for each complete label set actually in use, or both. Combinations ignore case, spacing, label order and duplicate labels. They do not generate unused subsets. Single-label sets and Unlabelled appear once in Both mode. Combination headers have a stacked icon. The choice is saved on this computer and changes only the view; it does not edit workspace labels. Expanded conversations, focused cards and drafts follow their valid lane when the mode changes.
+When grouping by label, the toolbar’s **Labels · Combinations · Both** control chooses individual-label lanes, one lane for each complete label set actually in use, or both. Combinations ignore case, spacing, label order and duplicate labels. They do not generate unused subsets. Single-label sets and Unlabelled appear once in Both mode. In every mode, Paseo 0.12's background workspaces are in one Background lane after Unlabelled, whatever their labels, and in no other lane; **Show background** hides that lane, and the Label filter's Background choice selects exactly them. Combination headers have a stacked icon. The choice is saved on this computer and changes only the view; it does not edit workspace labels. Expanded conversations, focused cards and drafts follow their valid lane when the mode changes.
 
 Normal cards have a consistent height. Lane headers also have a fixed height with a host row in every lane, including single-host lanes; long host names truncate, with full names on hover; larger lists use a “+N” chip instead of wrapping. When a card has no status text, its footer shows a subdued italic activity age: minutes before two hours, hours before two days, and days thereafter. Expanded cards have **Relabel** with searchable, scrollable label choices and a new-label field. Labels apply to the whole workspace. **Apply** commits the selection; **Cancel** discards it. Settings controls whether the expanded conversation follows its destination after relabeling. Unsent composer text and images stay in memory while the app remains open.
 
 Fades mark the board edges where more lanes remain. Hover an edge or the bottom track to reveal the horizontal scrollbar; it also remains visible during scrolling and dragging. Collapsed lanes appear as named tabs with a color dot and card count in the toolbar above the board. The tab row scrolls horizontally when needed; click a tab to restore its column in its saved order and reveal it. Hidden lanes take no board width, and card navigation and Fit consider displayed columns. Drafts, expanded conversations and card scroll positions stay available when a lane is restored. **Width** at the bottom-right opens the width slider and **Fit columns**; Cmd/Ctrl+wheel also resizes columns.
 
 Open Settings with Cmd/Ctrl+, to enable **Colored lanes**, then group by label and click a lane’s color dot to choose from 32 swatches. These are saved display choices on this computer; they do not change Paseo’s shared label colors. Column and card surfaces use a subdued tint of that hue. **Smart recency headers** independently uses a blue → green → yellow → dark red ramp. Latest activity sets the baseline, while aging permission/error cards warm busy lanes, with greater weight when more cards are blocked. Finished-turn notifications have less influence. Activity ages use the daemon’s last-update timestamp.
+
+## Burrow
+
+`burrow` is Crusteo's own daemon. It runs on a host and speaks the same protocol as
+Paseo's daemon, so Crusteo, `reef` and the Paseo apps can all connect to it. By default it
+runs next to Paseo's daemon: its own port (`127.0.0.1:6797`; Paseo uses 6767) and its own state
+folder (`~/.burrow`, or `BURROW_HOME`). It can also replace Paseo on a host, keeping the
+host's identity, and `burrow import-paseo` brings over its Claude agents; it only ever reads
+`~/.paseo`.
+
+**Status: early.** It runs Claude Code, Codex, Antigravity, pi and Cursor agents with your own
+installs of each. Requests it doesn't support yet get the same answer Paseo's daemon gives a
+request it doesn't know. There is no password support yet, so keep it on loopback or a
+locked-down network.
+
+```sh
+cargo run -p burrow-daemon --bin burrow -- --seed-demo
+```
+
+Then add `127.0.0.1:6797` as a host. `--seed-demo` adds a placeholder project and agent. See
+[docs/burrow/install.md](docs/burrow/install.md) to install it as a service, and
+[docs/burrow/](docs/burrow/README.md) for the design and the plan.
 
 ## Platforms
 
@@ -304,7 +365,7 @@ cargo fmt --check
 
 - The file explorer, diffs, split panes, the browser panel.
 - Subagent tracks, schedules.
-- Drag-to-reorder in the sidebar, project icons, project removal.
+- Drag-to-reorder in the sidebar, project icons.
 
 ## License
 

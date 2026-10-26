@@ -1,0 +1,30 @@
+[package]
+name = "reef"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Headless crusteo: keeps a Paseo fleet current and serves phones a compact stream"
+
+[[bin]]
+name = "reef"
+path = "src/main.rs"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+paseo-client.workspace = true
+fleet.workspace = true
+usage-source.workspace = true
+tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "sync", "macros", "io-util"] }
+tokio-tungstenite = "0.28"
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+# Device tokens come from the operating system's random source.
+getrandom = "0.3"
+# Images are kept as the daemon sends them, base64; served as bytes.
+base64.workspace = true
+
+[dev-dependencies]
+# A real burrow in-process, for the actions end to end.
+burrow-daemon.workspace = true
+burrow-provider.workspace = true

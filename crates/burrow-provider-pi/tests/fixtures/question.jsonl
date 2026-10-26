@@ -1,0 +1,21 @@
+// An extension's select, answered; its confirm, dismissed; a notification.
+{"dir":"in","frame":{"type":"get_state"}}
+{"dir":"out","frame":{"id":"$REQ","type":"response","command":"get_state","success":true,"data":{"model":{"provider":"google","id":"gemini-2.5-flash-lite","name":"Gemini 2.5 Flash-Lite","reasoning":true,"input":["text","image"],"contextWindow":1048576},"thinkingLevel":"off","isStreaming":false,"isCompacting":false,"sessionFile":"/home/user/.pi/agent/sessions/--home-user-proj--/2026-10-19T00-00-00-000Z_sess-1.jsonl","sessionId":"sess-1","messageCount":0,"pendingMessageCount":0}}}
+{"cmd":{"prompt":{"turn":"foreground-turn-1","text":"Ask me for a color"}}}
+{"dir":"in","frame":{"type":"prompt","message":"Ask me for a color"}}
+{"dir":"out","frame":{"id":"$REQ","type":"response","command":"prompt","success":true,"data":{"disposition":"started"}}}
+{"dir":"out","frame":{"type":"agent_start"}}
+{"dir":"out","frame":{"type":"extension_ui_request","id":"ui-1","method":"select","title":"Which color?","options":["red","blue"]}}
+{"cmd":{"respond":{"id":"ui-1","response":{"behavior":"allow","updatedInput":{"answers":{"Response":"blue"}}}}}}
+{"dir":"in","frame":{"type":"extension_ui_response","id":"ui-1","value":"blue"}}
+{"dir":"out","frame":{"type":"extension_ui_request","id":"ui-2","method":"confirm","title":"Delete it?","message":"There is no undo."}}
+{"dir":"out","frame":{"type":"extension_ui_request","id":"ui-3","method":"notify","message":"Low disk","notifyType":"warning"}}
+{"dir":"out","frame":{"type":"extension_ui_request","id":"ui-4","method":"setStatus","statusKey":"x","statusText":"busy"}}
+{"cmd":{"respond":{"id":"ui-2","response":{"behavior":"deny","message":"no"}}}}
+{"dir":"in","frame":{"type":"extension_ui_response","id":"ui-2","cancelled":true}}
+{"dir":"out","frame":{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"blue it is"}}}
+{"dir":"out","frame":{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"blue it is"}],"stopReason":"stop"}}}
+{"dir":"out","frame":{"type":"agent_end","messages":[{"role":"assistant","content":[{"type":"text","text":"blue it is"}],"stopReason":"stop"}],"willRetry":false}}
+{"dir":"out","frame":{"type":"agent_settled"}}
+{"dir":"in","frame":{"type":"get_session_stats"}}
+{"dir":"out","frame":{"id":"$REQ","type":"response","command":"get_session_stats","success":true,"data":{"sessionId":"sess-1","tokens":{"input":3240,"output":3,"cacheRead":0,"cacheWrite":0,"total":3243},"cost":0.000334,"contextUsage":{"tokens":3243,"contextWindow":1048576,"percent":0.3}}}}

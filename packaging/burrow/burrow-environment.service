@@ -1,0 +1,36 @@
+# Burrow as a systemd user service, with its environment written out here
+# instead of read from your login shell: for hosts whose shell setup should not
+# run in a service, or where agents go through a local proxy. Install it as
+# burrow.service, as for the login-shell variant; see docs/burrow/install.md
+# (INSTALL.md in the release archive).
+#
+#   mkdir -p ~/.config/systemd/user
+#   cp burrow-environment.service ~/.config/systemd/user/burrow.service
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now burrow
+#   sudo loginctl enable-linger "$USER"     # keep it running while you are logged out
+#
+# The binary is ~/burrow/burrow (%h is your home). Its state is the default,
+# ~/.burrow; with no --home, a ~/.carapace from before the rename moves there
+# on first start. Port 6797 runs it next to Paseo's daemon, which has 6767.
+
+[Unit]
+Description=Burrow: crusteo's agent daemon (Paseo protocol)
+
+[Service]
+Type=simple
+# Wherever claude, codex, pi, agy and cursor-agent are installed. Agents run
+# with this PATH too, so include what they call (git, node, ...).
+Environment=PATH=%h/.local/bin:%h/.npm-global/bin:/usr/local/bin:/usr/bin:/bin
+# A local proxy the agents should send model requests to, if there is one.
+Environment=ANTHROPIC_BASE_URL=http://127.0.0.1:8082
+# API keys, one KEY=value per line, kept out of this file (chmod 600 it). The
+# leading - lets the service start without one.
+EnvironmentFile=-%h/.config/burrow/env
+# No password support yet: 0.0.0.0 only on a locked-down network or tailnet.
+ExecStart=%h/burrow/burrow --listen 0.0.0.0:6797
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

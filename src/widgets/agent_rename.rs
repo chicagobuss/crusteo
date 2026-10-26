@@ -2,6 +2,7 @@
 //! Used for an agent by the expanded Lanes card and the active Paseo agent
 //! tab, and for a workspace by its Lanes box.
 
+use fleet::HostId;
 use fleet::requests;
 use gpui_kit::component::Sizable;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
@@ -24,7 +25,7 @@ enum Target {
 
 pub struct AgentRename {
     core: Core,
-    host: String,
+    host: HostId,
     target: Target,
     original: String,
     input: Entity<InputState>,
@@ -38,7 +39,7 @@ impl AgentRename {
     /// Starts editing an agent's title, selected.
     pub fn new(
         core: &Core,
-        host: &str,
+        host: &HostId,
         agent: &str,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -63,7 +64,7 @@ impl AgentRename {
     /// Starts editing a workspace's title, selected.
     pub fn workspace(
         core: &Core,
-        host: &str,
+        host: &HostId,
         workspace: &str,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -81,7 +82,7 @@ impl AgentRename {
 
     fn start(
         core: &Core,
-        host: &str,
+        host: &HostId,
         target: Target,
         original: String,
         window: &mut Window,
@@ -102,7 +103,7 @@ impl AgentRename {
         });
         Self {
             core: core.clone(),
-            host: host.to_string(),
+            host: host.clone(),
             target,
             original,
             input,
@@ -112,13 +113,13 @@ impl AgentRename {
     }
 
     /// Whether this edits `agent` on `host`.
-    pub fn edits(&self, host: &str, agent: &str) -> bool {
-        self.host == host && self.target == Target::Agent(agent.to_string())
+    pub fn edits(&self, host: &HostId, agent: &str) -> bool {
+        &self.host == host && self.target == Target::Agent(agent.to_string())
     }
 
     /// Whether this edits `workspace` on `host`.
-    pub fn edits_workspace(&self, host: &str, workspace: &str) -> bool {
-        self.host == host && self.target == Target::Workspace(workspace.to_string())
+    pub fn edits_workspace(&self, host: &HostId, workspace: &str) -> bool {
+        &self.host == host && self.target == Target::Workspace(workspace.to_string())
     }
 
     fn finish(&mut self, save: bool, cx: &mut Context<Self>) {

@@ -1,9 +1,23 @@
 //! Usage quotas: pools of an account's limits, each a set of windows that
 //! reset, and the arithmetic the gauges draw from them (which window binds,
-//! pace against the clock, how urgent). Where the numbers come from is up
-//! to whoever fills a [`UsageSnapshot`].
+//! pace against the clock, how urgent).
+//!
+//! It is the one usage model crusteo and `reef` share, so both show
+//! the same accounts the same way:
+//!
+//! - [`reports`] reads the daemons' own usage reports, and [`feed`] a usage
+//!   feed's JSON, into [`Reading`]s;
+//! - [`merge`] puts every source's reading together, each account once;
+//! - [`accounts`] names accounts apart, and [`view`] works out what a
+//!   gauge or a phone's row shows for each.
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+pub mod accounts;
+pub mod feed;
+pub mod merge;
+pub mod reports;
+pub mod view;
 
 /// A pool is "use it before reset" when this much remains and the reset is near.
 pub const USE_BEFORE_REMAINING: f64 = 25.0;
@@ -11,7 +25,7 @@ pub const USE_BEFORE_HORIZON: Duration = Duration::from_secs(6 * 60 * 60);
 /// Last good snapshot older than this is shown dimmed, not dropped.
 pub const STALE_AFTER: Duration = Duration::from_secs(10 * 60);
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct UsageSnapshot {
     pub revision: u64,
     pub served_at: String,
@@ -19,16 +33,42 @@ pub struct UsageSnapshot {
     pub pools: Vec<Pool>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct Pool {
     pub id: String,
     pub provider: String,
     pub account_label: String,
+    /// The account's plan, such as "max" or "team", when the source says.
+    pub plan: String,
     pub status: String,
     pub windows: Vec<Window>,
+    /// The latest read of this account failed. Its windows, if it has
+    /// any, are then the last successful read's, kept on screen as Paseo
+    /// keeps them ("retained"); with none it has no gauge.
+    pub failure: Option<Failure>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+impl Pool {
+    /// Its numbers are an earlier read's: the latest one failed.
+    pub fn retained(&self) -> bool {
+        self.failure.is_some() && !self.windows.is_empty()
+    }
+}
+
+/// Why an account's latest read failed, and when the numbers kept from
+/// before were read.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Failure {
+    /// "error" or "unavailable", as Paseo reports say, or a feed's status.
+    pub status: String,
+    /// What went wrong, as Paseo words it, such as "Rate limited" or
+    /// "Login expired 2d ago. Run claude to refresh it."; may be empty.
+    pub problem: String,
+    /// When the numbers kept were read, in unix seconds; zero with none.
+    pub successful_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct Window {
     pub key: String,
     pub label: String,
@@ -36,6 +76,14 @@ pub struct Window {
     pub remaining_percent: f64,
     pub window_seconds: f64,
     pub resets_at: f64,
+}
+
+/// One source's numbers.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Reading {
+    pub snapshot: UsageSnapshot,
+    /// Which pools are worth spending now; empty when the source cannot say.
+    pub eligibility: Vec<Eligibility>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -284,6 +332,17 @@ pub fn is_stale(served_at_unix: i64, now_unix: i64) -> bool {
     now_unix.saturating_sub(served_at_unix) > STALE_AFTER.as_secs() as i64
 }
 
+/// How long ago, as Paseo says it in a sentence: "just now", "5m ago",
+/// "3h ago", "2d ago".
+pub fn ago(secs: i64) -> String {
+    match secs {
+        s if s < 45 => "just now".into(),
+        s if s < 3_600 => format!("{}m ago", (s / 60).max(1)),
+        s if s < 86_400 => format!("{}h ago", s / 3_600),
+        s => format!("{}d ago", s / 86_400),
+    }
+}
+
 /// Compact time-to-reset: `26m`, `3.3h`, `2.1d`.
 pub fn format_reset(resets_at: f64, now_unix: i64) -> String {
     let secs = resets_at - now_unix as f64;
@@ -337,11 +396,19 @@ pub fn same_account(a: &Pool, b: &Pool) -> bool {
 
 /// `pools` with each account once: of pools that are [`same_account`],
 /// the first is kept, so put the source that names accounts best first.
-/// What the others know about its windows' lengths it keeps too.
+/// What the others know about its windows' lengths it keeps too, and when
+/// its own latest read failed, another's successful numbers.
 pub fn dedupe_pools(pools: Vec<Pool>) -> Vec<Pool> {
     let mut kept: Vec<Pool> = Vec::with_capacity(pools.len());
     for pool in pools {
         match kept.iter_mut().find(|seen| same_account(seen, &pool)) {
+            Some(seen) if seen.failure.is_some() && pool.failure.is_none() => {
+                seen.windows = pool.windows;
+                seen.failure = None;
+                if seen.plan.is_empty() {
+                    seen.plan = pool.plan;
+                }
+            }
             Some(seen) => learn_lengths(seen, &pool),
             None => kept.push(pool),
         }

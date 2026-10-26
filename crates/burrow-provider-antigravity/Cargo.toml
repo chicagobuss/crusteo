@@ -1,0 +1,15 @@
+[package]
+name = "burrow-provider-antigravity"
+description = "Runs the Antigravity CLI (agy) for Burrow, in its stream-json mode"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+burrow-provider.workspace = true
+base64.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+uuid.workspace = true

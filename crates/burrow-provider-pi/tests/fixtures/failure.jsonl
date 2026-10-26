@@ -1,0 +1,10 @@
+// A provider error, retried once, then given up on.
+{"dir":"in","frame":{"type":"get_state"}}
+{"dir":"out","frame":{"id":"$REQ","type":"response","command":"get_state","success":true,"data":{"model":{"provider":"google","id":"gemini-2.5-flash-lite","name":"Gemini 2.5 Flash-Lite","reasoning":true,"input":["text","image"],"contextWindow":1048576},"thinkingLevel":"off","isStreaming":false,"isCompacting":false,"sessionFile":"/home/user/.pi/agent/sessions/--home-user-proj--/2026-10-19T00-00-00-000Z_sess-1.jsonl","sessionId":"sess-1","messageCount":0,"pendingMessageCount":0}}}
+{"cmd":{"prompt":{"turn":"foreground-turn-1","text":"Hi"}}}
+{"dir":"in","frame":{"type":"prompt","message":"Hi"}}
+{"dir":"out","frame":{"id":"$REQ","type":"response","command":"prompt","success":true,"data":{"disposition":"started"}}}
+{"dir":"out","frame":{"type":"agent_start"}}
+{"dir":"out","frame":{"type":"auto_retry_start","attempt":1,"maxAttempts":3,"delayMs":1000,"errorMessage":"429 quota exceeded"}}
+{"dir":"out","frame":{"type":"agent_end","messages":[{"role":"assistant","content":[],"provider":"google","model":"gemini-2.5-flash-lite","stopReason":"error","errorMessage":"429 quota exceeded"}],"willRetry":false}}
+{"dir":"out","frame":{"type":"agent_settled"}}

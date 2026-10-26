@@ -1,0 +1,10 @@
+// Resuming a session Claude no longer has: the turn fails, and the next prompt starts a new conversation (no --resume).
+{"dir":"in","frame":{"type":"control_request","request":{"subtype":"initialize"}}}
+{"dir":"out","frame":{"type":"control_response","response":{"subtype":"success","request_id":"$REQ","response":{}}}}
+{"cmd":{"prompt":{"turn":"foreground-turn-1","text":"Continue"}}}
+{"dir":"in","frame":{"type":"user","session_id":"gone"}}
+{"dir":"out","frame":{"type":"result","subtype":"error_during_execution","is_error":true,"errors":["No conversation found with session ID: gone"],"usage":{}}}
+{"cmd":{"prompt":{"turn":"foreground-turn-2","text":"Start again"}}}
+{"dir":"in","frame":{"type":"control_request","request":{"subtype":"initialize"}}}
+{"dir":"out","frame":{"type":"control_response","response":{"subtype":"success","request_id":"$REQ","response":{}}}}
+{"dir":"in","frame":{"type":"user","session_id":""}}

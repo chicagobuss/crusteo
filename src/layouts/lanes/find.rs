@@ -11,6 +11,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::Rc;
 use std::time::Duration;
 
+use fleet::HostId;
 use fleet::lanes::{LaneCard, LaneGrouping, LaneKind};
 use gpui_kit::component::Sizable;
 use gpui_kit::component::button::{Button, ButtonVariants};
@@ -31,7 +32,7 @@ use crate::ui;
 const MAX_HITS: usize = 200;
 
 /// Cards, as host and agent.
-type CardKeys = Rc<HashSet<(String, String)>>;
+type CardKeys = Rc<HashSet<(HostId, String)>>;
 
 pub(super) struct Find {
     input: Entity<InputState>,
@@ -39,7 +40,7 @@ pub(super) struct Find {
     /// The result the board points at; none means Enter asks a source.
     selected: Option<usize>,
     /// The cards that match, as host and agent, for outlining and dimming.
-    pub(super) matches: Rc<HashSet<(String, String)>>,
+    pub(super) matches: Rc<HashSet<(HostId, String)>>,
     /// Collapsed lanes whose name or cards match, by key, so their tabs
     /// light up too.
     pub(super) collapsed: Rc<HashSet<String>>,
@@ -62,7 +63,7 @@ pub(super) struct Find {
 
 #[derive(Clone)]
 struct Hit {
-    host: String,
+    host: HostId,
     agent: String,
     title: String,
     lane: String,
@@ -83,9 +84,9 @@ enum Target {
     Lane(String),
     /// A label, by key.
     Label(String),
-    Host(String),
+    Host(HostId),
     /// A workspace, as host and id.
-    Workspace(String, String),
+    Workspace(HostId, String),
 }
 
 /// The most results of each kind that is not a card.
@@ -104,12 +105,12 @@ enum Extra {
 
 impl Find {
     /// The card the board points at, if any.
-    pub(super) fn pointed(&self) -> Option<(&str, &str)> {
+    pub(super) fn pointed(&self) -> Option<(&HostId, &str)> {
         let hit = self.hits.get(self.selected?)?;
         if hit.target != Target::Card {
             return None;
         }
-        Some((hit.host.as_str(), hit.agent.as_str()))
+        Some((&hit.host, hit.agent.as_str()))
     }
 
     /// The collapsed lane the find bar points at, if any.
@@ -139,7 +140,7 @@ pub(super) struct Indexed {
 
 /// What a card matched: the line to show, and the conversation item when
 /// the match is in one.
-type Found = HashMap<(String, String), (String, Option<String>)>;
+type Found = HashMap<(HostId, String), (String, Option<String>)>;
 
 fn message_text(kind: &fleet::timeline::ItemKind) -> Option<&str> {
     match kind {
@@ -155,7 +156,7 @@ fn card_match(
     card: &fleet::lanes::LaneCard,
     query: &str,
     store: &crate::app::FleetStore,
-    index: &mut HashMap<(String, String), Indexed>,
+    index: &mut HashMap<(HostId, String), Indexed>,
     cx: &gpui_kit::gpui::App,
 ) -> Option<(String, Option<String>)> {
     let in_conversation = store
@@ -346,7 +347,7 @@ impl Lanes {
             .iter()
             .filter(|lane| collapsed.contains(&lane.key))
             .map(|lane| Hit {
-                host: String::new(),
+                host: HostId::default(),
                 agent: String::new(),
                 title: lane.title.clone(),
                 lane: "collapsed lane".into(),
@@ -774,6 +775,10 @@ impl Lanes {
             _ => None,
         };
         let hits = find.hits.clone();
+        let fleet = &self.core.store.read(cx).fleet;
+        let host_names: Vec<String> = (hits.iter())
+            .map(|hit| fleet.host_name(&hit.host).to_string())
+            .collect();
         let rows: Vec<_> = hits
             .iter()
             .enumerate()
@@ -806,7 +811,7 @@ impl Lanes {
                             )
                             .child(div().flex_shrink_0().text_color(p.extra_muted).child(
                                 if hit.target == Target::Card {
-                                    format!("{} · {}", hit.lane, hit.host)
+                                    format!("{} · {}", hit.lane, host_names[at])
                                 } else {
                                     hit.lane.clone()
                                 },
@@ -959,7 +964,7 @@ impl Lanes {
         else {
             return div().opacity(0.3).child(element).into_any_element();
         };
-        let pointed = find.pointed() == Some((card.host.as_str(), card.agent_id.as_str()));
+        let pointed = find.pointed() == Some((&card.host, card.agent_id.as_str()));
         div()
             .relative()
             .child(element)
@@ -1026,8 +1031,14 @@ impl Lanes {
             .collect();
         let mut hits = Vec::new();
 
+        // By lane key: in reef mode Reef's labels by id, else each name once.
         let mut labels: BTreeMap<String, String> = BTreeMap::new();
-        for host in &fleet.hosts {
+        if let Some(catalog) = &fleet.labels {
+            for label in &catalog.labels {
+                labels.insert(label.id.to_string(), label.name.clone());
+            }
+        }
+        for host in fleet.hosts.iter().filter(|_| fleet.labels.is_none()) {
             for def in &host.directory.labels {
                 labels
                     .entry(fleet::directory::label_key(&def.name))
@@ -1062,7 +1073,7 @@ impl Lanes {
             .filter(|host| find_ci(host.name(), query).is_some())
             .take(MAX_NAMED)
         {
-            let count = cards.iter().filter(|card| card.host == host.name()).count();
+            let count = cards.iter().filter(|card| &card.host == host.id()).count();
             let state = if host.connection.is_online() {
                 "online"
             } else {
@@ -1072,13 +1083,13 @@ impl Lanes {
                 host.name().to_string(),
                 "host",
                 format!("{state} · {} · Enter filters the board", cards_text(count)),
-                Target::Host(host.name().to_string()),
+                Target::Host(host.id().clone()),
             ));
         }
 
-        let mut workspaces: Vec<(&str, &str, &str)> = Vec::new();
+        let mut workspaces: Vec<(&HostId, &str, &str)> = Vec::new();
         for ws in lanes.iter().flat_map(|lane| lane.workspaces.iter()) {
-            let entry = (ws.host.as_str(), ws.workspace_id.as_str(), ws.name.as_str());
+            let entry = (&ws.host, ws.workspace_id.as_str(), ws.name.as_str());
             if !workspaces.contains(&entry) && find_ci(&ws.name, query).is_some() {
                 workspaces.push(entry);
             }
@@ -1086,13 +1097,13 @@ impl Lanes {
         for (host, id, name) in workspaces.into_iter().take(MAX_NAMED) {
             let count = cards
                 .iter()
-                .filter(|card| card.host == host && card.workspace_id.as_deref() == Some(id))
+                .filter(|card| &card.host == host && card.workspace_id.as_deref() == Some(id))
                 .count();
             hits.push(named_hit(
                 name.to_string(),
-                &format!("workspace · {host}"),
+                &format!("workspace · {}", fleet.host_name(host)),
                 format!("{} · Enter goes to it", cards_text(count)),
-                Target::Workspace(host.to_string(), id.to_string()),
+                Target::Workspace(host.clone(), id.to_string()),
             ));
         }
         hits
@@ -1153,19 +1164,19 @@ impl Lanes {
     }
 
     /// Scrolls the board to a workspace's box, in the first lane showing it.
-    fn reveal_workspace(&mut self, host: &str, id: &str, cx: &mut Context<Self>) {
+    fn reveal_workspace(&mut self, host: &HostId, id: &str, cx: &mut Context<Self>) {
         let lanes = self.arranged(&self.visible_lanes(cx), cx);
         let Some(lane) = lanes.iter().find(|lane| {
             lane.workspaces
                 .iter()
-                .any(|ws| ws.host == host && ws.workspace_id == id)
+                .any(|ws| &ws.host == host && ws.workspace_id == id)
         }) else {
             return;
         };
         self.focused_lane = Some(lane.key.clone());
         self.reveal_column = Some(lane.key.clone());
         let in_workspace = |card: usize| {
-            lane.cards[card].host == host && lane.cards[card].workspace_id.as_deref() == Some(id)
+            &lane.cards[card].host == host && lane.cards[card].workspace_id.as_deref() == Some(id)
         };
         let box_single = self.core.nav.read(cx).box_single_workspaces;
         let rows = self.rows(lane, box_single, cx);
@@ -1173,7 +1184,7 @@ impl Lanes {
             Row::Header { card, .. } | Row::Card { card, .. } => in_workspace(*card),
             Row::Empty { workspace, .. } => {
                 let ws = &lane.workspaces[*workspace];
-                ws.host == host && ws.workspace_id == id
+                &ws.host == host && ws.workspace_id == id
             }
             _ => false,
         });
@@ -1247,18 +1258,11 @@ impl Lanes {
     }
 }
 
-/// A card's workspace labels, as label keys.
+/// A card's labels, as the label filter matches them: a background
+/// workspace's labels are not its own while the Background lane holds it.
 fn card_labels(fleet: &fleet::Fleet, card: &LaneCard) -> Vec<String> {
-    card.workspace_id
-        .as_deref()
-        .and_then(|id| fleet.workspace(&card.host, id))
-        .map(|ws| {
-            ws.labels
-                .iter()
-                .map(|l| fleet::directory::label_key(l))
-                .collect()
-        })
-        .unwrap_or_default()
+    let workspace = card.workspace_id.as_deref();
+    fleet::lanes::filter_keys(fleet, &card.host, workspace, Some(&card.agent_id))
 }
 
 fn cards_text(count: usize) -> String {
@@ -1270,7 +1274,7 @@ fn cards_text(count: usize) -> String {
 
 fn named_hit(title: String, kind: &str, snippet: String, target: Target) -> Hit {
     Hit {
-        host: String::new(),
+        host: HostId::default(),
         agent: String::new(),
         title,
         lane: kind.to_string(),

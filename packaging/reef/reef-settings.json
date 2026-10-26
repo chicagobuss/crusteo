@@ -1,0 +1,7 @@
+{
+  "notify_default": true,
+  "notify": {
+    "buildbox/00000000-0000-4000-8000-000000000000": false
+  },
+  "show_background": true
+}

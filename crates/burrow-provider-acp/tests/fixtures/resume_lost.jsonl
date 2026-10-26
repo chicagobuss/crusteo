@@ -1,0 +1,6 @@
+{"dir":"in","frame":{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{"fs":{"readTextFile":false,"writeTextFile":false},"terminal":true,"_meta":{"parameterizedModelPicker":true}},"clientInfo":{"name":"Paseo","version":"dev"}}}}
+{"dir":"out","frame":{"jsonrpc":"2.0","id":"$REQ","result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true,"mcpCapabilities":{"http":true,"sse":true},"promptCapabilities":{"audio":false,"embeddedContext":false,"image":true},"sessionCapabilities":{"list":{}}},"authMethods":[{"id":"cursor_login","name":"Cursor Login"}]}}}
+{"dir":"in","frame":{"method":"session/load","params":{"sessionId":"sess-gone"}}}
+{"dir":"out","frame":{"jsonrpc":"2.0","id":"$REQ","error":{"code":-32603,"message":"Internal error","data":{"details":"Session not found"}}}}
+{"dir":"in","frame":{"method":"session/new","params":{"cwd":"/home/user/project","mcpServers":[]}}}
+{"dir":"out","frame":{"jsonrpc":"2.0","id":"$REQ","result":{"sessionId":"sess-2"}}}

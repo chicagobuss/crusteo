@@ -1,0 +1,23 @@
+// app-server dies mid-turn; the next prompt starts it again and resumes the thread.
+{"setup":"start"}
+{"cmd":{"prompt":{"turn":"codex-turn-1","text":"Work"}}}
+{"dir":"in","frame":{"method":"turn/start"}}
+{"dir":"out","frame":{"id":"$ID","result":{"turn":{"id":"turn-a","status":"inProgress"}}}}
+{"dir":"out","frame":{"method":"turn/started","params":{"threadId":"thr-1","turn":{"id":"turn-a","status":"inProgress"}}}}
+{"exit":"some warning\nboom"}
+{"cmd":{"prompt":{"turn":"codex-turn-2","text":"Again"}}}
+{"dir":"in","frame":{"method":"initialize"}}
+{"dir":"out","frame":{"id":"$ID","result":{"userAgent":"codex_cli_rs/0.162.1"}}}
+{"dir":"in","frame":{"method":"initialized"}}
+{"dir":"in","frame":{"method":"model/list"}}
+{"dir":"in","frame":{"method":"config/read"}}
+{"dir":"in","frame":{"method":"collaborationMode/list"}}
+{"dir":"out","frame":{"id":2,"result":{"data":[{"id":"gpt-6-luna","isDefault":true}]}}}
+{"dir":"out","frame":{"id":3,"result":{"config":{}}}}
+{"dir":"out","frame":{"id":4,"result":{"data":[]}}}
+{"dir":"in","frame":{"method":"thread/resume","params":{"threadId":"thr-1"}}}
+{"dir":"out","frame":{"id":"$ID","result":{"thread":{"id":"thr-1"}}}}
+{"dir":"in","frame":{"method":"turn/start","params":{"threadId":"thr-1","input":[{"type":"text","text":"Again","text_elements":[]}]}}}
+{"dir":"out","frame":{"id":"$ID","result":{"turn":{"id":"turn-b","status":"inProgress"}}}}
+{"dir":"out","frame":{"method":"turn/started","params":{"threadId":"thr-1","turn":{"id":"turn-b","status":"inProgress"}}}}
+{"dir":"out","frame":{"method":"turn/completed","params":{"threadId":"thr-1","turn":{"id":"turn-b","status":"completed","error":null}}}}

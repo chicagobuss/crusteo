@@ -1,0 +1,13 @@
+[package]
+name = "burrow-provider"
+description = "The agent provider adapter interface for Burrow, and an echo provider"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true

@@ -2,8 +2,10 @@
 //! navigation; switching layout does not reconnect or lose the place.
 
 pub mod config;
+pub mod images;
 pub mod nav;
 pub mod notifications;
+pub mod reef;
 pub mod store;
 pub mod stress;
 pub mod usage;
@@ -12,6 +14,32 @@ use gpui_kit::gpui::{AnyView, App, AppContext, Entity, Window};
 
 pub use nav::{Closed, Nav, Screen, Tab};
 pub use store::{AgentSession, FleetEvent, FleetStore, TerminalSession, TerminalWatch};
+
+#[derive(Default)]
+pub(crate) struct DraftHandoffs {
+    pending: std::collections::BTreeMap<(fleet::HostId, String), fleet::prompt::Prompt>,
+}
+impl DraftHandoffs {
+    fn stash(
+        &mut self,
+        key: (fleet::HostId, String),
+        draft: Option<fleet::prompt::Prompt>,
+    ) -> bool {
+        let draft = draft.filter(|draft| !draft.text.is_empty() || !draft.images.is_empty());
+        if self.pending.get(&key) == draft.as_ref() {
+            return false;
+        }
+        match draft {
+            Some(draft) => {
+                self.pending.insert(key, draft);
+            }
+            None => {
+                self.pending.remove(&key);
+            }
+        }
+        true
+    }
+}
 
 #[derive(Clone)]
 pub struct Core {
@@ -22,13 +50,88 @@ pub struct Core {
     pub toolbars: Entity<crate::toolbars::Registry>,
     /// What extensions added, once the window has opened.
     pub extensions: Entity<crate::extensions::Contributed>,
+    /// Drafts handed back by detached windows, consumed by the next Lanes view.
+    detached_drafts: Entity<DraftHandoffs>,
+    /// The shell window belonging to this Core, never inferred from other windows.
+    main_window: std::rc::Rc<std::cell::Cell<Option<gpui_kit::gpui::AnyWindowHandle>>>,
 }
 
 impl Core {
+    pub(crate) fn draft_handoffs(&self) -> &Entity<DraftHandoffs> {
+        &self.detached_drafts
+    }
+
+    /// Consume a returned draft once, whichever layout next shows its composer.
+    pub fn take_draft(
+        &self,
+        host: &fleet::HostId,
+        agent: &str,
+        cx: &mut App,
+    ) -> Option<fleet::prompt::Prompt> {
+        self.detached_drafts.update(cx, |drafts, _| {
+            drafts.pending.remove(&(host.clone(), agent.to_string()))
+        })
+    }
+
+    pub fn stash_draft(
+        &self,
+        host: &fleet::HostId,
+        agent: &str,
+        draft: Option<fleet::prompt::Prompt>,
+        cx: &mut App,
+    ) {
+        self.detached_drafts.update(cx, |drafts, cx| {
+            if drafts.stash((host.clone(), agent.to_string()), draft) {
+                cx.notify();
+            }
+        });
+    }
+
+    pub(crate) fn set_main_window(&self, window: gpui_kit::gpui::AnyWindowHandle) {
+        self.main_window.set(Some(window));
+    }
+    pub(crate) fn main_window(&self) -> Option<gpui_kit::gpui::AnyWindowHandle> {
+        self.main_window.get()
+    }
+
+    /// Shows agent `agent` on `host`: its card in Lanes, else its tab. False
+    /// when that host does not know it, or it has no workspace to open it in.
+    pub fn open_agent(&self, host: &fleet::HostId, agent: &str, cx: &mut App) -> bool {
+        let workspace = (self.store.read(cx).fleet.agent(host, agent))
+            .and_then(|record| record.workspace_id.clone());
+        let Some(workspace) = workspace else {
+            return false;
+        };
+        self.nav
+            .update(cx, |nav, cx| nav.open_agent(host, &workspace, agent, cx));
+        true
+    }
+
+    /// The title of agent `agent` on `host`, when that host knows it.
+    pub fn agent_title(&self, host: &fleet::HostId, agent: &str, cx: &App) -> Option<String> {
+        let record = self.store.read(cx).fleet.agent(host, agent)?;
+        Some(record.display_title())
+    }
+
+    /// The one host that knows agent `agent`, for a source that names no host
+    /// (see [`fleet::Fleet::sole_host_of`]).
+    pub fn agent_host(&self, agent: &str, cx: &App) -> Option<fleet::HostId> {
+        let fleet = &self.store.read(cx).fleet;
+        fleet.sole_host_of(agent).map(|host| host.id().clone())
+    }
+
     pub fn new(cx: &mut App) -> Self {
         let hosts = config::load_hosts();
         let store = cx.new(|cx| FleetStore::new(hosts, cx));
         let nav = cx.new(|_| Nav::load());
+        cx.on_app_quit({
+            let nav = nav.clone();
+            move |cx| {
+                nav.update(cx, |nav, _| nav.save());
+                async {}
+            }
+        })
+        .detach();
         // Keep tabs reconciled with the directory, and stream exactly the
         // conversations some tab shows. Tabs follow which agents, workspaces
         // and terminals exist, so an agent's status changing in place (most
@@ -105,6 +208,8 @@ impl Core {
             usage,
             toolbars,
             extensions,
+            detached_drafts: cx.new(|_| DraftHandoffs::default()),
+            main_window: Default::default(),
         }
     }
 }
@@ -126,9 +231,9 @@ fn sync_terminals(store: &Entity<FleetStore>, nav: &Entity<Nav>, cx: &mut App) {
         if !terminal {
             continue;
         }
-        if let Some((host, workspace)) = key.split_once(':') {
+        if let Some((host, workspace)) = nav::parse_workspace_key(&key) {
             consider.push(nav::Selection {
-                host: host.to_string(),
+                host,
                 workspace: workspace.to_string(),
             });
         }
@@ -172,4 +277,29 @@ pub struct LayoutEntry {
     /// that caches its own parts and changes often draws uncached, and its
     /// parts survive its re-renders.
     pub cached: bool,
+}
+
+#[cfg(test)]
+mod draft_tests {
+    use super::*;
+    #[test]
+    fn draft_handoff_keeps_images_is_host_qualified_and_consumed_once() {
+        let mut drafts = DraftHandoffs::default();
+        let key = (fleet::HostId::new("one"), "same-agent".into());
+        let prompt = fleet::prompt::Prompt {
+            text: "unsent".into(),
+            images: vec![fleet::prompt::ImageAttachment::new("aGVsbG8=", "image/png")],
+        };
+        assert!(drafts.stash(key.clone(), Some(prompt.clone())));
+        assert!(!drafts.stash(key.clone(), Some(prompt.clone())));
+        assert!(
+            drafts
+                .pending
+                .remove(&(fleet::HostId::new("two"), "same-agent".into()))
+                .is_none()
+        );
+        assert_eq!(drafts.pending.remove(&key), Some(prompt));
+        assert!(drafts.pending.remove(&key).is_none());
+        assert!(!drafts.stash(key, Some(fleet::prompt::Prompt::default())));
+    }
 }

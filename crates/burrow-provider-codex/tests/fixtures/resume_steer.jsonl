@@ -1,0 +1,13 @@
+// A thread resumed after a restart, and a steer into its running turn.
+{"setup":"resume"}
+{"cmd":{"prompt":{"turn":"codex-turn-3","text":"Count"}}}
+{"dir":"in","frame":{"method":"turn/start","params":{"threadId":"thr-old"}}}
+{"dir":"out","frame":{"id":"$ID","result":{"turn":{"id":"turn-c","status":"inProgress"}}}}
+{"dir":"out","frame":{"method":"turn/started","params":{"threadId":"thr-old","turn":{"id":"turn-c","status":"inProgress"}}}}
+{"dir":"out","frame":{"method":"item/agentMessage/delta","params":{"threadId":"thr-old","turnId":"turn-c","itemId":"msg-1","delta":"Counting 1 2 3"}}}
+{"cmd":{"steer":"and say steered"}}
+{"dir":"in","frame":{"method":"turn/steer","params":{"threadId":"thr-old","expectedTurnId":"turn-c","input":[{"type":"text","text":"and say steered","text_elements":[]}]}}}
+{"dir":"out","frame":{"id":"$ID","result":{"turnId":"turn-c"}}}
+{"dir":"out","frame":{"method":"item/agentMessage/delta","params":{"threadId":"thr-old","turnId":"turn-c","itemId":"msg-1","delta":" and steered"}}}
+{"dir":"out","frame":{"method":"item/completed","params":{"threadId":"thr-old","turnId":"turn-c","item":{"type":"agentMessage","id":"msg-1","text":"Counting 1 2 3 and steered"}}}}
+{"dir":"out","frame":{"method":"turn/completed","params":{"threadId":"thr-old","turn":{"id":"turn-c","status":"completed","error":null}}}}

@@ -13,11 +13,11 @@ if (-not $Binary) { $Binary = Join-Path $Root "target/release/crusteo.exe" }
 if (-not $OutDir) { $OutDir = Join-Path $Root "dist" }
 if (-not (Test-Path $Binary)) { throw "binary not found: $Binary" }
 
-# Version from the [package] section of Cargo.toml.
+# Version from the [workspace.package] (or [package]) section of Cargo.toml.
 $Version = $null
 $InPackage = $false
 foreach ($line in Get-Content (Join-Path $Root "Cargo.toml")) {
-    if ($line -match '^\[package\]') { $InPackage = $true; continue }
+    if ($line -match '^\[(workspace\.)?package\]') { $InPackage = $true; continue }
     if ($line -match '^\[') { $InPackage = $false }
     if ($InPackage -and $line -match '^version\s*=\s*"([^"]+)"') { $Version = $Matches[1]; break }
 }

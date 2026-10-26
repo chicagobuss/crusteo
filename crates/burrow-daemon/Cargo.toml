@@ -1,0 +1,40 @@
+[package]
+name = "burrow-daemon"
+description = "A daemon that speaks the Paseo WebSocket protocol"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "burrow"
+path = "src/main.rs"
+
+[dependencies]
+burrow-protocol.workspace = true
+burrow-provider.workspace = true
+burrow-provider-claude.workspace = true
+burrow-provider-codex.workspace = true
+burrow-provider-antigravity.workspace = true
+burrow-provider-pi.workspace = true
+burrow-provider-acp.workspace = true
+anyhow.workspace = true
+base64.workspace = true
+clap.workspace = true
+futures-util.workspace = true
+gethostname.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+time.workspace = true
+tokio.workspace = true
+tokio-tungstenite.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+# Crusteo's own client, the reference consumer of this daemon.
+paseo-client.workspace = true
+# Crusteo's conversation model, to check what clients render.
+fleet.workspace = true

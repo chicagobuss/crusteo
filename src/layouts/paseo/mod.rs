@@ -1,10 +1,9 @@
 //! The reference layout: Paseo's sidebar and workspace screen, driven by the
 //! shared fleet and navigation. It owns views, not state.
 
-mod attachments;
+pub(crate) mod attachments;
 mod composer;
 mod conversation;
-mod draft;
 mod prompt_index;
 mod question_form;
 mod screens;
@@ -14,10 +13,10 @@ mod workspace;
 
 pub use composer::bind_keys;
 pub use conversation::{Conversation, ConversationEvent};
-pub use sidebar::Sidebar;
+pub use sidebar::{Sidebar, add_project};
 pub use terminal::TerminalView;
 pub use terminal::bind_keys as bind_terminal_keys;
-pub use workspace::{close_tab, open_new_terminal};
+pub use workspace::{close_tab, open_new_agent, open_new_terminal};
 
 use crate::ui::CachedExt as _;
 use gpui_kit::gpui::{

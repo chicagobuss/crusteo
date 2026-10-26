@@ -731,6 +731,12 @@ Checked on 2026-10-11 by diffing `packages/protocol` from `v0.10.1` to `v0.11.2`
   in `account.label` and the provider in `sourceId`) and then `usage.list_reports.response`
   (`{requestId, error}`). Every message carries the request id, so the client collects updates
   until the response (`Client::request_until`).
+- **0.12 usage reports** add `successfulAt` (when an available report's read finished; `fetchedAt`
+  stays the attempt's time) and, beside an `error` or `unavailable` report, `lastSuccessful:
+  {fetchedAt, report}` with the last available report for the same account and logins. The app
+  shows those numbers with the failure and "Last updated", not "Updated". Cursor's account key is
+  now from its login's token (`account-<sha256>`, or `store-<sha256>` per credential store) rather
+  than `default`; Copilot and Grok still use `default`.
 - `provider.usage.list.request` still works on 0.11.2 but is marked
   `COMPAT(providerUsageList) … remove after 2027-03-26`; it is the reports flattened to one entry
   per account with only the provider as id. crusteo uses it only for daemons without

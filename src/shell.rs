@@ -7,6 +7,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use fleet::Bucket;
+use fleet::HostId;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
 use gpui_kit::component::{TitleBar, WindowExt};
@@ -134,6 +135,9 @@ pub struct Shell {
     palette_input: Entity<InputState>,
     palette_index: usize,
     needs: Entity<crate::needs_you::NeedsYou>,
+    /// The slide-out list behind the title bar's counts: see
+    /// [`crate::state_list`].
+    state_list: Entity<crate::state_list::StateList>,
     focus: FocusHandle,
     /// The zoom just set, shown briefly; the counter lets a newer change
     /// keep it up.
@@ -216,6 +220,7 @@ fn app_icon(window: &Window) -> impl IntoElement {
 
 impl Shell {
     fn new(core: Core, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        core.set_main_window(window.window_handle());
         window.set_zoom(core.nav.read(cx).zoom, cx);
         {
             let nav = core.nav.read(cx);
@@ -316,6 +321,7 @@ impl Shell {
             cx.notify();
         });
         cx.observe(&core.toolbars, |_, _, cx| cx.notify()).detach();
+        let state_list = cx.new(|cx| crate::state_list::StateList::new(core.clone(), cx));
         Self {
             core,
             layouts: crate::layouts::registry(),
@@ -324,6 +330,7 @@ impl Shell {
             palette_input,
             palette_index: 0,
             needs,
+            state_list,
             focus: cx.focus_handle(),
             zoom_badge: None,
             customizing: false,
@@ -429,10 +436,13 @@ impl Shell {
             terms.iter().all(|t| text.contains(t))
         };
         let store = self.core.store.read(cx);
+        let hide = !self.core.nav.read(cx).show_background();
         let multi = store.fleet.hosts.len() > 1;
         let mut out = Vec::new();
         for host in &store.fleet.hosts {
-            for workspace in host.directory.workspaces.values() {
+            for workspace in (host.directory.workspaces.values())
+                .filter(|workspace| !(hide && workspace.background))
+            {
                 let project = host
                     .directory
                     .projects
@@ -454,14 +464,16 @@ impl Shell {
                         kind: "Workspace".into(),
                         title: workspace.name.clone(),
                         subtitle,
-                        host: host.config.name.clone(),
+                        host: host.id().clone(),
                         workspace: workspace.id.clone(),
                         agent: None,
                         bucket: host.directory.effective_bucket(workspace),
                     });
                 }
             }
-            for agent in host.directory.agents.values() {
+            for agent in (host.directory.agents.values())
+                .filter(|agent| !(hide && host.directory.in_background(agent)))
+            {
                 let Some(workspace) = agent.workspace_id.clone() else {
                     continue;
                 };
@@ -491,7 +503,7 @@ impl Shell {
                         kind: "Agent".into(),
                         title: agent.display_title(),
                         subtitle,
-                        host: host.config.name.clone(),
+                        host: host.id().clone(),
                         workspace,
                         agent: Some(agent.id.clone()),
                         bucket: agent.bucket(),
@@ -508,7 +520,7 @@ impl Shell {
                         kind: source.kind(),
                         title: item.title,
                         subtitle: item.detail,
-                        host: String::new(),
+                        host: HostId::default(),
                         workspace: String::new(),
                         agent: None,
                         bucket: Bucket::Done,
@@ -544,6 +556,7 @@ impl Shell {
                     project: None,
                 }),
             ),
+            ("Add project", PaletteAction::AddProject),
             ("History", PaletteAction::Screen(Screen::History)),
             ("Hosts", PaletteAction::Screen(Screen::Hosts)),
             ("Settings", PaletteAction::Screen(Screen::Settings)),
@@ -574,17 +587,76 @@ impl Shell {
                     _ => title.to_string(),
                 },
                 subtitle: String::new(),
-                host: String::new(),
+                host: HostId::default(),
                 workspace: String::new(),
                 agent: None,
                 bucket: Bucket::Done,
                 action: Some(action),
             })
             .collect();
+        // Each host's projects, where the host can remove them.
+        let removable = (store.fleet.hosts.iter())
+            .filter(|host| !terms.is_empty() && fleet::project_remove::supported(host));
+        for host in removable {
+            for project in host.directory.projects.values() {
+                let title = format!("Remove project {} ({})", project.name(), host.name());
+                if matches(&title) {
+                    action_rows.push(PaletteItem {
+                        kind: "Action".into(),
+                        title,
+                        subtitle: String::new(),
+                        host: host.id().clone(),
+                        workspace: String::new(),
+                        agent: None,
+                        bucket: Bucket::Done,
+                        action: Some(PaletteAction::RemoveProject(project.project_id.clone())),
+                    });
+                }
+            }
+        }
         action_rows.extend(out);
         let mut out = action_rows;
         out.truncate(60);
         out
+    }
+
+    /// Add project. The Paseo layout then opens New workspace on it, as
+    /// Paseo does; elsewhere a note says where it went.
+    fn add_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.core.nav.read(cx).layout == "paseo" {
+            crate::layouts::paseo::add_project(&self.core, window, cx);
+            return;
+        }
+        let host = self
+            .core
+            .nav
+            .read(cx)
+            .selection
+            .as_ref()
+            .map(|s| s.host.clone());
+        let store = self.core.store.clone();
+        crate::widgets::add_project::open(
+            &self.core,
+            host,
+            window,
+            cx,
+            move |host, project, _, cx| {
+                let fleet = &store.read(cx).fleet;
+                let name = (fleet.host(host))
+                    .and_then(|record| record.directory.projects.get(project))
+                    .map(|project| project.name())
+                    .unwrap_or_else(|| project.to_string());
+                let host = fleet.host_name(host).to_string();
+                store.update(cx, |store, cx| {
+                    store.toast(
+                        format!(
+                            "Added {name} on {host}. New workspace… in a draft can use it now."
+                        ),
+                        cx,
+                    )
+                });
+            },
+        );
     }
 
     fn run_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -622,6 +694,22 @@ impl Shell {
             crate::app_menu::about(&self.core, window, cx);
             return;
         }
+        if let Some(PaletteAction::AddProject) = item.action {
+            self.core.nav.update(cx, |nav, cx| {
+                nav.command_open = false;
+                cx.notify();
+            });
+            self.add_project(window, cx);
+            return;
+        }
+        if let Some(PaletteAction::RemoveProject(project)) = &item.action {
+            self.core.nav.update(cx, |nav, cx| {
+                nav.command_open = false;
+                cx.notify();
+            });
+            crate::widgets::remove_project::open(&self.core, &item.host, project, window, cx);
+            return;
+        }
         if let Some(PaletteAction::DismissNotifications) = item.action {
             self.core.nav.update(cx, |nav, cx| {
                 nav.command_open = false;
@@ -649,7 +737,9 @@ impl Shell {
                     PaletteAction::Need(..)
                     | PaletteAction::Command(_)
                     | PaletteAction::About
-                    | PaletteAction::DismissNotifications => {}
+                    | PaletteAction::DismissNotifications
+                    | PaletteAction::AddProject
+                    | PaletteAction::RemoveProject(_) => {}
                 }
                 nav.save();
                 cx.notify();
@@ -1141,7 +1231,7 @@ impl Shell {
     #[allow(clippy::too_many_arguments)]
     fn notify_attention(
         &mut self,
-        host: &str,
+        host: &HostId,
         agent_id: &str,
         workspace_id: Option<&str>,
         reason: &str,
@@ -1155,7 +1245,7 @@ impl Shell {
             && nav.layout == "paseo"
             && nav.screen == Screen::Workspace
             && nav.selection.as_ref().is_some_and(|s| {
-                s.host == host
+                &s.host == host
                     && nav.focused_tab(&s.key()) == Some(&Tab::Agent(agent_id.to_string()))
             });
         if viewing {
@@ -1169,8 +1259,9 @@ impl Shell {
             .agent(host, agent_id)
             .map(|a| a.display_title())
             .unwrap_or_default();
+        let host_name = self.core.store.read(cx).fleet.host_name(host).to_string();
         let message = format!(
-            "{host} · {agent_title}\n{}",
+            "{host_name} · {agent_title}\n{}",
             body.lines().next().unwrap_or_default()
         );
         let (corner, route) = (nav.notification_corner, nav.notification_route);
@@ -1189,24 +1280,12 @@ impl Shell {
         };
         if let Some(workspace) = workspace_id {
             let nav = self.core.nav.clone();
-            let host = host.to_string();
+            let host = host.clone();
             let workspace = workspace.to_string();
             let agent = agent_id.to_string();
             // In Lanes, go to the agent's card; anywhere else, open its tab.
             note = note.on_click(move |_, _, cx| {
-                nav.update(cx, |nav, cx| {
-                    if nav.layout == "lanes" {
-                        nav.reveal_in_lanes(&host, &agent, cx);
-                        return;
-                    }
-                    nav.layout = "paseo".into();
-                    nav.select(&host, &workspace, cx);
-                    nav.focus_tab(
-                        &format!("{host}:{workspace}"),
-                        Tab::Agent(agent.clone()),
-                        cx,
-                    );
-                });
+                nav.update(cx, |nav, cx| nav.open_agent(&host, &workspace, &agent, cx));
             });
         }
         // As long as Settings says, where crusteo's own short notices keep
@@ -1237,19 +1316,7 @@ impl Shell {
     /// Zooms the whole window a browser step in or out, or back to 100% for
     /// a zero step, and remembers it.
     fn zoom_step(&mut self, step: i32, window: &mut Window, cx: &mut Context<Self>) {
-        const STEPS: [f32; 13] = [
-            0.5, 0.67, 0.75, 0.8, 0.9, 1., 1.1, 1.25, 1.5, 1.75, 2., 2.5, 3.,
-        ];
-        let current = window.zoom();
-        let at = STEPS
-            .iter()
-            .position(|zoom| *zoom >= current - 0.001)
-            .unwrap_or(STEPS.len() - 1);
-        let zoom = match step {
-            0 => 1.,
-            1 => STEPS[(at + 1).min(STEPS.len() - 1)],
-            _ => STEPS[at.saturating_sub(1)],
-        };
+        let zoom = zoom_level(window.zoom(), step);
         window.set_zoom(zoom, cx);
         self.core.nav.update(cx, |nav, cx| nav.set_zoom(zoom, cx));
         // A badge, not a toast: each change replaces it at once, and it goes
@@ -1307,13 +1374,8 @@ impl Shell {
         });
     }
 
-    fn new_agent_tab(&mut self, _: &NewAgentTab, _: &mut Window, cx: &mut Context<Self>) {
-        let Some(selection) = self.core.nav.read(cx).selection.clone() else {
-            return;
-        };
-        self.core.nav.update(cx, |nav, cx| {
-            nav.new_draft(&selection.key(), cx);
-        });
+    fn new_agent_tab(&mut self, _: &NewAgentTab, window: &mut Window, cx: &mut Context<Self>) {
+        crate::layouts::paseo::open_new_agent(&self.core, None, window, cx);
     }
 
     fn new_terminal(&mut self, _: &NewTerminal, _: &mut Window, cx: &mut Context<Self>) {
@@ -1346,6 +1408,10 @@ enum PaletteAction {
     About,
     /// Closes every notification on screen.
     DismissNotifications,
+    /// Add project, from any layout.
+    AddProject,
+    /// Remove this project of the item's host, after asking.
+    RemoveProject(String),
 }
 
 #[derive(Clone)]
@@ -1354,7 +1420,7 @@ struct PaletteItem {
     kind: SharedString,
     title: String,
     subtitle: String,
-    host: String,
+    host: HostId,
     workspace: String,
     agent: Option<String>,
     bucket: Bucket,
@@ -1430,7 +1496,12 @@ impl Render for Shell {
                     if event.keystroke.key != "escape" {
                         return;
                     }
-                    if this.help_open {
+                    if this.core.nav.read(cx).state_list.is_some() {
+                        this.core
+                            .nav
+                            .update(cx, |nav, cx| nav.set_state_list(None, cx));
+                        cx.stop_propagation();
+                    } else if this.help_open {
                         this.help_open = false;
                         cx.notify();
                         cx.stop_propagation();
@@ -1440,12 +1511,18 @@ impl Render for Shell {
                     }
                 }),
             )
-            // ...and at any click, which still does what it would have.
+            // ...and at any click, which still does what it would have. A
+            // click outside the open list closes it too.
             .on_any_mouse_down(cx.listener(|this, _: &MouseDownEvent, _, cx| {
                 if this.core.nav.read(cx).state_highlight.is_some() {
                     this.core
                         .nav
                         .update(cx, |nav, cx| nav.set_state_highlight(None, cx));
+                }
+                if this.core.nav.read(cx).state_list.is_some() {
+                    this.core
+                        .nav
+                        .update(cx, |nav, cx| nav.set_state_list(None, cx));
                 }
             }))
             .on_action(cx.listener(|this, _: &ZoomIn, window, cx| this.zoom_step(1, window, cx)))
@@ -1572,6 +1649,7 @@ impl Render for Shell {
                     .children(self.customize_layer(cx)),
             )
             .children(overlays)
+            .children(crate::state_list::layer(&self.state_list, &self.core, cx))
             .when(palette_open, |d| d.child(self.render_palette(cx)))
             .when(self.help_open, |d| {
                 let (close, customize) = (cx.entity().downgrade(), cx.entity().downgrade());
@@ -1633,4 +1711,20 @@ pub fn open(cx: &mut App) {
         shell
     })
     .expect("open window");
+}
+
+/// Browser-style zoom steps shared by the shell and detached windows.
+pub(crate) fn zoom_level(current: f32, step: i32) -> f32 {
+    const STEPS: [f32; 13] = [
+        0.5, 0.67, 0.75, 0.8, 0.9, 1., 1.1, 1.25, 1.5, 1.75, 2., 2.5, 3.,
+    ];
+    let at = STEPS
+        .iter()
+        .position(|zoom| *zoom >= current - 0.001)
+        .unwrap_or(STEPS.len() - 1);
+    match step {
+        0 => 1.,
+        1 => STEPS[(at + 1).min(STEPS.len() - 1)],
+        _ => STEPS[at.saturating_sub(1)],
+    }
 }

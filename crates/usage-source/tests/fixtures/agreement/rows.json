@@ -1,0 +1,153 @@
+[
+  {
+    "account": "work",
+    "binding": "weekly_all",
+    "failure": null,
+    "key": "claude:work",
+    "label": "sam@work.example",
+    "needle": -29,
+    "plan": "team",
+    "provider": "claude",
+    "retained": false,
+    "served_at": 1799999940,
+    "severity": "surplus",
+    "slack": "+18",
+    "stale": false,
+    "status": "ok",
+    "use_before": {
+      "remaining": 74.0,
+      "resets_at": 1800005100,
+      "window": "session"
+    },
+    "windows": [
+      {
+        "binding": false,
+        "key": "session",
+        "length": 18000,
+        "name": "session",
+        "remaining": 74.0,
+        "resets_at": 1800005100,
+        "used": 26.0
+      },
+      {
+        "binding": true,
+        "key": "weekly_all",
+        "length": 604800,
+        "name": "weekly Global",
+        "remaining": 61.0,
+        "resets_at": 1800258900,
+        "used": 39.0
+      },
+      {
+        "binding": false,
+        "key": "weekly_scoped:Fable",
+        "length": 604800,
+        "name": "weekly Fable",
+        "remaining": 100.0,
+        "resets_at": 1800258900,
+        "used": 0.0
+      }
+    ]
+  },
+  {
+    "account": null,
+    "binding": "codex:primary",
+    "failure": null,
+    "key": "codex:personal",
+    "label": "personal",
+    "needle": -34,
+    "plan": "pro",
+    "provider": "codex",
+    "retained": false,
+    "served_at": 1799999940,
+    "severity": "on_pace",
+    "slack": "+14",
+    "stale": false,
+    "status": "ok",
+    "use_before": null,
+    "windows": [
+      {
+        "binding": true,
+        "key": "codex:primary",
+        "length": 604800,
+        "name": "codex",
+        "remaining": 29.0,
+        "resets_at": 1800088200,
+        "used": 71.0
+      }
+    ]
+  },
+  {
+    "account": null,
+    "binding": "gemini-5h",
+    "failure": null,
+    "key": "gemini:personal",
+    "label": "personal",
+    "needle": -90,
+    "plan": "AI Pro",
+    "provider": "gemini",
+    "retained": false,
+    "served_at": 1799999940,
+    "severity": "on_pace",
+    "slack": "+4",
+    "stale": false,
+    "status": "ok",
+    "use_before": {
+      "remaining": 100.0,
+      "resets_at": 1800017300,
+      "window": "Gemini models (5h)"
+    },
+    "windows": [
+      {
+        "binding": true,
+        "key": "gemini-5h",
+        "length": 18000,
+        "name": "Gemini models (5h)",
+        "remaining": 100.0,
+        "resets_at": 1800017300,
+        "used": 0.0
+      }
+    ]
+  },
+  {
+    "account": "home",
+    "binding": "seven_day",
+    "failure": null,
+    "key": "paseo:claude:home",
+    "label": "sam@home.example",
+    "needle": -18,
+    "plan": "Max",
+    "provider": "claude",
+    "retained": false,
+    "served_at": 1799999880,
+    "severity": "on_pace",
+    "slack": "+11",
+    "stale": false,
+    "status": "ok",
+    "use_before": {
+      "remaining": 86.0,
+      "resets_at": 1800006900,
+      "window": "5h"
+    },
+    "windows": [
+      {
+        "binding": false,
+        "key": "five_hour",
+        "length": 18000,
+        "name": "5h",
+        "remaining": 86.0,
+        "resets_at": 1800006900,
+        "used": 14.0
+      },
+      {
+        "binding": true,
+        "key": "seven_day",
+        "length": 604800,
+        "name": "Weekly",
+        "remaining": 41.0,
+        "resets_at": 1800183300,
+        "used": 59.0
+      }
+    ]
+  }
+]

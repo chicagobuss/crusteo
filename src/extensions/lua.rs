@@ -202,7 +202,9 @@ fn share_fleet(core: &Core, fleet: Arc<Mutex<serde_json::Value>>, cx: &mut App) 
             let summary = cx.update(|cx| {
                 let store = core.store.read(cx);
                 let hosts = &store.fleet.hosts;
-                let counts = store.fleet.agent_bucket_counts();
+                // The same counts the title bar shows.
+                let hide = !core.nav.read(cx).show_background();
+                let counts = store.fleet.agent_bucket_counts(hide);
                 let mut agents = serde_json::Map::new();
                 for (bucket, count) in counts {
                     agents.insert(

@@ -1,0 +1,13 @@
+// AskUserQuestion: clients answer by header; Claude must get the answer keyed by the question text.
+{"dir":"in","frame":{"type":"control_request","request":{"subtype":"initialize"}}}
+{"dir":"out","frame":{"type":"control_response","response":{"subtype":"success","request_id":"$REQ","response":{}}}}
+{"cmd":{"prompt":{"turn":"foreground-turn-1","text":"Fix the typo"}}}
+{"dir":"in","frame":{"type":"user"}}
+{"dir":"out","frame":{"type":"system","subtype":"init","session_id":"sess-3","permissionMode":"default"}}
+{"dir":"out","frame":{"type":"assistant","message":{"id":"msg_3","content":[{"type":"tool_use","id":"toolu_q","name":"AskUserQuestion","input":{"questions":[{"question":"Which file should I change?","header":"File","multiSelect":false,"options":[{"label":"a.txt","description":"The first"},{"label":"b.txt"}]}]}}]},"parent_tool_use_id":null}}
+{"dir":"out","frame":{"type":"control_request","request_id":"cli-q","request":{"subtype":"can_use_tool","tool_name":"AskUserQuestion","input":{"questions":[{"question":"Which file should I change?","header":"File","multiSelect":false,"options":[{"label":"a.txt","description":"The first"},{"label":"b.txt"}]}]},"tool_use_id":"toolu_q"}}}
+{"cmd":{"respond":{"id":"cli-q","response":{"behavior":"allow","updatedInput":{"questions":[{"question":"Which file should I change?","header":"File","multiSelect":false,"allowOther":true,"options":[{"label":"a.txt","description":"The first"},{"label":"b.txt"}]}],"answers":{"File":"a.txt"}}}}}}
+{"dir":"in","frame":{"type":"control_response","response":{"subtype":"success","request_id":"cli-q","response":{"behavior":"allow","updatedInput":{"questions":[{"question":"Which file should I change?","header":"File","multiSelect":false,"options":[{"label":"a.txt","description":"The first"},{"label":"b.txt"}]}],"answers":{"Which file should I change?":"a.txt"}}}}}}
+{"dir":"out","frame":{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_q","content":"User has answered your questions: \"Which file should I change?\"=\"a.txt\"."}]},"parent_tool_use_id":null}}
+{"dir":"out","frame":{"type":"assistant","message":{"id":"msg_4","content":[{"type":"text","text":"Editing a.txt."}]},"parent_tool_use_id":null}}
+{"dir":"out","frame":{"type":"result","subtype":"success","is_error":false,"result":"Editing a.txt.","usage":{}}}

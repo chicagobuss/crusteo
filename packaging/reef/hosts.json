@@ -1,0 +1,5 @@
+[
+  {"name": "buildbox", "endpoint": "192.0.2.10:6767"},
+  {"name": "workstation", "endpoint": "192.0.2.11:6797"},
+  {"name": "laptop", "endpoint": "laptop.example:6767"}
+]

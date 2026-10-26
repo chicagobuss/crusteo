@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Burrow as a launchd agent on macOS: started at login, restarted if it
+  stops. See docs/burrow/install.md (INSTALL.md in the release archive).
+
+    cp dev.crusteo.burrow.plist ~/Library/LaunchAgents/
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/dev.crusteo.burrow.plist
+    launchctl bootout gui/$(id -u)/dev.crusteo.burrow    # to stop it
+
+  The binary is /Users/user/burrow/burrow and its state the default,
+  /Users/user/.burrow (a ~/.carapace from before the rename moves there on
+  first start); replace /Users/user with your home folder. Logs go to
+  burrow.log beside the binary.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>dev.crusteo.burrow</string>
+  <key>ProgramArguments</key>
+  <array>
+    <!-- Through a login shell, so agents get the PATH and API keys your
+         ~/.zprofile and ~/.zshrc set. 127.0.0.1: Burrow has no password
+         support yet, so bind wider only on a locked-down network. -->
+    <string>/bin/zsh</string>
+    <string>-lic</string>
+    <string>exec /Users/user/burrow/burrow --listen 127.0.0.1:6797</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>/Users/user/burrow/burrow.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/user/burrow/burrow.log</string>
+</dict>
+</plist>

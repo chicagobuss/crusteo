@@ -11,7 +11,7 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 binary="${1:-$root/target/release/crusteo}"
 out_dir="${2:-$root/dist}"
 
-version="$(awk -F'"' '/^\[package\]/{p=1;next} /^\[/{p=0} p && /^version *=/{print $2; exit}' "$root/Cargo.toml")"
+version="$(awk -F'"' '/^\[(workspace\.)?package\]/{p=1;next} /^\[/{p=0} p && /^version *=/{print $2; exit}' "$root/Cargo.toml")"
 [ -n "$version" ] || { echo "error: could not read version from Cargo.toml" >&2; exit 1; }
 target="${TARGET:-$(uname -m)-unknown-linux-gnu}"
 [ -f "$binary" ] || { echo "error: binary not found: $binary" >&2; exit 1; }

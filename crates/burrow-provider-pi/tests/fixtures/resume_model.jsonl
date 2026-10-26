@@ -1,0 +1,14 @@
+// A resumed session starts on its recorded model; the adapter switches to
+// the agent's model before the waiting prompt.
+{"dir":"in","frame":{"type":"get_state"}}
+{"dir":"out","frame":{"id":"$REQ","type":"response","command":"get_state","success":true,"data":{"model":{"provider":"google","id":"gemini-2.5-flash-lite","name":"Gemini 2.5 Flash-Lite","reasoning":true,"input":["text","image"],"contextWindow":1048576},"thinkingLevel":"off","isStreaming":false,"isCompacting":false,"sessionFile":"/home/user/.pi/agent/sessions/--home-user-proj--/2026-10-19T00-00-00-000Z_sess-1.jsonl","sessionId":"sess-1","messageCount":0,"pendingMessageCount":0}}}
+{"dir":"in","frame":{"type":"set_model","provider":"google","modelId":"gemini-3.1-flash-lite"}}
+{"dir":"out","frame":{"id":"$REQ","type":"response","command":"set_model","success":true,"data":{"provider":"google","id":"gemini-3.1-flash-lite","input":["text"]}}}
+{"cmd":{"prompt":{"turn":"foreground-turn-2","text":"again"}}}
+{"dir":"in","frame":{"type":"prompt","message":"again"}}
+{"dir":"out","frame":{"id":"$REQ","type":"response","command":"prompt","success":true,"data":{"disposition":"started"}}}
+{"dir":"out","frame":{"type":"agent_start"}}
+{"dir":"out","frame":{"type":"agent_end","messages":[{"role":"assistant","content":[{"type":"text","text":"ok"}],"stopReason":"stop"}],"willRetry":false}}
+{"dir":"out","frame":{"type":"agent_settled"}}
+{"dir":"in","frame":{"type":"get_session_stats"}}
+{"dir":"out","frame":{"id":"$REQ","type":"response","command":"get_session_stats","success":true,"data":{"sessionId":"sess-1","tokens":{"input":3240,"output":3,"cacheRead":0,"cacheWrite":0,"total":3243},"cost":0.000334,"contextUsage":{"tokens":3243,"contextWindow":1048576,"percent":0.3}}}}

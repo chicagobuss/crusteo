@@ -1,6 +1,7 @@
 //! The message box under a conversation: Enter sends, Shift+Enter breaks a
 //! line, Cmd/Ctrl+Enter queues while a turn runs, Escape or Stop interrupts.
 
+use fleet::HostId;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{InputEvent, TextareaState};
 use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
@@ -52,7 +53,7 @@ struct SlashCommand {
 
 pub struct Composer {
     core: Core,
-    host: String,
+    host: HostId,
     agent_id: String,
     input: Entity<TextareaState>,
     attachments: AttachmentTray,
@@ -76,7 +77,7 @@ impl Composer {
 
     pub fn new(
         core: Core,
-        host: &str,
+        host: &HostId,
         agent_id: &str,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -111,11 +112,19 @@ impl Composer {
         }
         cx.observe(&core.store, |_, _, cx| cx.notify()).detach();
         cx.observe(&core.usage, |_, _, cx| cx.notify()).detach();
+        cx.observe_in(core.draft_handoffs(), window, |this, _, window, cx| {
+            this.restore_returned_draft(window, cx);
+        })
+        .detach();
+        cx.observe_in(&core.nav, window, |this, _, window, cx| {
+            this.restore_returned_draft(window, cx);
+        })
+        .detach();
         core.store
             .update(cx, |store, cx| store.ensure_providers(host, cx));
-        Self {
+        let mut composer = Self {
             core,
-            host: host.to_string(),
+            host: host.clone(),
             agent_id: agent_id.to_string(),
             input,
             attachments: AttachmentTray::default(),
@@ -125,7 +134,11 @@ impl Composer {
             completions: Vec::new(),
             completion_index: 0,
             wide: false,
+        };
+        if let Some(draft) = composer.core.take_draft(host, agent_id, cx) {
+            composer.restore_draft(draft, window, cx);
         }
+        composer
     }
 
     /// `/foo` with no space yet: show matching commands.
@@ -205,6 +218,51 @@ impl Composer {
 
     pub fn focus(&self, window: &mut Window, cx: &mut App) {
         self.input.update(cx, |input, cx| input.focus(window, cx));
+    }
+
+    fn restore_returned_draft(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Hidden layouts and the closing pop-out must not consume the next
+        // main-window composer's handoff. Nav changes retry delivery when a
+        // cached layout or tab becomes current, without restoring in render.
+        if self.core.main_window() != Some(window.window_handle()) {
+            return;
+        }
+        let nav = self.core.nav.read(cx);
+        let visible = if self.wide {
+            nav.layout == "lanes"
+        } else {
+            nav.layout == "paseo" && nav.selection.as_ref().is_some_and(|selection| {
+                selection.host == self.host && matches!(nav.focused_tab(&crate::app::nav::workspace_key(&selection.host, &selection.workspace)), Some(crate::app::Tab::Agent(agent)) if agent == &self.agent_id)
+            })
+        };
+        if visible {
+            let draft = self.core.take_draft(&self.host, &self.agent_id, cx);
+            if let Some(draft) = draft {
+                self.restore_draft(draft, window, cx);
+            }
+        }
+    }
+
+    pub fn draft(&self, cx: &App) -> fleet::prompt::Prompt {
+        self.attachments
+            .prompt(self.input.read(cx).value().to_string())
+    }
+
+    pub fn preparing_attachment(&self) -> bool {
+        self.attachments.pending
+    }
+
+    pub fn restore_draft(
+        &mut self,
+        draft: fleet::prompt::Prompt,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.attachments.images.clear();
+        self.attachments.restore(&draft.images);
+        self.input
+            .update(cx, |input, cx| input.set_value(draft.text, window, cx));
+        cx.notify();
     }
 
     pub fn is_blank(&self, cx: &App) -> bool {
@@ -541,8 +599,15 @@ impl Render for Composer {
             .w_full()
             .flex()
             .justify_center()
-            .pl(px(size::CONVERSATION_PADDING_LEFT))
-            .pr(px(size::CONVERSATION_PADDING_RIGHT))
+            // A Lanes card's composer uses the room the transcript keeps for
+            // its prompt index; centred in Paseo, it lines up with the
+            // transcript instead.
+            .map(|row| match self.wide {
+                true => row.px(px(size::CONVERSATION_PADDING_RIGHT)),
+                false => row
+                    .pl(px(size::CONVERSATION_PADDING_LEFT))
+                    .pr(px(size::CONVERSATION_PADDING_RIGHT)),
+            })
             .pb(px(16.))
             .pt(px(4.))
             .child(

@@ -124,9 +124,9 @@ pub fn fades(handle: &ScrollHandle, background: Rgba) -> impl IntoElement {
     .size_full()
 }
 
-/// Whether a lane's list has cards above and below what it shows: scrolled
-/// past its first row, and its last row not wholly in view.
-fn list_overflow(state: &ListState) -> (bool, bool) {
+/// Whether a list has rows above and below what it shows: scrolled past its
+/// first row, and its last row not wholly in view.
+pub fn list_overflow(state: &ListState) -> (bool, bool) {
     let count = state.item_count();
     if count == 0 {
         return (false, false);
@@ -134,10 +134,12 @@ fn list_overflow(state: &ListState) -> (bool, bool) {
     let viewport = state.viewport_bounds();
     let top = state.logical_scroll_top();
     let above = top.item_ix > 0 || top.offset_in_item > px(0.5);
-    // A last row not laid out lies past the bottom.
-    let below = state
-        .bounds_for_item(count - 1)
-        .is_none_or(|last| last.bottom() > viewport.bottom() + px(0.5));
+    // A list following its end, as a conversation does, is at it. Else a
+    // last row not laid out lies past the bottom.
+    let below = !state.is_following_tail()
+        && state
+            .bounds_for_item(count - 1)
+            .is_none_or(|last| last.bottom() > viewport.bottom() + px(0.5));
     (above, below)
 }
 
@@ -157,6 +159,26 @@ pub fn list_fades(state: ListState) -> impl IntoElement {
             }
             if below {
                 paint_fade(window, viewport, Edge::Bottom, depth, None, LANE_SHADOW);
+            }
+        },
+    )
+    .absolute()
+    .size_full()
+}
+
+/// Fades at the top and bottom of a scrolling column that is no virtual
+/// list, where it has more to scroll to. Lies over the column.
+pub fn scroll_fades(handle: &ScrollHandle) -> impl IntoElement {
+    let handle = handle.clone();
+    canvas(
+        move |_, _, _| overflow(handle.offset().y / px(1.), handle.max_offset().y / px(1.)),
+        move |bounds, (above, below), window, _| {
+            let depth = px(FADE_HEIGHT).min(bounds.size.height / 2.);
+            if above {
+                paint_fade(window, bounds, Edge::Top, depth, None, LANE_SHADOW);
+            }
+            if below {
+                paint_fade(window, bounds, Edge::Bottom, depth, None, LANE_SHADOW);
             }
         },
     )

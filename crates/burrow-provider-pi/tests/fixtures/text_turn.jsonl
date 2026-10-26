@@ -1,0 +1,21 @@
+// A plain turn: streamed text, then the usage read at the end.
+{"dir":"in","frame":{"type":"get_state"}}
+{"dir":"out","frame":{"id":"$REQ","type":"response","command":"get_state","success":true,"data":{"model":{"provider":"google","id":"gemini-2.5-flash-lite","name":"Gemini 2.5 Flash-Lite","reasoning":true,"input":["text","image"],"contextWindow":1048576},"thinkingLevel":"off","isStreaming":false,"isCompacting":false,"sessionFile":"/home/user/.pi/agent/sessions/--home-user-proj--/2026-10-19T00-00-00-000Z_sess-1.jsonl","sessionId":"sess-1","messageCount":0,"pendingMessageCount":0}}}
+{"cmd":{"prompt":{"turn":"foreground-turn-1","text":"Say hello"}}}
+{"dir":"in","frame":{"type":"prompt","message":"Say hello"}}
+{"dir":"out","frame":{"id":"$REQ","type":"response","command":"prompt","success":true,"data":{"disposition":"started"}}}
+{"dir":"out","frame":{"type":"agent_start"}}
+{"dir":"out","frame":{"type":"turn_start"}}
+{"dir":"out","frame":{"type":"message_start","message":{"role":"user","content":[{"type":"text","text":"Say hello"}],"timestamp":1}}}
+{"dir":"out","frame":{"type":"message_end","message":{"role":"user","content":[{"type":"text","text":"Say hello"}],"timestamp":1}}}
+{"dir":"out","frame":{"type":"message_start","message":{"role":"assistant","content":[],"provider":"google","model":"gemini-2.5-flash-lite","stopReason":"pending","timestamp":2}}}
+{"dir":"out","frame":{"type":"message_update","assistantMessageEvent":{"type":"text_start","contentIndex":0}}}
+{"dir":"out","frame":{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"Hello"}}}
+{"dir":"out","frame":{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":" there."}}}
+{"dir":"out","frame":{"type":"message_update","assistantMessageEvent":{"type":"text_end","contentIndex":0,"content":"Hello there."}}}
+{"dir":"out","frame":{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"Hello there."}],"provider":"google","model":"gemini-2.5-flash-lite","stopReason":"stop","responseId":"resp-1","timestamp":2}}}
+{"dir":"out","frame":{"type":"turn_end","message":{"role":"assistant","content":[{"type":"text","text":"Hello there."}],"stopReason":"stop"},"toolResults":[]}}
+{"dir":"out","frame":{"type":"agent_end","messages":[{"role":"user","content":[{"type":"text","text":"Say hello"}]},{"role":"assistant","content":[{"type":"text","text":"Hello there."}],"stopReason":"stop"}],"willRetry":false}}
+{"dir":"out","frame":{"type":"agent_settled"}}
+{"dir":"in","frame":{"type":"get_session_stats"}}
+{"dir":"out","frame":{"id":"$REQ","type":"response","command":"get_session_stats","success":true,"data":{"sessionId":"sess-1","tokens":{"input":3240,"output":3,"cacheRead":0,"cacheWrite":0,"total":3243},"cost":0.000334,"contextUsage":{"tokens":3243,"contextWindow":1048576,"percent":0.3}}}}

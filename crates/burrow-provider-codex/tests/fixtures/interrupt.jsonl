@@ -1,0 +1,19 @@
+// An interrupt of a running turn, then one sent before Codex named the turn.
+{"setup":"start"}
+{"cmd":{"prompt":{"turn":"codex-turn-1","text":"Count to 300"}}}
+{"dir":"in","frame":{"method":"turn/start"}}
+{"dir":"out","frame":{"id":"$ID","result":{"turn":{"id":"turn-a","status":"inProgress"}}}}
+{"dir":"out","frame":{"method":"turn/started","params":{"threadId":"thr-1","turn":{"id":"turn-a","status":"inProgress"}}}}
+{"dir":"out","frame":{"method":"item/agentMessage/delta","params":{"threadId":"thr-1","turnId":"turn-a","itemId":"msg-1","delta":"1\n2\n"}}}
+{"cmd":{"interrupt":null}}
+{"dir":"in","frame":{"method":"turn/interrupt","params":{"threadId":"thr-1","turnId":"turn-a"}}}
+{"dir":"out","frame":{"id":"$ID","result":{}}}
+{"dir":"out","frame":{"method":"turn/completed","params":{"threadId":"thr-1","turn":{"id":"turn-a","status":"interrupted","error":null}}}}
+{"cmd":{"prompt":{"turn":"codex-turn-2","text":"Again"}}}
+{"dir":"in","frame":{"method":"turn/start"}}
+{"cmd":{"interrupt":null}}
+{"dir":"out","frame":{"id":"$ID","result":{"turn":{"id":"turn-b","status":"inProgress"}}}}
+{"dir":"out","frame":{"method":"turn/started","params":{"threadId":"thr-1","turn":{"id":"turn-b","status":"inProgress"}}}}
+{"dir":"in","frame":{"method":"turn/interrupt","params":{"threadId":"thr-1","turnId":"turn-b"}}}
+{"dir":"out","frame":{"id":"$ID","result":{}}}
+{"dir":"out","frame":{"method":"turn/completed","params":{"threadId":"thr-1","turn":{"id":"turn-b","status":"interrupted","error":null}}}}

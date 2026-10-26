@@ -1,0 +1,9 @@
+// The CLI comes up on another conversation than the stored one: the
+// session refuses it, tries again for the prompt, and fails the prompt.
+{"out":{"event":"init","conversation_id":"7f6e5d4c-3b2a-4190-8f7e-6d5c4b3a2910","init":{"model":"gemini-3.8-flash-low","cwd":"/home/user/repo","tools":[],"permission_mode":"always-proceed"}}}
+{"stop":"interrupt"}
+{"cmd":{"prompt":{"turn":"foreground-turn-3","text":"Hi"}}}
+{"exit":{"status":1,"stderr":""}}
+{"launch":{"conversation":"0b7c3f8e-2d41-4a6b-9c55-1f0e2a3b4c5d","model":"gemini-3.8-flash-low"}}
+{"out":{"event":"init","conversation_id":"7f6e5d4c-3b2a-4190-8f7e-6d5c4b3a2910","init":{"model":"gemini-3.8-flash-low","cwd":"/home/user/repo","tools":[],"permission_mode":"always-proceed"}}}
+{"stop":"interrupt"}

@@ -1,0 +1,22 @@
+[
+  {"requestId": "r", "report": {
+    "id": "claude:home", "sourceId": "claude", "sourceLabel": "Claude",
+    "account": {"label": "sam@home.example"}, "fetchedAt": "2027-01-15T07:58:00.000Z",
+    "report": {"status": "available", "planLabel": "Max", "windows": [
+      {"id": "five_hour", "label": "5h", "usedPct": 14, "resetsAt": "2027-01-15T09:55:00Z"},
+      {"id": "seven_day", "label": "Weekly", "usedPct": 59, "resetsAt": "2027-01-17T10:55:00Z"}
+    ]}
+  }},
+  {"requestId": "r", "report": {
+    "id": "codex:personal", "sourceId": "codex", "sourceLabel": "Codex",
+    "account": {"label": "personal"}, "fetchedAt": "2027-01-15T07:58:00.000Z",
+    "report": {"status": "available", "planLabel": "Pro", "windows": [
+      {"id": "seven_day", "label": "Weekly", "usedPct": 71, "resetsAt": "2027-01-16T08:30:00Z"}
+    ]}
+  }},
+  {"requestId": "r", "report": {
+    "id": "cursor:a", "sourceId": "cursor", "sourceLabel": "Cursor",
+    "account": {}, "fetchedAt": "2027-01-15T07:00:00Z",
+    "report": {"status": "unavailable", "problem": {"kind": "no_quota", "detail": ""}}
+  }}
+]

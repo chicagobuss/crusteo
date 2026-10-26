@@ -83,6 +83,10 @@ impl ServerInfo {
     }
 }
 
+/// The feature a daemon advertises when it hides background workspaces, and
+/// their agents, from clients that do not send `includeBackground`.
+pub const BACKGROUND_WORKSPACES: &str = "backgroundWorkspaces";
+
 /// Directory sync cursor: `{generation, afterSeq}`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
@@ -221,6 +225,10 @@ pub struct Workspace {
     pub labels: Vec<String>,
     #[serde(default)]
     pub archiving_at: Option<String>,
+    /// A background workspace (Paseo 0.12): the daemon lists it, and every
+    /// agent in it, only to clients that ask with `includeBackground`.
+    #[serde(default)]
+    pub background: bool,
     #[serde(default)]
     pub status: String,
     #[serde(default)]
@@ -536,6 +544,10 @@ mod tests {
                 .unwrap();
         assert_eq!(ws.id, "wks_1");
         assert_eq!(Bucket::parse(&ws.status), Bucket::Running);
+        assert!(!ws.background);
+        let ws: Workspace =
+            serde_json::from_value(json!({"id":"wks_2","background":true})).unwrap();
+        assert!(ws.background);
     }
 
     #[test]

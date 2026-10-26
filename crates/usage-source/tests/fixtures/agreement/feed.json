@@ -1,0 +1,42 @@
+{
+  "revision": 41,
+  "served_at": "2027-01-15T07:59:00Z",
+  "pools": {
+    "claude:work": {
+      "provider": "claude",
+      "account_label": "sam@work.example",
+      "plan": "team",
+      "status": "ok",
+      "windows": [
+        {"key": "session", "label": "session", "scope": null, "used_percent": 26.0, "remaining_percent": 74.0,
+         "window_seconds": 18000.0, "resets_at": 1800005100.0},
+        {"key": "weekly_all", "label": "weekly", "scope": null, "used_percent": 39.0, "remaining_percent": 61.0,
+         "window_seconds": 604800.0, "resets_at": 1800258900.0},
+        {"key": "weekly_scoped:Fable", "label": "weekly", "scope": "Fable", "used_percent": 0.0,
+         "remaining_percent": 100.0, "window_seconds": 604800.0, "resets_at": 1800258900.0}
+      ]
+    },
+    "codex:personal": {
+      "provider": "codex",
+      "account_label": "personal",
+      "plan": "pro",
+      "status": "ok",
+      "windows": [
+        {"key": "codex:primary", "label": "codex", "scope": null, "used_percent": 71.0, "remaining_percent": 29.0,
+         "window_seconds": 604800.0, "resets_at": 1800088200.0},
+        {"key": "all:codex:primary", "label": "all:codex", "scope": null, "used_percent": 71.0,
+         "remaining_percent": 29.0, "window_seconds": 604800.0, "resets_at": 1800088200.0}
+      ]
+    },
+    "gemini:personal": {
+      "provider": "gemini",
+      "account_label": "personal",
+      "plan": "AI Pro",
+      "status": "ok",
+      "windows": [
+        {"key": "gemini-5h", "label": "Gemini models (5h)", "scope": null, "used_percent": 0.0,
+         "remaining_percent": 100.0, "window_seconds": 18000.0, "resets_at": 1800017300.0}
+      ]
+    }
+  }
+}

@@ -1,0 +1,12 @@
+// An interrupt mid tool call: the call is canceled, the turn ends at once, and the CLI's aborted result that follows is dropped.
+{"dir":"in","frame":{"type":"control_request","request":{"subtype":"initialize"}}}
+{"dir":"out","frame":{"type":"control_response","response":{"subtype":"success","request_id":"$REQ","response":{}}}}
+{"cmd":{"prompt":{"turn":"foreground-turn-1","text":"Run the long build"}}}
+{"dir":"in","frame":{"type":"user"}}
+{"dir":"out","frame":{"type":"system","subtype":"init","session_id":"sess-4","permissionMode":"bypassPermissions"}}
+{"dir":"out","frame":{"type":"assistant","message":{"id":"msg_5","content":[{"type":"tool_use","id":"toolu_b","name":"Bash","input":{"command":"make all"}}]},"parent_tool_use_id":null}}
+{"cmd":{"interrupt":true}}
+{"dir":"in","frame":{"type":"control_request","request":{"subtype":"interrupt"}}}
+{"dir":"out","frame":{"type":"control_response","response":{"subtype":"success","request_id":"$REQ","response":{"still_queued":[]}}}}
+{"dir":"out","frame":{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_b","content":"The user doesn't want to proceed with this tool use.","is_error":true}]},"parent_tool_use_id":null}}
+{"dir":"out","frame":{"type":"result","subtype":"error_during_execution","is_error":true,"errors":["Request was aborted."],"usage":{}}}

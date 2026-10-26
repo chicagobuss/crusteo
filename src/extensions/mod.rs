@@ -137,7 +137,7 @@ pub type RunFor = Rc<dyn Fn(&WorkspaceTarget, &mut Window, &mut App)>;
 /// The workspace, and the agent shown in it, a [`WorkspaceAction`] is for.
 #[derive(Debug, Clone, PartialEq)]
 pub struct WorkspaceTarget {
-    pub host: String,
+    pub host: fleet::HostId,
     pub workspace: String,
     pub agent: Option<String>,
     pub agent_title: String,

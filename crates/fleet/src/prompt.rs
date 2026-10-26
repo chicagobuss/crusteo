@@ -91,7 +91,7 @@ mod tests {
             json!({"data":"cG5n", "mimeType":"image/png"})
         );
         let initial = crate::requests::create_agent(
-            "workspace",
+            Some("workspace"),
             json!({"provider":"codex"}),
             Some(queued),
             "initial-id",

@@ -50,9 +50,26 @@ pub fn write<T: Serialize>(name: &str, value: &T) {
     }
 }
 
+/// The Reef this desktop takes its hosts from (`reef.json` in the data dir),
+/// if any; see [`crate::app::reef`].
+pub fn reef_link() -> Option<crate::app::reef::ReefLink> {
+    read::<crate::app::reef::ReefLink>("reef.json").filter(|link| !link.url.trim().is_empty())
+}
+
+/// Where hosts are kept: `hosts.json`, or in reef mode the last list Reef
+/// gave, so a start without Reef still has hosts.
+fn hosts_file() -> &'static str {
+    if reef_link().is_some() {
+        "reef-hosts.json"
+    } else {
+        "hosts.json"
+    }
+}
+
 /// Saved hosts. First launch seeds them from the bundled `hosts.json`;
 /// after that the file in the data dir is the source of truth.
-/// `CRUSTEO_HOSTS` points at an alternative file (handy for testing).
+/// `CRUSTEO_HOSTS` points at an alternative file (handy for testing). In
+/// reef mode they are the last list Reef gave, none before the first.
 pub fn load_hosts() -> Vec<HostConfig> {
     if let Some(path) = std::env::var_os("CRUSTEO_HOSTS")
         && let Ok(bytes) = fs::read(&path)
@@ -60,16 +77,24 @@ pub fn load_hosts() -> Vec<HostConfig> {
     {
         return hosts;
     }
-    if let Some(hosts) = read::<Vec<HostConfig>>("hosts.json") {
+    if reef_link().is_some() {
+        return read::<Vec<HostConfig>>(hosts_file()).unwrap_or_default();
+    }
+    if let Some(mut hosts) = read::<Vec<HostConfig>>("hosts.json") {
+        // Saved before hosts had ids: each takes its name as its id, once.
+        if fleet::assign_ids(&mut hosts) {
+            write("hosts.json", &hosts);
+        }
         return hosts;
     }
-    let hosts: Vec<HostConfig> = serde_json::from_str(DEFAULT_HOSTS).unwrap_or_default();
+    let mut hosts: Vec<HostConfig> = serde_json::from_str(DEFAULT_HOSTS).unwrap_or_default();
+    fleet::assign_ids(&mut hosts);
     write("hosts.json", &hosts);
     hosts
 }
 
 pub fn save_hosts(hosts: &[HostConfig]) {
-    write("hosts.json", &hosts.to_vec());
+    write(hosts_file(), &hosts.to_vec());
 }
 
 pub fn client_id() -> String {
@@ -86,14 +111,17 @@ pub fn client_id() -> String {
 #[serde(default)]
 pub struct UiState {
     pub layout: Option<String>,
-    pub host: Option<String>,
+    pub host: Option<fleet::HostId>,
     pub workspace: Option<String>,
     pub sidebar_width: Option<f32>,
     pub sidebar_open: Option<bool>,
     pub group_by_status: bool,
     pub collapsed: Vec<String>,
     pub collapsed_pinned: bool,
-    pub host_filter: Vec<String>,
+    pub host_filter: Vec<fleet::HostId>,
+    /// Whether views list Paseo's background workspaces and their agents;
+    /// None preserves the default, shown.
+    pub show_background: Option<bool>,
     /// Open tabs per `host:workspace`: tab keys like `agent:<id>`.
     pub tabs: std::collections::BTreeMap<String, Vec<String>>,
     pub focused_tab: std::collections::BTreeMap<String, String>,
@@ -131,6 +159,12 @@ pub struct UiState {
     pub card_order: std::collections::BTreeMap<String, Vec<String>>,
     /// Local display overrides: canonical label-derived lane key → stable LANE_COLORS name.
     pub lane_color_choices: std::collections::BTreeMap<String, String>,
+    /// A colour pinned for an agent (its popped-out window's bar and its open
+    /// card's), by `agent_key`, as a LANE_COLORS name.
+    pub agent_colors: std::collections::BTreeMap<String, String>,
+    /// Where each agent's popped-out window was last, by `agent_key`:
+    /// x, y, width, height.
+    pub popout_bounds: std::collections::BTreeMap<String, [f32; 4]>,
     /// Window corner for in-app notifications; empty is the default.
     pub notification_corner: String,
     /// `in-app`, `system` or `both`; empty is the default.
@@ -149,6 +183,18 @@ pub struct UiState {
     pub window_border: u8,
     /// Its color as `#rrggbb`; empty is the default.
     pub window_border_color: String,
+    /// Column widths the user picked in layouts other than Lanes, by
+    /// layout id; a layout missing has its default.
+    pub column_widths: std::collections::BTreeMap<String, f32>,
+    /// Layouts other than Lanes whose columns shrink to fit in view.
+    pub column_fit: Vec<String>,
+    /// How the last new workspace in each project was made, by
+    /// `host:project`, so the next one starts the same way.
+    pub workspace_choices: std::collections::BTreeMap<String, fleet::creation::Remembered>,
+    /// The host the last project was added on.
+    pub add_project_host: Option<fleet::HostId>,
+    /// What the last new agent on each host was made with, by host id.
+    pub agent_choices: std::collections::BTreeMap<String, fleet::creation::AgentChoice>,
 }
 
 pub fn load_ui() -> UiState {
@@ -249,6 +295,47 @@ mod tests {
         let restored: UiState =
             serde_json::from_value(serde_json::to_value(disabled).unwrap()).unwrap();
         assert_eq!(restored.follow_relabel, Some(false));
+    }
+
+    #[test]
+    fn background_workspaces_show_by_default_and_hiding_survives_restart() {
+        let old: UiState = serde_json::from_str(r#"{"layout":"lanes"}"#).unwrap();
+        assert!(old.show_background.unwrap_or(true));
+        let hidden = UiState {
+            show_background: Some(false),
+            ..old
+        };
+        let restored: UiState =
+            serde_json::from_value(serde_json::to_value(hidden).unwrap()).unwrap();
+        assert_eq!(restored.show_background, Some(false));
+    }
+
+    #[test]
+    fn new_workspace_choices_survive_restart() {
+        use fleet::creation::{Isolation, Remembered};
+        let old: UiState = serde_json::from_str("{}").unwrap();
+        assert!(old.workspace_choices.is_empty());
+        assert!(old.add_project_host.is_none());
+        let chosen = UiState {
+            workspace_choices: std::collections::BTreeMap::from([(
+                "devbox:prj_1".into(),
+                Remembered {
+                    isolation: Isolation::Directory,
+                    start: Some("refs/remotes/origin/main".into()),
+                },
+            )]),
+            add_project_host: Some(fleet::HostId::new("devbox")),
+            ..old
+        };
+        let restored: UiState =
+            serde_json::from_value(serde_json::to_value(chosen).unwrap()).unwrap();
+        let choice = &restored.workspace_choices["devbox:prj_1"];
+        assert_eq!(choice.isolation, Isolation::Directory);
+        assert_eq!(choice.start().label(), "origin/main");
+        assert_eq!(
+            restored.add_project_host,
+            Some(fleet::HostId::new("devbox"))
+        );
     }
 
     #[test]

@@ -1,0 +1,20 @@
+// A steer joins the running turn (priority next); an approved plan switches to acceptEdits; the old mode name "default" falls back to "manual".
+{"dir":"in","frame":{"type":"control_request","request":{"subtype":"initialize"}}}
+{"dir":"out","frame":{"type":"control_response","response":{"subtype":"success","request_id":"$REQ","response":{}}}}
+{"cmd":{"prompt":{"turn":"foreground-turn-1","text":"Plan the change"}}}
+{"dir":"in","frame":{"type":"user"}}
+{"cmd":{"steer":"Keep it small"}}
+{"dir":"in","frame":{"type":"user","priority":"next","message":{"content":[{"type":"text","text":"Keep it small"}]}}}
+{"dir":"out","frame":{"type":"system","subtype":"init","session_id":"sess-5","permissionMode":"plan"}}
+{"dir":"out","frame":{"type":"assistant","message":{"id":"msg_7","content":[{"type":"tool_use","id":"toolu_p","name":"ExitPlanMode","input":{"plan":"# Plan\nEdit one line."}}]},"parent_tool_use_id":null}}
+{"dir":"out","frame":{"type":"control_request","request_id":"cli-p","request":{"subtype":"can_use_tool","tool_name":"ExitPlanMode","input":{"plan":"# Plan\nEdit one line."},"tool_use_id":"toolu_p"}}}
+{"cmd":{"respond":{"id":"cli-p","response":{"behavior":"allow","selectedActionId":"implement"}}}}
+{"dir":"in","frame":{"type":"control_response","response":{"subtype":"success","request_id":"cli-p","response":{"behavior":"allow"}}}}
+{"dir":"in","frame":{"type":"control_request","request":{"subtype":"set_permission_mode","mode":"acceptEdits"}}}
+{"dir":"out","frame":{"type":"control_response","response":{"subtype":"success","request_id":"$REQ","response":{}}}}
+{"dir":"out","frame":{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_p","content":"User has approved your plan."}]},"parent_tool_use_id":null}}
+{"dir":"out","frame":{"type":"result","subtype":"success","is_error":false,"result":"","usage":{}}}
+{"cmd":{"mode":"default"}}
+{"dir":"in","frame":{"type":"control_request","request":{"subtype":"set_permission_mode","mode":"default"}}}
+{"dir":"out","frame":{"type":"control_response","response":{"subtype":"error","request_id":"$REQ","error":"Invalid permission mode: default"}}}
+{"dir":"in","frame":{"type":"control_request","request":{"subtype":"set_permission_mode","mode":"manual"}}}

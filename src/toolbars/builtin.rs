@@ -179,23 +179,31 @@ const RECOUNT_INTERVAL: Duration = Duration::from_millis(250);
 
 type BucketCounts = [(Bucket, usize); 5];
 
+/// The store revision counts were taken at, and whether background
+/// workspaces were left out of them.
+type CountedAt = (u64, bool);
+
 /// "2 ready to review · 1 working": the fleet's agents by state, without
 /// those done.
 struct AttentionCounts {
     core: Core,
-    /// The counts, with the store revision and time they were taken at.
-    counts: RefCell<Option<(u64, Instant, BucketCounts)>>,
+    /// The counts, with what and when they were taken at.
+    counts: RefCell<Option<(CountedAt, Instant, BucketCounts)>>,
     /// A redraw is queued for when the counts may be recounted.
     recount_queued: Rc<Cell<bool>>,
 }
 
 impl AttentionCounts {
     fn counts(&self, cx: &mut App) -> BucketCounts {
-        let revision = self.core.store.read(cx).revision;
+        let hide = !self.core.nav.read(cx).show_background();
+        let revision = (self.core.store.read(cx).revision, hide);
         let cached = *self.counts.borrow();
         match cached {
             Some((at, _, counts)) if at == revision => counts,
-            Some((_, taken, counts)) if taken.elapsed() < RECOUNT_INTERVAL => {
+            // The setting changed: recount now, not a quarter second late.
+            Some(((_, was), taken, counts))
+                if was == hide && taken.elapsed() < RECOUNT_INTERVAL =>
+            {
                 if !self.recount_queued.replace(true) {
                     let wait = RECOUNT_INTERVAL.saturating_sub(taken.elapsed());
                     let (queued, toolbars) =
@@ -211,7 +219,7 @@ impl AttentionCounts {
                 counts
             }
             _ => {
-                let counts = self.core.store.read(cx).fleet.agent_bucket_counts();
+                let counts = self.core.store.read(cx).fleet.agent_bucket_counts(hide);
                 *self.counts.borrow_mut() = Some((revision, Instant::now(), counts));
                 counts
             }
@@ -232,7 +240,8 @@ impl ToolbarItem for AttentionCounts {
     fn render(&self, _: &mut Window, cx: &mut App) -> Option<AnyElement> {
         let p = palette();
         let counts = self.counts(cx);
-        let singled = self.core.nav.read(cx).state_highlight;
+        let nav = self.core.nav.read(cx);
+        let (singled, listed) = (nav.state_highlight, nav.state_list);
         Some(
             div()
                 .flex()
@@ -246,7 +255,8 @@ impl ToolbarItem for AttentionCounts {
                             let bucket = *bucket;
                             let color = ui::bucket_color(bucket).unwrap_or(p.extra_muted);
                             let nav = self.core.nav.clone();
-                            let on = singled == Some(bucket);
+                            let listing = listed == Some(bucket);
+                            let on = listing || singled == Some(bucket);
                             div()
                                 .id(SharedString::from(format!("count-{}", bucket.as_str())))
                                 .flex()
@@ -266,23 +276,16 @@ impl ToolbarItem for AttentionCounts {
                                 })
                                 .child(div().size(px(6.)).rounded_full().bg(color))
                                 .child(format!("{n} {}", bucket.label().to_lowercase()))
-                                // On mouse down, so the click that ends a
-                                // highlight elsewhere does not end this one.
+                                // Opens the list of them, or closes it, or
+                                // switches it to this state. On mouse down,
+                                // as the window's "any click closes it" is.
                                 .on_mouse_down(
                                     gpui_kit::gpui::MouseButton::Left,
                                     move |_, _, cx| {
                                         cx.stop_propagation();
                                         nav.update(cx, |nav, cx| {
-                                            if on {
-                                                nav.set_state_highlight(None, cx);
-                                                return;
-                                            }
-                                            if nav.layout != "lanes" {
-                                                nav.layout = "lanes".into();
-                                                nav.save();
-                                            }
-                                            nav.set_state_highlight(Some(bucket), cx);
-                                            cx.notify();
+                                            nav.set_state_highlight(None, cx);
+                                            nav.set_state_list((!listing).then_some(bucket), cx);
                                         });
                                     },
                                 )
@@ -298,15 +301,16 @@ fn state_help(state: Bucket) -> &'static str {
     match state {
         Bucket::NeedsInput => {
             "Waiting on you: a permission to grant or a question to answer. \
-             Click to single them out on the board."
+             Click to list them, with what each asks."
         }
-        Bucket::Failed => {
-            "Their last turn ended in an error. Click to single them out on the board."
-        }
+        Bucket::Failed => "Their last turn ended in an error. Click to list them, with each error.",
         Bucket::Attention => {
-            "Finished a turn you have not looked at yet. Click to single them out on the board."
+            "Finished a turn you have not looked at yet. \
+             Click to list them, with each one's last reply."
         }
-        Bucket::Running => "Working on a turn right now. Click to single them out on the board.",
+        Bucket::Running => {
+            "Working on a turn right now. Click to list them, with each one's last reply."
+        }
         Bucket::Done => "Done, and already seen.",
     }
 }

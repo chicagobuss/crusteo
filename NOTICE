@@ -21,6 +21,14 @@ crates/fleet/src/display.rs, and the understanding of the daemon wire protocol
 documented in docs/protocol/ and implemented in crates/paseo-client. These
 were ported from Paseo's TypeScript sources to Rust and modified.
 
+The Burrow daemon in crates/burrow-* implements the Paseo daemon wire
+protocol (version 1): message names, envelope, handshake, subscription,
+directory-sync and timeline semantics, error codes and reply-naming rules,
+learned from Paseo's packages/protocol and packages/server and reimplemented
+in Rust. The timeline paging in crates/burrow-daemon/src/timeline.rs follows
+Paseo's selectProjectedTimelinePage. docs/burrow/ summarizes the protocol.
+Burrow is not affiliated with or endorsed by the Paseo project either.
+
 -------------------------------------------------------------------------------
 GPUI (Zed)
 https://github.com/zed-industries/zed

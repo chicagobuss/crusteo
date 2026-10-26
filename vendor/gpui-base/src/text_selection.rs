@@ -44,6 +44,24 @@ impl TextSelectionScopeId {
     }
 }
 
+// crusteo: selection groups.
+/// A fence for one selection gesture: a drag that starts in a participant of
+/// a group selects across that group's participants only, however far the
+/// pointer goes. Text in no group selects across the window as before.
+/// Unlike a [`TextSelectionScopeId`], every group stays selectable; a group
+/// only bounds how far one selection reaches, such as one turn of a
+/// conversation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct TextSelectionGroupId(u64);
+
+impl TextSelectionGroupId {
+    /// A group from a caller-chosen value, stable across frames: the same
+    /// content must get the same value every frame.
+    pub const fn from_raw(value: u64) -> Self {
+        Self(value)
+    }
+}
+
 /// Stable participant-defined identity for virtualized participant content.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct TextSelectionContentKey(u64);
@@ -218,6 +236,8 @@ pub struct TextSelectionRegistration {
     bounds: Bounds<Pixels>,
     scroll_offset: Point<Pixels>,
     scope: TextSelectionScopeId,
+    /// crusteo: the selection group, from the nearest group marker.
+    group: Option<TextSelectionGroupId>,
     document_order: u64,
     text_bounds: Vec<Bounds<Pixels>>,
     self_scroll: bool,
@@ -233,6 +253,7 @@ impl TextSelectionRegistration {
             bounds,
             scroll_offset: Point::default(),
             scope: TextSelectionScopeId::default(),
+            group: None,
             document_order: 0,
             text_bounds: Vec::new(),
             self_scroll: false,
@@ -294,6 +315,12 @@ impl TextSelectionRegistration {
     /// Sets the opaque selection scope.
     pub fn with_scope(mut self, scope: TextSelectionScopeId) -> Self {
         self.scope = scope;
+        self
+    }
+
+    /// crusteo: sets the selection group; see [`TextSelectionGroupId`].
+    pub fn with_group(mut self, group: Option<TextSelectionGroupId>) -> Self {
+        self.group = group;
         self
     }
 
@@ -831,6 +858,10 @@ impl TextSelectionHandle {
         if let Some(scope) = current_text_selection_scope(window.window_handle().window_id(), cx) {
             registration.scope = scope;
         }
+        // crusteo: selection groups.
+        if let Some(group) = current_text_selection_group(window.window_handle().window_id(), cx) {
+            registration.group = Some(group);
+        }
         let Some(state) = WindowSelectionState::existing(window, cx) else {
             return;
         };
@@ -1103,6 +1134,9 @@ struct WindowSelectionState {
     cursor: Option<SelectionEndpoint>,
     pending_extension_anchor: Option<SelectionEndpoint>,
     is_selecting: bool,
+    /// crusteo: the group the current selection may not reach past, from
+    /// where its anchor is; see [`TextSelectionGroupId`].
+    fence: Option<TextSelectionGroupId>,
     did_hit_text: bool,
     frame_generation: u64,
     finish_frame_scheduled: bool,
@@ -1364,6 +1398,7 @@ impl WindowSelectionState {
         self.cursor = None;
         self.pending_extension_anchor = None;
         self.is_selecting = false;
+        self.fence = None;
         self.did_hit_text = false;
         if self.touch.reset() {
             self.touch_changed(cx);
@@ -1484,6 +1519,7 @@ impl WindowSelectionState {
         self.cursor = None;
         self.pending_extension_anchor = None;
         self.is_selecting = false;
+        self.fence = None;
         self.did_hit_text = false;
         if self.touch.reset() {
             self.touch_changed(cx);
@@ -1684,6 +1720,8 @@ impl WindowSelectionState {
         };
         self.anchor = Some(to_endpoint(anchor));
         self.cursor = Some(to_endpoint(cursor));
+        // crusteo: selection groups; a Shift-click after it extends within.
+        self.fence = self.anchor.as_ref().and_then(|anchor| self.fence_for(anchor));
         self.did_hit_text = true;
         self.is_selecting = false;
         self.touch.menu_open = true;
@@ -1839,6 +1877,8 @@ impl WindowSelectionState {
         };
         self.anchor = Some(to_endpoint(anchor));
         self.cursor = Some(to_endpoint(cursor));
+        // crusteo: selection groups; a Shift-click after it extends within.
+        self.fence = self.anchor.as_ref().and_then(|anchor| self.fence_for(anchor));
         self.did_hit_text = true;
         self.is_selecting = false;
         participant.update(cx, |state, cx| state.focus(window, cx));
@@ -1882,7 +1922,15 @@ impl WindowSelectionState {
         if !extend && !already_prepared {
             self.clear(cx);
         }
+        // crusteo: selection groups. A Shift-click extends within its
+        // anchor's fence; a fresh press finds its participant first.
+        self.fence = previous_anchor
+            .as_ref()
+            .and_then(|anchor| self.fence_for(anchor));
         let endpoint = self.endpoint(position, window.as_deref(), cx);
+        if previous_anchor.is_none() {
+            self.fence = self.fence_for(&endpoint);
+        }
         let focus_participant = endpoint
             .inside
             .then(|| endpoint.participant.clone())
@@ -1913,6 +1961,15 @@ impl WindowSelectionState {
         self.publish_snapshots(cx);
     }
 
+    /// crusteo: selection groups. The group a selection anchored at
+    /// `endpoint` stays in, if its participant is in one.
+    fn fence_for(&self, endpoint: &SelectionEndpoint) -> Option<TextSelectionGroupId> {
+        self.participants
+            .get(&endpoint.entity_id()?)?
+            .registration
+            .group
+    }
+
     fn endpoint(
         &mut self,
         position: Point<Pixels>,
@@ -1937,6 +1994,14 @@ impl WindowSelectionState {
         for registration in self.participants.values() {
             if registration.registration.scope != self.active_scope
                 || registration.participant.upgrade().is_none()
+            {
+                continue;
+            }
+            // crusteo: selection groups. Outside its fence the pointer
+            // resolves to the nearest end of what is inside it.
+            if self
+                .fence
+                .is_some_and(|group| registration.registration.group != Some(group))
             {
                 continue;
             }
@@ -2304,6 +2369,74 @@ fn with_text_selection_scope<T>(
     }
 }
 
+// crusteo: selection groups, marked on a subtree as scopes are.
+#[derive(Default)]
+struct TextSelectionGroupStacks(HashMap<gpui::WindowId, Vec<TextSelectionGroupId>>);
+
+impl Global for TextSelectionGroupStacks {}
+
+fn current_text_selection_group(
+    window_id: gpui::WindowId,
+    cx: &App,
+) -> Option<TextSelectionGroupId> {
+    cx.has_global::<TextSelectionGroupStacks>()
+        .then(|| {
+            cx.global::<TextSelectionGroupStacks>()
+                .0
+                .get(&window_id)
+                .and_then(|stack| stack.last().copied())
+        })
+        .flatten()
+}
+
+fn with_text_selection_group<T>(
+    window_id: gpui::WindowId,
+    group: TextSelectionGroupId,
+    cx: &mut App,
+    callback: impl FnOnce(&mut App) -> T,
+) -> T {
+    if !cx.has_global::<TextSelectionGroupStacks>() {
+        cx.set_global(TextSelectionGroupStacks::default());
+    }
+    cx.global_mut::<TextSelectionGroupStacks>()
+        .0
+        .entry(window_id)
+        .or_default()
+        .push(group);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| callback(cx)));
+    let stacks = &mut cx.global_mut::<TextSelectionGroupStacks>().0;
+    if stacks.get_mut(&window_id).is_some_and(|stack| {
+        stack.pop();
+        stack.is_empty()
+    }) {
+        stacks.remove(&window_id);
+    }
+    match result {
+        Ok(result) => result,
+        Err(payload) => std::panic::resume_unwind(payload),
+    }
+}
+
+/// What a [`TextSelectionScopeMarker`] marks its subtree with.
+#[derive(Clone, Copy)]
+enum SelectionMark {
+    Scope(TextSelectionScopeId),
+    // crusteo: selection groups.
+    Group(TextSelectionGroupId),
+}
+
+fn with_selection_mark<T>(
+    window_id: gpui::WindowId,
+    mark: SelectionMark,
+    cx: &mut App,
+    callback: impl FnOnce(&mut App) -> T,
+) -> T {
+    match mark {
+        SelectionMark::Scope(scope) => with_text_selection_scope(window_id, scope, cx, callback),
+        SelectionMark::Group(group) => with_text_selection_group(window_id, group, cx, callback),
+    }
+}
+
 /// Window-level operations for text selection.
 pub struct TextSelection;
 
@@ -2448,13 +2581,24 @@ pub(crate) fn text_selection_scope(
     element: impl IntoElement,
 ) -> impl IntoElement {
     TextSelectionScopeMarker {
-        scope,
+        mark: SelectionMark::Scope(scope),
+        element: element.into_element(),
+    }
+}
+
+// crusteo: selection groups.
+pub(crate) fn text_selection_group(
+    group: TextSelectionGroupId,
+    element: impl IntoElement,
+) -> impl IntoElement {
+    TextSelectionScopeMarker {
+        mark: SelectionMark::Group(group),
         element: element.into_element(),
     }
 }
 
 struct TextSelectionScopeMarker<E> {
-    scope: TextSelectionScopeId,
+    mark: SelectionMark,
     element: E,
 }
 
@@ -2486,7 +2630,7 @@ impl<E: Element> Element for TextSelectionScopeMarker<E> {
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
         let window_id = window.window_handle().window_id();
-        with_text_selection_scope(window_id, self.scope, cx, |cx| {
+        with_selection_mark(window_id, self.mark, cx, |cx| {
             self.element.request_layout(id, inspector_id, window, cx)
         })
     }
@@ -2501,7 +2645,7 @@ impl<E: Element> Element for TextSelectionScopeMarker<E> {
         cx: &mut App,
     ) -> Self::PrepaintState {
         let window_id = window.window_handle().window_id();
-        with_text_selection_scope(window_id, self.scope, cx, |cx| {
+        with_selection_mark(window_id, self.mark, cx, |cx| {
             self.element
                 .prepaint(id, inspector_id, bounds, request_layout, window, cx)
         })
@@ -2518,7 +2662,7 @@ impl<E: Element> Element for TextSelectionScopeMarker<E> {
         cx: &mut App,
     ) {
         let window_id = window.window_handle().window_id();
-        with_text_selection_scope(window_id, self.scope, cx, |cx| {
+        with_selection_mark(window_id, self.mark, cx, |cx| {
             self.element.paint(
                 id,
                 inspector_id,
@@ -2818,10 +2962,22 @@ fn paint_text_selection(state: &Entity<WindowSelectionState>, window: &mut Windo
         if phase.bubble()
             && let Some(state) = mouse_move_state.upgrade()
         {
+            // crusteo: a drag whose release never arrived (let go outside the
+            // window, or swallowed on its way) ends at the first move without
+            // the button, rather than following the bare pointer as it goes.
+            let released = event.pressed_button != Some(MouseButton::Left)
+                && !window.has_long_press_capture(&state);
             state.update(cx, |state, cx| {
                 // A handle drag maps the pointer through the handle's offset;
                 // the raw pointer must not fight it.
                 if state.touch.drag.is_some() {
+                    return;
+                }
+                if released {
+                    if state.is_selecting {
+                        state.mouse_down_prepared = false;
+                        state.end(cx);
+                    }
                     return;
                 }
                 state.update_in_window(event.position, window, cx)
@@ -2830,9 +2986,12 @@ fn paint_text_selection(state: &Entity<WindowSelectionState>, window: &mut Windo
         }
     });
 
+    // crusteo: the release is taken on capture, before anything under the
+    // pointer can stop it; a lost release left the drag selecting on every
+    // later move, across every card the pointer passed.
     let mouse_up_state = state.downgrade();
     window.on_mouse_event(move |_: &MouseUpEvent, phase, _, cx| {
-        if phase.bubble()
+        if phase.capture()
             && let Some(state) = mouse_up_state.upgrade()
         {
             state.update(cx, |state, cx| {
@@ -3059,6 +3218,34 @@ mod tests {
         fn new(text: &str, cx: &mut gpui::App) -> Self {
             let selection = TextSelectionHandle::new(text, cx);
             Self { selection }
+        }
+
+        // crusteo: selection groups.
+        fn register_in_group(
+            &self,
+            selection_state: &mut WindowSelectionState,
+            y: f32,
+            group: Option<TextSelectionGroupId>,
+            document_order: u64,
+            cx: &mut gpui::App,
+        ) {
+            let bounds = Bounds::new(point(px(0.), px(y)), size(px(100.), px(10.)));
+            selection_state.register_participant(
+                self.selection.clone(),
+                TextSelectionRegistration::new(
+                    Hitbox {
+                        id: HitboxId::placeholder(),
+                        bounds,
+                        content_mask: ContentMask { bounds },
+                        behavior: HitboxBehavior::Normal,
+                    },
+                    bounds,
+                )
+                .with_group(group)
+                .with_document_order(document_order)
+                .with_text_bounds(vec![bounds]),
+                cx,
+            );
         }
 
         fn register(
@@ -3587,6 +3774,33 @@ mod tests {
 
             selection_state.end(cx);
             assert!(!selection_state.is_selecting());
+        });
+    }
+
+    // crusteo: selection groups.
+    #[gpui::test]
+    fn a_selection_stays_in_the_group_it_started_in(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let turn = Some(TextSelectionGroupId::from_raw(1));
+            let next_turn = Some(TextSelectionGroupId::from_raw(2));
+            let mut selection_state = WindowSelectionState::default();
+            let first = FakeParticipant::new("first", cx);
+            let second = FakeParticipant::new("second", cx);
+            let third = FakeParticipant::new("third", cx);
+            first.register_in_group(&mut selection_state, 0., turn, 0, cx);
+            second.register_in_group(&mut selection_state, 20., turn, 1, cx);
+            third.register_in_group(&mut selection_state, 40., next_turn, 2, cx);
+
+            // Dragged on into the next group, it stops at the end of its own.
+            selection_state.begin(point(px(1.), px(1.)), false, cx);
+            selection_state.update(point(px(1.), px(45.)), cx);
+            assert_eq!(selection_state.selected_text(cx), "first\nsecond");
+            selection_state.end(cx);
+
+            // A fresh press in the next group starts a fence of its own.
+            selection_state.begin(point(px(1.), px(41.)), false, cx);
+            selection_state.update(point(px(1.), px(2.)), cx);
+            assert_eq!(selection_state.selected_text(cx), "third");
         });
     }
 

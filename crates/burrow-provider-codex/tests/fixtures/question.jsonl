@@ -1,0 +1,11 @@
+// A question answered by its header; app-server gets answers keyed by question id.
+{"setup":"start"}
+{"cmd":{"prompt":{"turn":"codex-turn-1","text":"Ask me a color"}}}
+{"dir":"in","frame":{"method":"turn/start"}}
+{"dir":"out","frame":{"id":"$ID","result":{"turn":{"id":"turn-a","status":"inProgress"}}}}
+{"dir":"out","frame":{"method":"turn/started","params":{"threadId":"thr-1","turn":{"id":"turn-a","status":"inProgress"}}}}
+{"dir":"out","frame":{"method":"item/tool/requestUserInput","id":2,"params":{"threadId":"thr-1","turnId":"turn-a","itemId":"call-q","isBlocking":true,"questions":[{"id":"color","header":"Color","question":"Which color?","isOther":false,"isSecret":false,"options":[{"label":"red","description":""},{"label":"blue","description":""}]}]}}}
+{"cmd":{"respond":{"id":"2","response":{"behavior":"allow","updatedInput":{"answers":{"Color":"blue"}}}}}}
+{"dir":"in","frame":{"id":2,"result":{"answers":{"color":{"answers":["blue"]}}}}}
+{"dir":"out","frame":{"method":"item/completed","params":{"threadId":"thr-1","turnId":"turn-a","item":{"type":"agentMessage","id":"msg-1","text":"blue","phase":"final_answer"}}}}
+{"dir":"out","frame":{"method":"turn/completed","params":{"threadId":"thr-1","turn":{"id":"turn-a","status":"completed","error":null}}}}

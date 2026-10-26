@@ -1,0 +1,35 @@
+# Burrow as a systemd user service, started through your login shell so the
+# agents it runs get the PATH and API keys your shell sets up. See
+# docs/burrow/install.md (INSTALL.md in the release archive).
+#
+#   mkdir -p ~/.config/systemd/user
+#   cp burrow.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now burrow
+#   sudo loginctl enable-linger "$USER"     # keep it running while you are logged out
+#   journalctl --user -u burrow -f
+#
+# The binary is ~/burrow/burrow (%h is your home). Its state is the default,
+# ~/.burrow; with no --home, a ~/.carapace from before the rename moves there
+# on first start. Port 6797 runs it next to Paseo's daemon, which has 6767; to
+# replace Paseo on a host, use 6767 instead.
+
+[Unit]
+Description=Burrow: crusteo's agent daemon (Paseo protocol)
+
+[Service]
+Type=simple
+# -l reads your profile and -i your ~/.bashrc, whose exports many setups put
+# after a "not interactive? stop here" line. Without them agents miss keys:
+# pi, for one, then lists only the models it needs no key for. The shell may
+# log that it has no job control; that is harmless.
+#
+# Burrow has no password support yet: 0.0.0.0 lets anyone who can reach the
+# port run agents as you, so use it only on a locked-down network or tailnet,
+# or use 127.0.0.1.
+ExecStart=/bin/bash -lic 'exec %h/burrow/burrow --listen 0.0.0.0:6797'
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

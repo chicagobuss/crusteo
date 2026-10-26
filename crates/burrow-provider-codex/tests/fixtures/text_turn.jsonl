@@ -1,0 +1,24 @@
+// A new thread, then a plain turn: reasoning, two streamed messages, usage.
+{"setup":"start"}
+{"cmd":{"prompt":{"turn":"codex-turn-1","text":"Say hi"}}}
+{"dir":"in","frame":{"method":"turn/start","params":{"threadId":"thr-1","input":[{"type":"text","text":"Say hi","text_elements":[]}],"approvalPolicy":"on-request","sandboxPolicy":{"type":"workspaceWrite","writableRoots":[],"networkAccess":false,"excludeTmpdirEnvVar":false,"excludeSlashTmp":false},"approvalsReviewer":"user","model":"gpt-6-luna","effort":"medium","serviceTier":"default","collaborationMode":{"mode":"default","settings":{"model":"gpt-6-luna","reasoning_effort":"medium"}},"cwd":"/home/user/repo"}}}
+{"dir":"out","frame":{"id":"$ID","result":{"turn":{"id":"turn-a","items":[],"status":"inProgress","error":null}}}}
+{"dir":"out","frame":{"method":"thread/status/changed","params":{"threadId":"thr-1","status":{"type":"active","activeFlags":[]}}}}
+{"dir":"out","frame":{"method":"turn/started","params":{"threadId":"thr-1","turn":{"id":"turn-a","items":[],"status":"inProgress","error":null}}}}
+{"dir":"out","frame":{"method":"item/started","params":{"threadId":"thr-1","turnId":"turn-a","item":{"type":"userMessage","id":"u-1","clientId":null,"content":[{"type":"text","text":"Say hi","text_elements":[]}]}}}}
+{"dir":"out","frame":{"method":"item/completed","params":{"threadId":"thr-1","turnId":"turn-a","item":{"type":"userMessage","id":"u-1","clientId":null,"content":[{"type":"text","text":"Say hi","text_elements":[]}]}}}}
+{"dir":"out","frame":{"method":"item/started","params":{"threadId":"thr-1","turnId":"turn-a","item":{"type":"reasoning","id":"rs-1","summary":[],"content":[]}}}}
+{"dir":"out","frame":{"method":"item/reasoning/summaryTextDelta","params":{"threadId":"thr-1","turnId":"turn-a","itemId":"rs-1","delta":"Thinking","summaryIndex":0}}}
+{"dir":"out","frame":{"method":"item/completed","params":{"threadId":"thr-1","turnId":"turn-a","item":{"type":"reasoning","id":"rs-1","summary":["Thinking"],"content":[]}}}}
+{"dir":"out","frame":{"method":"item/started","params":{"threadId":"thr-1","turnId":"turn-a","item":{"type":"agentMessage","id":"msg-1","text":"","phase":"commentary","memoryCitation":null,"delivery":null,"questions":null}}}}
+{"dir":"out","frame":{"method":"item/agentMessage/delta","params":{"threadId":"thr-1","turnId":"turn-a","itemId":"msg-1","delta":"Hel"}}}
+{"dir":"out","frame":{"method":"item/agentMessage/delta","params":{"threadId":"thr-1","turnId":"turn-a","itemId":"msg-1","delta":"lo."}}}
+{"dir":"out","frame":{"method":"item/completed","params":{"threadId":"thr-1","turnId":"turn-a","item":{"type":"agentMessage","id":"msg-1","text":"Hello.","phase":"commentary","memoryCitation":null,"delivery":null,"questions":null}}}}
+{"dir":"out","frame":{"method":"item/started","params":{"threadId":"thr-1","turnId":"turn-a","item":{"type":"agentMessage","id":"msg-2","text":"","phase":"final_answer","memoryCitation":null,"delivery":null,"questions":null}}}}
+{"dir":"out","frame":{"method":"item/agentMessage/delta","params":{"threadId":"thr-1","turnId":"turn-a","itemId":"msg-2","delta":"Bye."}}}
+{"dir":"out","frame":{"method":"item/completed","params":{"threadId":"thr-1","turnId":"turn-a","item":{"type":"agentMessage","id":"msg-2","text":"Bye. Done","phase":"final_answer","memoryCitation":null,"delivery":null,"questions":null}}}}
+{"dir":"out","frame":{"method":"thread/tokenUsage/updated","params":{"threadId":"thr-1","turnId":"turn-a","tokenUsage":{"total":{"totalTokens":34313,"inputTokens":34243,"cachedInputTokens":28544,"cacheWriteInputTokens":0,"outputTokens":70,"reasoningOutputTokens":0},"last":{"totalTokens":17207,"inputTokens":17142,"cachedInputTokens":16896,"cacheWriteInputTokens":0,"outputTokens":65,"reasoningOutputTokens":0},"modelContextWindow":258400}}}}
+// A sub-agent's thread is not mapped.
+{"dir":"out","frame":{"method":"item/agentMessage/delta","params":{"threadId":"thr-child","turnId":"turn-c","itemId":"msg-c","delta":"child text"}}}
+{"dir":"out","frame":{"method":"thread/status/changed","params":{"threadId":"thr-1","status":{"type":"idle"}}}}
+{"dir":"out","frame":{"method":"turn/completed","params":{"threadId":"thr-1","turn":{"id":"turn-a","items":[],"status":"completed","error":null,"durationMs":2690}}}}

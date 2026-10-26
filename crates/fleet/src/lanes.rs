@@ -9,13 +9,15 @@ use std::rc::Rc;
 use paseo_client::proto::{Agent, Bucket, Workspace};
 
 use crate::directory::{DirChange, LabelDef, label_key};
+use crate::labels::{Catalog, LabelId};
 use crate::sidebar::natural;
-use crate::{Fleet, Host};
+use crate::{Fleet, Host, HostId};
 
 /// How a column decides which agents it owns.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum LaneGrouping {
     /// The workspace's labels. An agent with several labels is in each column.
+    /// A background workspace is in the Background column instead.
     #[default]
     Label,
     /// The project, merged across hosts by project key (same rule as the sidebar).
@@ -96,20 +98,24 @@ pub struct LaneState {
     /// after these.
     pub order: Vec<String>,
     pub collapsed: BTreeSet<String>,
+    /// Leaves out background workspaces and their agents.
+    pub hide_background: bool,
 }
 
 /// A workspace the column's draft can create an agent in.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LaneWorkspace {
-    pub host: String,
+    pub host: HostId,
     pub workspace_id: String,
     pub name: String,
+    /// A background workspace, shown because the board shows them.
+    pub background: bool,
 }
 
 /// One agent card. The same agent can appear in more than one lane.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LaneCard {
-    pub host: String,
+    pub host: HostId,
     pub agent_id: String,
     pub workspace_id: Option<String>,
     pub workspace_name: String,
@@ -128,6 +134,8 @@ pub enum LaneKind {
     Label,
     Combination,
     Unlabelled,
+    /// Paseo's background workspaces, whatever their labels.
+    Background,
     #[default]
     Other,
 }
@@ -142,7 +150,7 @@ pub struct Lane {
     pub color: Option<String>,
     /// Normalized, sorted label members. Empty for unlabelled/non-label lanes.
     pub label_keys: Vec<String>,
-    pub hosts: Vec<String>,
+    pub hosts: Vec<HostId>,
     pub cards: Vec<LaneCard>,
     pub workspaces: Vec<LaneWorkspace>,
     pub collapsed: bool,
@@ -169,16 +177,88 @@ impl Lane {
 /// unless the user has placed it.
 pub const UNLABELLED: &str = "\u{0}unlabelled";
 
+/// Background workspaces and their agents land here, and only here, when
+/// grouping by label: like Unlabelled, it sorts last unless placed, just
+/// after Unlabelled. Label filters use the same key to choose them.
+pub const BACKGROUND: &str = "\u{0}background";
+
+/// What a label filter matches a workspace by: its label keys, else
+/// [`UNLABELLED`]; a background workspace only by [`BACKGROUND`], as the
+/// Background lane holds it alone. No workspace (not arrived yet) counts
+/// as unlabelled, as the lanes place it.
+pub fn filter_labels(workspace: Option<&Workspace>) -> Vec<String> {
+    match workspace {
+        Some(workspace) if workspace.background => vec![BACKGROUND.to_string()],
+        Some(workspace) => {
+            let keys: Vec<String> = label_set(workspace).into_keys().collect();
+            if keys.is_empty() {
+                vec![UNLABELLED.to_string()]
+            } else {
+                keys
+            }
+        }
+        None => vec![UNLABELLED.to_string()],
+    }
+}
+
+/// What a label filter matches a card by, or, with no agent, a workspace's
+/// box. In reef mode, the agent's labels by id (a box: those of the
+/// workspace's agents, or the ones it would give a new one if it has
+/// none), as its lanes are keyed; else [`filter_labels`].
+pub fn filter_keys(
+    fleet: &Fleet,
+    host: &HostId,
+    workspace: Option<&str>,
+    agent: Option<&str>,
+) -> Vec<String> {
+    let found = workspace.and_then(|id| fleet.workspace(host, id));
+    let Some(catalog) = &fleet.labels else {
+        return filter_labels(found);
+    };
+    if found.is_some_and(|w| w.background) {
+        return vec![BACKGROUND.to_string()];
+    }
+    let directory = fleet.host(host).map(|h| &h.directory);
+    let ids: Vec<LabelId> = match agent {
+        Some(agent) => (directory.and_then(|d| d.agents.get(agent)))
+            .map(|agent| crate::labels::effective(agent, found, catalog))
+            .unwrap_or_default(),
+        None => {
+            let agents: Vec<&Agent> = (directory.into_iter())
+                .flat_map(|d| d.agents.values())
+                .filter(|a| a.archived_at.is_none() && a.workspace_id.as_deref() == workspace)
+                .collect();
+            let mut ids: Vec<LabelId> = Vec::new();
+            for agent in &agents {
+                for id in crate::labels::effective(agent, found, catalog) {
+                    if !ids.contains(&id) {
+                        ids.push(id);
+                    }
+                }
+            }
+            match (agents.is_empty(), found) {
+                (true, Some(workspace)) => catalog.from_paseo(&workspace.labels),
+                _ => ids,
+            }
+        }
+    };
+    if ids.is_empty() {
+        return vec![UNLABELLED.to_string()];
+    }
+    ids.iter().map(LabelId::to_string).collect()
+}
+
 pub struct LaneView;
 
 impl LaneView {
     pub fn build(fleet: &Fleet, grouping: LaneGrouping, state: &LaneState) -> Vec<Lane> {
         let mut cols: BTreeMap<String, Acc> = BTreeMap::new();
+        let hide = state.hide_background;
         match grouping {
-            LaneGrouping::Label => collect_labels(fleet, &mut cols, state.label_mode),
-            LaneGrouping::Project => collect_projects(fleet, &mut cols),
-            LaneGrouping::Host => collect_hosts(fleet, &mut cols),
-            LaneGrouping::Workspace => collect_workspaces(fleet, &mut cols),
+            LaneGrouping::Label => collect_labels(fleet, &mut cols, state.label_mode, hide),
+            LaneGrouping::Project => collect_projects(fleet, &mut cols, hide),
+            LaneGrouping::Host => collect_hosts(fleet, &mut cols, hide),
+            LaneGrouping::Workspace => collect_workspaces(fleet, &mut cols, hide),
         }
         let mut lanes: Vec<Lane> = cols
             .into_iter()
@@ -194,10 +274,10 @@ struct Acc {
     title: String,
     color: Option<String>,
     label_keys: Vec<String>,
-    hosts: Vec<String>,
+    hosts: Vec<HostId>,
     cards: Vec<LaneCard>,
     workspaces: Vec<LaneWorkspace>,
-    seen_workspaces: BTreeSet<(String, String)>,
+    seen_workspaces: BTreeSet<(HostId, String)>,
 }
 
 impl Acc {
@@ -214,32 +294,27 @@ impl Acc {
         }
     }
 
-    fn host(&mut self, name: &str) {
-        if !self.hosts.iter().any(|host| host == name) {
-            self.hosts.push(name.to_string());
+    fn host(&mut self, id: &HostId) {
+        if !self.hosts.contains(id) {
+            self.hosts.push(id.clone());
         }
     }
 
-    fn workspace(&mut self, host: &str, workspace: &Workspace) {
+    fn workspace(&mut self, host: &HostId, workspace: &Workspace) {
         self.host(host);
         if !self
             .seen_workspaces
-            .insert((host.to_string(), workspace.id.clone()))
+            .insert((host.clone(), workspace.id.clone()))
         {
             return;
         }
-        let name = workspace_name(Some(workspace));
-        self.workspaces.push(LaneWorkspace {
-            host: host.to_string(),
-            workspace_id: workspace.id.clone(),
-            name,
-        });
+        self.workspaces.push(lane_workspace(host, workspace));
     }
 
     /// Contract: every collector adds each (host, agent.id) at most once
     /// per column. Labels deduplicate slots; other collectors iterate each
     /// host's unique live agents once.
-    fn card(&mut self, host: &str, agent: &Agent, workspace_name: String) {
+    fn card(&mut self, host: &HostId, agent: &Agent, workspace_name: String) {
         self.host(host);
         self.cards.push(lane_card(host, agent, workspace_name));
     }
@@ -261,9 +336,18 @@ impl Acc {
     }
 }
 
-fn lane_card(host: &str, agent: &Agent, workspace_name: String) -> LaneCard {
+fn lane_workspace(host: &HostId, workspace: &Workspace) -> LaneWorkspace {
+    LaneWorkspace {
+        host: host.clone(),
+        workspace_id: workspace.id.clone(),
+        name: workspace_name(Some(workspace)),
+        background: workspace.background,
+    }
+}
+
+fn lane_card(host: &HostId, agent: &Agent, workspace_name: String) -> LaneCard {
     LaneCard {
-        host: host.to_string(),
+        host: host.clone(),
         agent_id: agent.id.clone(),
         workspace_id: agent.workspace_id.clone(),
         workspace_name,
@@ -321,6 +405,15 @@ impl Slot {
             label_keys: vec![],
         }
     }
+    fn background() -> Self {
+        Self {
+            kind: LaneKind::Background,
+            key: BACKGROUND.into(),
+            title: "Background".into(),
+            color: None,
+            label_keys: vec![],
+        }
+    }
     fn column<'a>(&self, cols: &'a mut BTreeMap<String, Acc>) -> &'a mut Acc {
         column_lazy(cols, &self.key, || {
             Acc::new(
@@ -333,20 +426,28 @@ impl Slot {
     }
 }
 
-fn collect_labels(fleet: &Fleet, cols: &mut BTreeMap<String, Acc>, mode: LabelLaneMode) {
+fn collect_labels(
+    fleet: &Fleet,
+    cols: &mut BTreeMap<String, Acc>,
+    mode: LabelLaneMode,
+    hide: bool,
+) {
+    if let Some(catalog) = &fleet.labels {
+        return collect_agent_labels(fleet, catalog, cols, mode, hide);
+    }
     let labels = LabelIndex::new(fleet);
     let unlabelled = vec![Slot::unlabelled()];
     for host in &fleet.hosts {
         // Resolve each workspace only once, then share its slots with agents.
         let mut slots: HashMap<&str, Vec<Slot>> = HashMap::new();
-        for workspace in host.directory.workspaces.values() {
+        for workspace in shown_workspaces(host, hide) {
             let resolved = label_slots(workspace, &labels, mode);
             for slot in &resolved {
-                slot.column(cols).workspace(host.name(), workspace);
+                slot.column(cols).workspace(host.id(), workspace);
             }
             slots.insert(workspace.id.as_str(), resolved);
         }
-        for agent in live_agents(host) {
+        for agent in live_agents(host, hide) {
             let workspace = agent
                 .workspace_id
                 .as_ref()
@@ -357,7 +458,129 @@ fn collect_labels(fleet: &Fleet, cols: &mut BTreeMap<String, Acc>, mode: LabelLa
             let workspace_name = workspace_name(workspace);
             for slot in agent_slots {
                 slot.column(cols)
-                    .card(host.name(), agent, workspace_name.clone());
+                    .card(host.id(), agent, workspace_name.clone());
+            }
+        }
+    }
+}
+
+/// Reef mode: each agent goes in the lanes of its own labels
+/// ([`crate::labels::effective`]); a workspace in every lane one of its
+/// agents is in, or, with none on the board, in its Paseo labels' lanes.
+fn collect_agent_labels(
+    fleet: &Fleet,
+    catalog: &Catalog,
+    cols: &mut BTreeMap<String, Acc>,
+    mode: LabelLaneMode,
+    hide: bool,
+) {
+    for host in &fleet.hosts {
+        let mut by_workspace: HashMap<&str, Vec<&Agent>> = HashMap::new();
+        for agent in live_agents(host, hide) {
+            let workspace = agent
+                .workspace_id
+                .as_ref()
+                .and_then(|id| host.directory.workspaces.get(id));
+            let name = workspace_name(workspace);
+            for slot in agent_slots(catalog, workspace, agent, mode) {
+                slot.column(cols).card(host.id(), agent, name.clone());
+            }
+            if let Some(workspace) = workspace {
+                by_workspace
+                    .entry(workspace.id.as_str())
+                    .or_default()
+                    .push(agent);
+            }
+        }
+        for workspace in shown_workspaces(host, hide) {
+            let agents = (by_workspace.get(workspace.id.as_str())).map_or(&[][..], Vec::as_slice);
+            for slot in workspace_slots(catalog, workspace, agents, mode) {
+                slot.column(cols).workspace(host.id(), workspace);
+            }
+        }
+    }
+}
+
+/// An agent's lanes in reef mode: its labels', or Unlabelled; a background
+/// workspace's agents only Background, as without a catalog.
+fn agent_slots(
+    catalog: &Catalog,
+    workspace: Option<&Workspace>,
+    agent: &Agent,
+    mode: LabelLaneMode,
+) -> Vec<Slot> {
+    if workspace.is_some_and(|workspace| workspace.background) {
+        return vec![Slot::background()];
+    }
+    id_slots(
+        catalog,
+        &crate::labels::effective(agent, workspace, catalog),
+        mode,
+    )
+}
+
+/// A workspace's lanes in reef mode: every lane of `agents` (its agents on
+/// the board), or, with none, its Paseo labels' lanes.
+fn workspace_slots(
+    catalog: &Catalog,
+    workspace: &Workspace,
+    agents: &[&Agent],
+    mode: LabelLaneMode,
+) -> Vec<Slot> {
+    if workspace.background {
+        return vec![Slot::background()];
+    }
+    if agents.is_empty() {
+        return id_slots(catalog, &catalog.from_paseo(&workspace.labels), mode);
+    }
+    let mut slots: Vec<Slot> = (agents.iter())
+        .flat_map(|agent| agent_slots(catalog, Some(workspace), agent, mode))
+        .collect();
+    slots.sort_by(|a, b| a.key.cmp(&b.key));
+    slots.dedup_by(|a, b| a.key == b.key);
+    slots
+}
+
+/// The lanes for a set of catalog labels: one per label, keyed by its id
+/// and titled and coloured by the catalog, and with combinations as
+/// `mode` says; Unlabelled when there are none.
+fn id_slots(catalog: &Catalog, ids: &[LabelId], mode: LabelLaneMode) -> Vec<Slot> {
+    let mut labels: Vec<&crate::labels::Label> =
+        ids.iter().filter_map(|id| catalog.get(id)).collect();
+    if labels.is_empty() {
+        return vec![Slot::unlabelled()];
+    }
+    labels.sort_by(|a, b| natural(&a.name, &b.name).then(a.id.cmp(&b.id)));
+    let singles: Vec<Slot> = (labels.iter())
+        .map(|label| Slot {
+            kind: LaneKind::Label,
+            key: label.id.to_string(),
+            title: label.name.clone(),
+            color: Some(label.color.clone()),
+            label_keys: vec![label.id.to_string()],
+        })
+        .collect();
+    match (mode, singles.len() > 1) {
+        (LabelLaneMode::Labels, _) | (_, false) => singles,
+        (LabelLaneMode::Combinations | LabelLaneMode::Both, true) => {
+            let mut keys: Vec<String> = labels.iter().map(|label| label.id.to_string()).collect();
+            keys.sort();
+            let encoded = serde_json::to_string(&keys).expect("strings serialize");
+            let title: Vec<&str> = labels.iter().map(|label| label.name.as_str()).collect();
+            let combo = Slot {
+                kind: LaneKind::Combination,
+                key: format!("{COMBINATION_PREFIX}{encoded}"),
+                title: title.join(" + "),
+                color: None,
+                label_keys: keys,
+            };
+            match mode {
+                LabelLaneMode::Both => {
+                    let mut slots = singles;
+                    slots.push(combo);
+                    slots
+                }
+                _ => vec![combo],
             }
         }
     }
@@ -401,14 +624,14 @@ impl<'a> LabelIndex<'a> {
     }
 }
 
-fn collect_projects(fleet: &Fleet, cols: &mut BTreeMap<String, Acc>) {
+fn collect_projects(fleet: &Fleet, cols: &mut BTreeMap<String, Acc>, hide: bool) {
     for host in &fleet.hosts {
-        for workspace in host.directory.workspaces.values() {
+        for workspace in shown_workspaces(host, hide) {
             let key = project_key(host, workspace);
             let title = project_title(host, workspace, &key);
-            column(cols, &key, title, None).workspace(host.name(), workspace);
+            column(cols, &key, title, None).workspace(host.id(), workspace);
         }
-        for agent in live_agents(host) {
+        for agent in live_agents(host, hide) {
             let workspace = agent
                 .workspace_id
                 .as_ref()
@@ -421,37 +644,38 @@ fn collect_projects(fleet: &Fleet, cols: &mut BTreeMap<String, Acc>) {
                 None => ("\u{0}none".into(), "No project".into()),
             };
             let name = workspace_name(workspace);
-            column(cols, &key, title, None).card(host.name(), agent, name);
+            column(cols, &key, title, None).card(host.id(), agent, name);
         }
     }
 }
 
-fn collect_hosts(fleet: &Fleet, cols: &mut BTreeMap<String, Acc>) {
+fn collect_hosts(fleet: &Fleet, cols: &mut BTreeMap<String, Acc>, hide: bool) {
     for host in &fleet.hosts {
-        let acc = column(cols, host.name(), host.name().to_string(), None);
+        // Keyed by id, titled by name: a renamed host keeps its column.
+        let acc = column(cols, host.id().as_str(), host.name().to_string(), None);
         // The grouping host is known even before its directory has arrived.
-        acc.host(host.name());
-        for workspace in host.directory.workspaces.values() {
-            acc.workspace(host.name(), workspace);
+        acc.host(host.id());
+        for workspace in shown_workspaces(host, hide) {
+            acc.workspace(host.id(), workspace);
         }
-        for agent in live_agents(host) {
+        for agent in live_agents(host, hide) {
             let workspace = agent
                 .workspace_id
                 .as_ref()
                 .and_then(|id| host.directory.workspaces.get(id));
-            acc.card(host.name(), agent, workspace_name(workspace));
+            acc.card(host.id(), agent, workspace_name(workspace));
         }
     }
 }
 
-fn collect_workspaces(fleet: &Fleet, cols: &mut BTreeMap<String, Acc>) {
+fn collect_workspaces(fleet: &Fleet, cols: &mut BTreeMap<String, Acc>, hide: bool) {
     for host in &fleet.hosts {
-        for workspace in host.directory.workspaces.values() {
-            let key = format!("{}\u{0}{}", host.name(), workspace.id);
+        for workspace in shown_workspaces(host, hide) {
+            let key = format!("{}\u{0}{}", host.id(), workspace.id);
             let title = workspace_name(Some(workspace));
-            column(cols, &key, title, None).workspace(host.name(), workspace);
+            column(cols, &key, title, None).workspace(host.id(), workspace);
         }
-        for agent in live_agents(host) {
+        for agent in live_agents(host, hide) {
             let workspace = agent
                 .workspace_id
                 .as_ref()
@@ -459,13 +683,13 @@ fn collect_workspaces(fleet: &Fleet, cols: &mut BTreeMap<String, Acc>) {
             let name = workspace_name(workspace);
             match workspace {
                 Some(workspace) => {
-                    let key = format!("{}\u{0}{}", host.name(), workspace.id);
+                    let key = format!("{}\u{0}{}", host.id(), workspace.id);
                     let title = workspace_name(Some(workspace));
-                    column(cols, &key, title, None).card(host.name(), agent, name);
+                    column(cols, &key, title, None).card(host.id(), agent, name);
                 }
                 None => {
                     column(cols, "\u{0}noworkspace", "No workspace".into(), None).card(
-                        host.name(),
+                        host.id(),
                         agent,
                         name,
                     );
@@ -475,11 +699,26 @@ fn collect_workspaces(fleet: &Fleet, cols: &mut BTreeMap<String, Acc>) {
     }
 }
 
-fn live_agents(host: &Host) -> impl Iterator<Item = &Agent> {
+/// A host's workspaces on the board: all of them, or, with `hide`, all but
+/// background ones.
+fn shown_workspaces(host: &Host, hide: bool) -> impl Iterator<Item = &Workspace> {
+    host.directory
+        .workspaces
+        .values()
+        .filter(move |workspace| !(hide && workspace.background))
+}
+
+/// A host's agents on the board: not archived, and with `hide`, not in a
+/// background workspace.
+fn live_agents(host: &Host, hide: bool) -> impl Iterator<Item = &Agent> {
     host.directory
         .agents
         .values()
-        .filter(|agent| agent.archived_at.is_none())
+        .filter(move |agent| shown_agent(host, agent, hide))
+}
+
+fn shown_agent(host: &Host, agent: &Agent, hide: bool) -> bool {
+    agent.archived_at.is_none() && !(hide && host.directory.in_background(agent))
 }
 
 const COMBINATION_PREFIX: &str = "\u{0}label-set:";
@@ -490,6 +729,35 @@ const COMBINATION_PREFIX: &str = "\u{0}label-set:";
 /// consumers need not reconstruct or interpret the set's serialized members.
 pub fn is_combination_key(key: &str) -> bool {
     key.starts_with(COMBINATION_PREFIX)
+}
+
+/// A lane key saved before labels had ids (a label's name key, or a
+/// combination of them) as reef mode keys that lane: by the ids of the
+/// catalog's labels those names stand for. None when it needs no change,
+/// or names a label the catalog lacks.
+pub fn key_with_ids(catalog: &Catalog, key: &str) -> Option<String> {
+    let id_of = |name: &str| -> Option<String> {
+        if catalog.get(&LabelId::new(name)).is_some() {
+            return Some(name.to_string());
+        }
+        let label = catalog
+            .by_paseo_name(name)
+            .or_else(|| catalog.by_name(name))?;
+        Some(label.id.to_string())
+    };
+    let mapped = match key.strip_prefix(COMBINATION_PREFIX) {
+        Some(encoded) => {
+            let names: Vec<String> = serde_json::from_str(encoded).ok()?;
+            let mut ids: Vec<String> = names.iter().map(|n| id_of(n)).collect::<Option<_>>()?;
+            ids.sort();
+            ids.dedup();
+            let encoded = serde_json::to_string(&ids).expect("strings serialize");
+            format!("{COMBINATION_PREFIX}{encoded}")
+        }
+        None if key.starts_with('\u{0}') => return None,
+        None => id_of(key)?,
+    };
+    (mapped != key).then_some(mapped)
 }
 
 /// Normal label keys retain their existing saved state. Escape only labels
@@ -519,6 +787,10 @@ pub fn label_set(workspace: &Workspace) -> BTreeMap<String, &str> {
 }
 
 fn label_slots(workspace: &Workspace, labels: &LabelIndex<'_>, mode: LabelLaneMode) -> Vec<Slot> {
+    // Its labels' lanes would show it twice; the Background lane is enough.
+    if workspace.background {
+        return vec![Slot::background()];
+    }
     let members = label_set(workspace);
     if members.is_empty() {
         return vec![Slot::unlabelled()];
@@ -574,7 +846,7 @@ fn project_key(host: &Host, workspace: &Workspace) -> String {
                 .map(str::to_string)
                 .filter(|key| !key.is_empty())
         })
-        .unwrap_or_else(|| format!("{}\u{0}{}", host.name(), workspace.project_id))
+        .unwrap_or_else(|| format!("{}\u{0}{}", host.id(), workspace.project_id))
 }
 
 fn project_title(host: &Host, workspace: &Workspace, key: &str) -> String {
@@ -599,7 +871,7 @@ fn project_title(host: &Host, workspace: &Workspace, key: &str) -> String {
 
 /// What a workspace is called: the title the user gave it, else its name,
 /// else its id.
-fn workspace_name(workspace: Option<&Workspace>) -> String {
+pub(crate) fn workspace_name(workspace: Option<&Workspace>) -> String {
     match workspace {
         Some(workspace)
             if workspace
@@ -644,18 +916,25 @@ fn lane_order(a: &Lane, b: &Lane, state: &LaneState, grouping: LaneGrouping) -> 
         (Some(i), Some(j)) => i.cmp(&j),
         (Some(_), None) => std::cmp::Ordering::Less,
         (None, Some(_)) => std::cmp::Ordering::Greater,
-        (None, None) => {
-            let a_last = grouping == LaneGrouping::Label && a.key == UNLABELLED;
-            let b_last = grouping == LaneGrouping::Label && b.key == UNLABELLED;
-            match (a_last, b_last) {
-                (true, false) => std::cmp::Ordering::Greater,
-                (false, true) => std::cmp::Ordering::Less,
-                _ => column_urgency(a)
+        (None, None) => trailing(a, grouping)
+            .cmp(&trailing(b, grouping))
+            .then_with(|| {
+                column_urgency(a)
                     .cmp(&column_urgency(b))
                     .then(natural(&a.title, &b.title))
-                    .then(a.key.cmp(&b.key)),
-            }
-        }
+                    .then(a.key.cmp(&b.key))
+            }),
+    }
+}
+
+/// Where a lane the user has not placed goes: with the rest (0), or, when
+/// grouping by label, after them as Unlabelled (1) then Background (2).
+fn trailing(lane: &Lane, grouping: LaneGrouping) -> u8 {
+    match lane.key.as_str() {
+        _ if grouping != LaneGrouping::Label => 0,
+        UNLABELLED => 1,
+        BACKGROUND => 2,
+        _ => 0,
     }
 }
 
@@ -677,7 +956,7 @@ pub struct LaneModel {
     /// Lane key to its position in `lanes`.
     index: HashMap<String, usize>,
     /// (host, agent id) to the sorted keys of the lanes its card is in.
-    homes: HashMap<(String, String), Vec<String>>,
+    homes: HashMap<(HostId, String), Vec<String>>,
     rebuilds: u64,
 }
 
@@ -733,10 +1012,15 @@ impl LaneModel {
     pub fn apply<'a>(
         &mut self,
         fleet: &Fleet,
-        changes: impl IntoIterator<Item = (&'a str, &'a DirChange)>,
+        changes: impl IntoIterator<Item = (&'a HostId, &'a DirChange)>,
     ) {
-        let mut agents: Vec<(&str, String)> = Vec::new();
-        let mut workspaces: Vec<(&str, &str)> = Vec::new();
+        if self.grouping == LaneGrouping::Label
+            && let Some(catalog) = &fleet.labels
+        {
+            return self.apply_agent_labels(fleet, catalog, changes);
+        }
+        let mut agents: Vec<(&HostId, String)> = Vec::new();
+        let mut workspaces: Vec<(&HostId, &str)> = Vec::new();
         for (host, change) in changes {
             match change {
                 DirChange::AgentAdded(id)
@@ -774,6 +1058,153 @@ impl LaneModel {
         self.reindex();
     }
 
+    /// [`Self::apply`] in reef mode, grouped by label: agents move by their
+    /// own labels, and a workspace follows its agents. A changed workspace
+    /// moves the agents that inherit its labels; every agent that moved
+    /// re-places the workspaces it left and joined. Catalog changes come as
+    /// [`DirChange::Bulk`].
+    fn apply_agent_labels<'a>(
+        &mut self,
+        fleet: &Fleet,
+        catalog: &Catalog,
+        changes: impl IntoIterator<Item = (&'a HostId, &'a DirChange)>,
+    ) {
+        let mut agents: BTreeSet<(HostId, String)> = BTreeSet::new();
+        let mut workspaces: BTreeSet<(HostId, String)> = BTreeSet::new();
+        for (host, change) in changes {
+            match change {
+                DirChange::AgentAdded(id)
+                | DirChange::AgentUpdated(id)
+                | DirChange::AgentMoved(id)
+                | DirChange::AgentRemoved(id) => {
+                    agents.insert((host.clone(), id.clone()));
+                }
+                DirChange::Workspace(id) => {
+                    workspaces.insert((host.clone(), id.clone()));
+                }
+                DirChange::WorkspaceDetail(_) => {}
+                DirChange::Bulk => return self.rebuild(fleet),
+            }
+        }
+        for (host_id, workspace) in &workspaces {
+            if let Some(host) = fleet.host(host_id) {
+                let inheritors = (host.directory.agents.values())
+                    .filter(|agent| agent.workspace_id.as_deref() == Some(workspace.as_str()));
+                agents.extend(inheritors.map(|agent| (host_id.clone(), agent.id.clone())));
+            }
+        }
+        let (mode, hide) = (self.state.label_mode, self.state.hide_background);
+        let mut touched = BTreeSet::new();
+        for (host_id, id) in &agents {
+            workspaces.extend((self.card_workspaces(host_id, id)).map(|w| (host_id.clone(), w)));
+            let host = fleet.host(host_id);
+            let agent = host.and_then(|host| {
+                (host.directory.agents.get(id)).filter(|agent| shown_agent(host, agent, hide))
+            });
+            let (slots, card) = match (host, agent) {
+                (Some(host), Some(agent)) => {
+                    let workspace = (agent.workspace_id.as_ref())
+                        .and_then(|id| host.directory.workspaces.get(id));
+                    if let Some(workspace) = workspace {
+                        workspaces.insert((host_id.clone(), workspace.id.clone()));
+                    }
+                    let mut slots = agent_slots(catalog, workspace, agent, mode);
+                    slots.sort_by(|a, b| a.key.cmp(&b.key));
+                    let card = lane_card(host.id(), agent, workspace_name(workspace));
+                    (slots, Some(card))
+                }
+                _ => (Vec::new(), None),
+            };
+            self.place_card(host_id, id, slots, card, &mut touched);
+        }
+        for (host_id, workspace) in &workspaces {
+            self.place_workspace(fleet, catalog, host_id, workspace, &mut touched);
+        }
+        if touched.is_empty() {
+            return;
+        }
+        self.settle(fleet, &touched);
+        let (state, grouping) = (&self.state, self.grouping);
+        self.lanes.sort_by(|a, b| lane_order(a, b, state, grouping));
+        self.reindex();
+    }
+
+    /// The workspaces an agent's cards are in now, before it moves.
+    fn card_workspaces(&self, host: &HostId, agent: &str) -> impl Iterator<Item = String> {
+        let keys = self.homes.get(&(host.clone(), agent.to_string()));
+        let mut found: BTreeSet<String> = BTreeSet::new();
+        for key in keys.into_iter().flatten() {
+            if let Some(&ix) = self.index.get(key) {
+                let cards = self.lanes[ix].cards.iter();
+                found.extend(
+                    cards
+                        .filter(|card| &card.host == host && card.agent_id == agent)
+                        .filter_map(|card| card.workspace_id.clone()),
+                );
+            }
+        }
+        found.into_iter()
+    }
+
+    /// Reef mode: moves a workspace's entry to the lanes its agents are in
+    /// now ([`workspace_slots`]), or takes it out of every lane when it is
+    /// gone or hidden.
+    fn place_workspace(
+        &mut self,
+        fleet: &Fleet,
+        catalog: &Catalog,
+        host_id: &HostId,
+        id: &str,
+        touched: &mut BTreeSet<String>,
+    ) {
+        let (mode, hide) = (self.state.label_mode, self.state.hide_background);
+        let host = fleet.host(host_id);
+        let workspace = (host.and_then(|host| host.directory.workspaces.get(id)))
+            .filter(|workspace| !(hide && workspace.background));
+        let slots = match (host, workspace) {
+            (Some(host), Some(workspace)) => {
+                let agents: Vec<&Agent> = (host.directory.agents.values())
+                    .filter(|agent| agent.workspace_id.as_deref() == Some(id))
+                    .filter(|agent| shown_agent(host, agent, hide))
+                    .collect();
+                workspace_slots(catalog, workspace, &agents, mode)
+            }
+            _ => Vec::new(),
+        };
+        let entry = workspace.map(|workspace| lane_workspace(host_id, workspace));
+        for ix in 0..self.lanes.len() {
+            let lane = &self.lanes[ix];
+            if !(lane.workspaces.iter()).any(|w| &w.host == host_id && w.workspace_id == id) {
+                continue;
+            }
+            let stays = entry.as_ref().is_some_and(|entry| {
+                slots.iter().any(|slot| slot.key == lane.key) && lane.workspaces.contains(entry)
+            });
+            if stays {
+                continue;
+            }
+            let key = lane.key.clone();
+            let lane = Rc::make_mut(&mut self.lanes[ix]);
+            lane.workspaces
+                .retain(|w| !(&w.host == host_id && w.workspace_id == id));
+            touched.insert(key);
+        }
+        let Some(entry) = entry else {
+            return;
+        };
+        for slot in &slots {
+            let lane = self.lane_mut(slot);
+            if lane.workspaces.contains(&entry) {
+                continue;
+            }
+            let at = (lane.workspaces)
+                .binary_search_by(|other| workspace_order(other, &entry))
+                .unwrap_or_else(|at| at);
+            lane.workspaces.insert(at, entry.clone());
+            touched.insert(slot.key.clone());
+        }
+    }
+
     fn rebuild(&mut self, fleet: &Fleet) {
         let rebuilds = self.rebuilds + 1;
         *self = Self::build(fleet, self.grouping, &self.state);
@@ -794,16 +1225,15 @@ impl LaneModel {
         &mut self,
         fleet: &Fleet,
         labels: &LabelIndex<'_>,
-        host_name: &str,
+        host_id: &HostId,
         id: &str,
         touched: &mut BTreeSet<String>,
     ) {
-        let home = (host_name.to_string(), id.to_string());
-        let old = self.homes.remove(&home).unwrap_or_default();
-        let host = fleet.host(host_name);
-        let agent = host
-            .and_then(|host| host.directory.agents.get(id))
-            .filter(|agent| agent.archived_at.is_none());
+        let host = fleet.host(host_id);
+        let hide = self.state.hide_background;
+        let agent = host.and_then(|host| {
+            (host.directory.agents.get(id)).filter(|agent| shown_agent(host, agent, hide))
+        });
         let (slots, card) = match (host, agent) {
             (Some(host), Some(agent)) => {
                 let workspace = agent
@@ -812,11 +1242,26 @@ impl LaneModel {
                     .and_then(|id| host.directory.workspaces.get(id));
                 (
                     self.slots(host, workspace, labels),
-                    Some(lane_card(host.name(), agent, workspace_name(workspace))),
+                    Some(lane_card(host.id(), agent, workspace_name(workspace))),
                 )
             }
             _ => (Vec::new(), None),
         };
+        self.place_card(host_id, id, slots, card, touched);
+    }
+
+    /// Takes an agent's card out of the lanes it was in and puts `card`, if
+    /// any, in `slots`' lanes, which are sorted by key.
+    fn place_card(
+        &mut self,
+        host_id: &HostId,
+        id: &str,
+        slots: Vec<Slot>,
+        card: Option<LaneCard>,
+        touched: &mut BTreeSet<String>,
+    ) {
+        let home = (host_id.clone(), id.to_string());
+        let old = self.homes.remove(&home).unwrap_or_default();
         for key in &old {
             let Some(&ix) = self.index.get(key) else {
                 continue;
@@ -825,7 +1270,7 @@ impl LaneModel {
             if let Some(pos) = lane
                 .cards
                 .iter()
-                .position(|card| card.host == host_name && card.agent_id == id)
+                .position(|card| &card.host == host_id && card.agent_id == id)
             {
                 lane.cards.remove(pos);
             }
@@ -858,12 +1303,14 @@ impl LaneModel {
         &mut self,
         fleet: &Fleet,
         labels: &LabelIndex<'_>,
-        host_name: &str,
+        host_id: &HostId,
         id: &str,
         touched: &mut BTreeSet<String>,
     ) -> Option<Vec<String>> {
-        let host = fleet.host(host_name)?;
-        let workspace = host.directory.workspaces.get(id);
+        let host = fleet.host(host_id)?;
+        let hide = self.state.hide_background;
+        let workspace =
+            (host.directory.workspaces.get(id)).filter(|workspace| !(hide && workspace.background));
         let slots = match workspace {
             Some(workspace) => self.slots(host, Some(workspace), labels),
             None => Vec::new(),
@@ -881,7 +1328,7 @@ impl LaneModel {
                 self.lanes[ix]
                     .workspaces
                     .iter()
-                    .any(|w| w.host == host_name && w.workspace_id == id)
+                    .any(|w| &w.host == host_id && w.workspace_id == id)
             })
             .collect();
         for &ix in &held {
@@ -890,11 +1337,7 @@ impl LaneModel {
                 return None;
             }
         }
-        let entry = workspace.map(|workspace| LaneWorkspace {
-            host: host_name.to_string(),
-            workspace_id: workspace.id.clone(),
-            name: workspace_name(Some(workspace)),
-        });
+        let entry = workspace.map(|workspace| lane_workspace(host_id, workspace));
         for ix in held {
             let lane = &self.lanes[ix];
             let unchanged = entry.as_ref().is_some_and(|entry| {
@@ -906,7 +1349,7 @@ impl LaneModel {
             let key = lane.key.clone();
             let lane = Rc::make_mut(&mut self.lanes[ix]);
             lane.workspaces
-                .retain(|w| !(w.host == host_name && w.workspace_id == id));
+                .retain(|w| !(&w.host == host_id && w.workspace_id == id));
             touched.insert(key);
         }
         if let Some(entry) = &entry {
@@ -972,18 +1415,18 @@ impl LaneModel {
                 emptied = true;
                 continue;
             }
-            let present: HashSet<&str> = lane
+            let present: HashSet<&HostId> = lane
                 .cards
                 .iter()
-                .map(|card| card.host.as_str())
-                .chain(lane.workspaces.iter().map(|w| w.host.as_str()))
+                .map(|card| &card.host)
+                .chain(lane.workspaces.iter().map(|w| &w.host))
                 .collect();
-            let hosts: Vec<String> = fleet
+            let hosts: Vec<HostId> = fleet
                 .hosts
                 .iter()
-                .map(Host::name)
-                .filter(|name| present.contains(name))
-                .map(str::to_string)
+                .map(Host::id)
+                .filter(|id| present.contains(id))
+                .cloned()
                 .collect();
             if hosts != lane.hosts {
                 Rc::make_mut(&mut self.lanes[ix]).hosts = hosts;
@@ -1021,9 +1464,9 @@ impl LaneModel {
                 vec![other(key, title)]
             }
             (LaneGrouping::Project, None) => vec![other("\u{0}none".into(), "No project".into())],
-            (LaneGrouping::Host, _) => vec![other(host.name().into(), host.name().into())],
+            (LaneGrouping::Host, _) => vec![other(host.id().to_string(), host.name().into())],
             (LaneGrouping::Workspace, Some(workspace)) => vec![other(
-                format!("{}\u{0}{}", host.name(), workspace.id),
+                format!("{}\u{0}{}", host.id(), workspace.id),
                 workspace_name(Some(workspace)),
             )],
             (LaneGrouping::Workspace, None) => {
@@ -1057,6 +1500,7 @@ mod tests {
     fn host(name: &str, directory: Directory) -> Host {
         Host {
             config: HostConfig {
+                id: HostId::new(name),
                 name: name.into(),
                 ..Default::default()
             },
@@ -1155,8 +1599,100 @@ mod tests {
             agent("ab", "ba", "idle", "2026-10-02T00:00:00Z", None),
         );
         Fleet {
+            labels: None,
             hosts: vec![host("left", left), host("right", right)],
         }
+    }
+
+    #[test]
+    fn lane_keys_saved_by_name_become_their_labels_ids() {
+        use crate::labels::Catalog;
+        let mut catalog = Catalog::default();
+        let ux = catalog.create("UX", "blue").unwrap();
+        let ops = catalog.create("ops", "red").unwrap();
+        assert_eq!(key_with_ids(&catalog, "ux"), Some(ux.to_string()));
+        assert_eq!(key_with_ids(&catalog, ux.as_str()), None, "already an id");
+        assert_eq!(key_with_ids(&catalog, "gone"), None);
+        assert_eq!(key_with_ids(&catalog, UNLABELLED), None);
+        let names = format!("{COMBINATION_PREFIX}[\"ops\",\"ux\"]");
+        let mut ids = vec![ux.to_string(), ops.to_string()];
+        ids.sort();
+        let want = format!(
+            "{COMBINATION_PREFIX}{}",
+            serde_json::to_string(&ids).unwrap()
+        );
+        assert_eq!(key_with_ids(&catalog, &names), Some(want.clone()));
+        assert_eq!(key_with_ids(&catalog, &want), None);
+        let partly = format!("{COMBINATION_PREFIX}[\"gone\",\"ux\"]");
+        assert_eq!(key_with_ids(&catalog, &partly), None);
+    }
+
+    #[test]
+    fn in_reef_mode_agents_go_by_their_own_labels_and_workspaces_follow() {
+        use crate::labels::{self, Catalog, ImportHost};
+        let mut dir = Directory {
+            labels: vec![
+                LabelDef {
+                    name: "ux".into(),
+                    color: "blue".into(),
+                },
+                LabelDef {
+                    name: "ops".into(),
+                    color: "red".into(),
+                },
+            ],
+            ..Default::default()
+        };
+        put_workspace(&mut dir, workspace("w", "p", "app", &["ux"]));
+        put_workspace(&mut dir, workspace("empty", "p", "spare", &["ops"]));
+        let mut catalog = Catalog::default();
+        catalog.import(
+            &[ImportHost {
+                labels: &dir.labels,
+                workspaces: dir.workspaces.values().collect(),
+            }],
+            |_| "violet".into(),
+        );
+        let ops = catalog.by_name("ops").unwrap().id.clone();
+        let ux = catalog.by_name("ux").unwrap().id.clone();
+        // One agent inherits its workspace's "ux"; the other chose "ops".
+        put_agent(
+            &mut dir,
+            agent("inherits", "w", "idle", "2026-10-02T00:00:00Z", None),
+        );
+        let mut chose = agent("chose", "w", "idle", "2026-10-02T00:00:00Z", None);
+        chose.labels.insert(
+            labels::KEY.into(),
+            json!(labels::encode(std::slice::from_ref(&ops))),
+        );
+        put_agent(&mut dir, chose);
+        let fleet = Fleet {
+            hosts: vec![host("mac", dir)],
+            labels: Some(catalog),
+        };
+        let lanes = LaneView::build(&fleet, LaneGrouping::Label, &LaneState::default());
+        let lane = |id: &LabelId| lanes.iter().find(|lane| lane.key == id.as_str()).unwrap();
+        let cards = |lane: &Lane| {
+            lane.cards
+                .iter()
+                .map(|c| c.agent_id.clone())
+                .collect::<Vec<_>>()
+        };
+        let boxes = |lane: &Lane| {
+            lane.workspaces
+                .iter()
+                .map(|w| w.workspace_id.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(cards(lane(&ux)), ["inherits"]);
+        assert_eq!(cards(lane(&ops)), ["chose"]);
+        // The workspace is in both lanes, each with only its own agent; the
+        // empty one goes by its own Paseo label.
+        assert_eq!(boxes(lane(&ux)), ["w"]);
+        assert_eq!(boxes(lane(&ops)), ["w", "empty"]);
+        assert_eq!(lane(&ops).title, "ops");
+        assert_eq!(lane(&ops).color.as_deref(), Some("red"));
+        assert!(lanes.iter().all(|lane| lane.key != UNLABELLED));
     }
 
     #[test]
@@ -1186,7 +1722,7 @@ mod tests {
             .unwrap();
         assert_eq!(ab.title, "A + B");
         assert_eq!(ab.cards.len(), 2);
-        assert_eq!(ab.hosts, ["left", "right"]);
+        assert_eq!(ab.hosts, [HostId::new("left"), HostId::new("right")]);
         assert!(ab.cards.iter().all(|card| card.agent_id == "ab"));
         let abc = exact
             .iter()
@@ -1212,7 +1748,7 @@ mod tests {
             cards
                 .iter()
                 .flat_map(|lane| &lane.cards)
-                .filter(|card| card.host == host && card.agent_id == agent)
+                .filter(|card| card.host.as_str() == host && card.agent_id == agent)
                 .count()
         };
         assert_eq!(copies(&labels, "left", "ab"), 2);
@@ -1256,6 +1792,7 @@ mod tests {
             label_mode: LabelLaneMode::Both,
             order: vec![ab.key.clone()],
             collapsed: BTreeSet::from([ab.key.clone()]),
+            hide_background: false,
         };
         let both = LaneView::build(&fleet, LaneGrouping::Label, &state);
         assert_eq!(both[0].key, ab.key);
@@ -1301,13 +1838,194 @@ mod tests {
     fn empty_host_lanes_keep_their_known_host_without_directory_data() {
         // Hosts appear before they connect and can remain empty or offline.
         let fleet = Fleet {
+            labels: None,
             hosts: vec![host("mac-mini", Directory::default())],
         };
         let lanes = LaneView::build(&fleet, LaneGrouping::Host, &LaneState::default());
         assert_eq!(lanes.len(), 1);
-        assert_eq!(lanes[0].hosts, ["mac-mini"]);
+        assert_eq!(lanes[0].hosts, [HostId::new("mac-mini")]);
         assert!(lanes[0].cards.is_empty());
         assert!(lanes[0].workspaces.is_empty());
+    }
+
+    #[test]
+    fn background_workspaces_show_marked_or_leave_with_their_agents() {
+        let mut dir = Directory::default();
+        put_workspace(&mut dir, workspace("w-fg", "p", "front", &["ops"]));
+        let mut bg = workspace("w-bg", "p", "helper", &["ops"]);
+        bg.background = true;
+        put_workspace(&mut dir, bg);
+        put_workspace(&mut dir, workspace("w-empty", "q", "spare", &[]));
+        let mut empty_bg = workspace("w-empty-bg", "q", "spare helper", &[]);
+        empty_bg.background = true;
+        put_workspace(&mut dir, empty_bg);
+        put_agent(
+            &mut dir,
+            agent("a-fg", "w-fg", "idle", "2026-10-02T00:00:00Z", None),
+        );
+        put_agent(
+            &mut dir,
+            agent("a-bg", "w-bg", "running", "2026-10-02T01:00:00Z", None),
+        );
+        let fleet = Fleet {
+            labels: None,
+            hosts: vec![host("alpha", dir)],
+        };
+        let shown = LaneState::default();
+        let hidden = LaneState {
+            hide_background: true,
+            ..Default::default()
+        };
+        for grouping in [
+            LaneGrouping::Label,
+            LaneGrouping::Project,
+            LaneGrouping::Host,
+            LaneGrouping::Workspace,
+        ] {
+            let cards = |state: &LaneState| -> BTreeSet<String> {
+                LaneView::build(&fleet, grouping, state)
+                    .iter()
+                    .flat_map(|lane| lane.cards.iter().map(|card| card.agent_id.clone()))
+                    .collect()
+            };
+            let workspaces = |state: &LaneState| -> BTreeMap<String, bool> {
+                LaneView::build(&fleet, grouping, state)
+                    .iter()
+                    .flat_map(|lane| lane.workspaces.iter())
+                    .map(|w| (w.workspace_id.clone(), w.background))
+                    .collect()
+            };
+            assert_eq!(
+                cards(&shown),
+                BTreeSet::from(["a-fg".into(), "a-bg".into()])
+            );
+            assert_eq!(
+                workspaces(&shown),
+                BTreeMap::from([
+                    ("w-fg".into(), false),
+                    ("w-bg".into(), true),
+                    ("w-empty".into(), false),
+                    ("w-empty-bg".into(), true),
+                ]),
+                "{grouping:?}"
+            );
+            assert_eq!(cards(&hidden), BTreeSet::from(["a-fg".into()]));
+            assert_eq!(
+                workspaces(&hidden),
+                BTreeMap::from([("w-fg".into(), false), ("w-empty".into(), false)]),
+                "{grouping:?}"
+            );
+        }
+        // No lane is left behind for only background work.
+        let lanes = LaneView::build(&fleet, LaneGrouping::Workspace, &hidden);
+        assert!(lanes.iter().all(|lane| !lane.key.ends_with("w-bg")));
+    }
+
+    #[test]
+    fn by_label_background_workspaces_have_one_lane_after_unlabelled() {
+        let mut dir = Directory::default();
+        put_workspace(&mut dir, workspace("w-ab", "p", "front", &["a", "b"]));
+        put_workspace(&mut dir, workspace("w-none", "p", "loose", &[]));
+        // Labelled like w-ab, and with none: either way only in Background.
+        for (id, labels) in [("w-bg-ab", vec!["a", "b"]), ("w-bg", vec![])] {
+            let mut bg = workspace(id, "p", id, &labels);
+            bg.background = true;
+            put_workspace(&mut dir, bg);
+        }
+        let mut empty = workspace("w-bg-empty", "p", "w-bg-empty", &["a"]);
+        empty.background = true;
+        put_workspace(&mut dir, empty);
+        for (id, ws) in [
+            ("fg", "w-ab"),
+            ("loose", "w-none"),
+            ("bg-ab", "w-bg-ab"),
+            ("bg", "w-bg"),
+        ] {
+            put_agent(
+                &mut dir,
+                agent(id, ws, "idle", "2026-10-02T00:00:00Z", None),
+            );
+        }
+        let fleet = Fleet {
+            labels: None,
+            hosts: vec![host("alpha", dir)],
+        };
+        for label_mode in LabelLaneMode::ALL {
+            let state = LaneState {
+                label_mode,
+                ..Default::default()
+            };
+            let lanes = LaneView::build(&fleet, LaneGrouping::Label, &state);
+            let last = &lanes[lanes.len() - 1];
+            assert_eq!(lanes[lanes.len() - 2].key, UNLABELLED, "{label_mode:?}");
+            assert_eq!(
+                (last.key.as_str(), last.kind),
+                (BACKGROUND, LaneKind::Background)
+            );
+            assert_eq!(last.title, "Background");
+            let cards: Vec<&str> = last.cards.iter().map(|c| c.agent_id.as_str()).collect();
+            assert_eq!(cards, ["bg", "bg-ab"]);
+            let workspaces: Vec<&str> = (last.workspaces.iter())
+                .map(|w| w.workspace_id.as_str())
+                .collect();
+            assert_eq!(workspaces, ["w-bg", "w-bg-ab", "w-bg-empty"]);
+            // Nowhere else, so nothing shows twice.
+            for lane in &lanes[..lanes.len() - 1] {
+                assert!(lane.cards.iter().all(|c| !c.agent_id.starts_with("bg")));
+                assert!(lane.workspaces.iter().all(|w| !w.background));
+            }
+            // Placed by the user, it goes where they put it, like any lane.
+            let placed = LaneState {
+                label_mode,
+                order: vec![BACKGROUND.into()],
+                ..Default::default()
+            };
+            let lanes = LaneView::build(&fleet, LaneGrouping::Label, &placed);
+            assert_eq!(lanes[0].key, BACKGROUND);
+            // Hidden, there is no Background lane.
+            let hidden = LaneState {
+                label_mode,
+                hide_background: true,
+                ..Default::default()
+            };
+            let lanes = LaneView::build(&fleet, LaneGrouping::Label, &hidden);
+            assert!(lanes.iter().all(|lane| lane.key != BACKGROUND));
+            assert_eq!(lanes.last().unwrap().key, UNLABELLED);
+        }
+        // Other groupings have no Background lane; their own lanes hold it.
+        for grouping in [
+            LaneGrouping::Project,
+            LaneGrouping::Host,
+            LaneGrouping::Workspace,
+        ] {
+            let lanes = LaneView::build(&fleet, grouping, &LaneState::default());
+            assert!(lanes.iter().all(|lane| lane.key != BACKGROUND));
+        }
+        // A workspace moving into the background moves its cards with it,
+        // patched as a full build would place them.
+        let state = LaneState::default();
+        let mut model = LaneModel::build(&fleet, LaneGrouping::Label, &state);
+        let mut fleet = fleet;
+        let dir = &mut fleet.hosts[0].directory;
+        dir.workspaces.get_mut("w-ab").unwrap().background = true;
+        let change = DirChange::Workspace("w-ab".into());
+        model.apply(&fleet, [(&HostId::new("alpha"), &change)]);
+        let full = LaneView::build(&fleet, LaneGrouping::Label, &state);
+        let patched: Vec<Lane> = model.lanes().iter().map(|l| (**l).clone()).collect();
+        assert_eq!(patched, full);
+        let background = full.iter().find(|lane| lane.key == BACKGROUND).unwrap();
+        assert!(background.cards.iter().any(|c| c.agent_id == "fg"));
+    }
+
+    #[test]
+    fn label_filters_see_background_workspaces_only_as_background() {
+        let mut bg = workspace("w", "p", "w", &["Ops", "a"]);
+        assert_eq!(filter_labels(Some(&bg)), ["a", "ops"]);
+        bg.background = true;
+        assert_eq!(filter_labels(Some(&bg)), [BACKGROUND]);
+        let none = workspace("n", "p", "n", &[" "]);
+        assert_eq!(filter_labels(Some(&none)), [UNLABELLED]);
+        assert_eq!(filter_labels(None), [UNLABELLED]);
     }
 
     #[test]
@@ -1359,6 +2077,7 @@ mod tests {
             ),
         );
         let fleet = Fleet {
+            labels: None,
             hosts: vec![host("alpha", dir)],
         };
         let lanes = LaneView::build(&fleet, LaneGrouping::Label, &LaneState::default());
@@ -1444,11 +2163,12 @@ mod tests {
         );
 
         let fleet = Fleet {
+            labels: None,
             hosts: vec![host("left", left), host("right", right)],
         };
         let lanes = LaneView::build(&fleet, LaneGrouping::Project, &LaneState::default());
         let shared = lanes.iter().find(|lane| lane.title == "Shared").unwrap();
-        assert_eq!(shared.hosts, ["left", "right"]);
+        assert_eq!(shared.hosts, [HostId::new("left"), HostId::new("right")]);
         let ids: Vec<_> = shared
             .cards
             .iter()
@@ -1493,6 +2213,7 @@ mod tests {
             agent("u", "w-u", "error", "2026-10-02T00:00:00Z", Some("error")),
         );
         let fleet = Fleet {
+            labels: None,
             hosts: vec![host("h", dir)],
         };
         let once = LaneView::build(&fleet, LaneGrouping::Label, &LaneState::default());
@@ -1529,6 +2250,7 @@ mod tests {
             agent("b", "w-b", "idle", "2026-10-01T00:00:00Z", None),
         );
         let fleet = Fleet {
+            labels: None,
             hosts: vec![host("h", dir)],
         };
         let beta = label_key("beta");

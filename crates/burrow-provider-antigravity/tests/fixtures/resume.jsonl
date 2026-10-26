@@ -1,0 +1,8 @@
+// A session resumed after a daemon restart: the CLI starts on the stored
+// conversation, replays nothing, and remembers it.
+{"out":{"event":"init","conversation_id":"0b7c3f8e-2d41-4a6b-9c55-1f0e2a3b4c5d","init":{"model":"gemini-3.8-flash-low","cwd":"/home/user/repo","tools":[],"permission_mode":"always-proceed"}}}
+{"cmd":{"prompt":{"turn":"foreground-turn-7","text":"What was the word?"}}}
+{"in":{"event":"user","message":{"content":"What was the word?"}}}
+{"out":{"event":"step_update","step_update":{"conversation_id":"0b7c3f8e-2d41-4a6b-9c55-1f0e2a3b4c5d","step_index":0,"state":"DONE","step_type":"user_input"}}}
+{"out":{"event":"step_update","step_update":{"conversation_id":"0b7c3f8e-2d41-4a6b-9c55-1f0e2a3b4c5d","step_index":1,"state":"DONE","step_type":"agent_response","text_delta":"COBALT"}}}
+{"out":{"event":"result","result":{"conversation_id":"0b7c3f8e-2d41-4a6b-9c55-1f0e2a3b4c5d","status":"SUCCESS","response":"COBALT"}}}

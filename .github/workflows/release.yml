@@ -14,20 +14,33 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # `desktop` builds the crusteo app too; `musl` is the target of the static
+        # reef and burrow on Linux.
         include:
           - name: linux-x86_64
             os: ubuntu-latest
+            desktop: true
+            musl: x86_64-unknown-linux-musl
+          # Reef and Burrow only, built natively on GitHub's arm runner: free
+          # for public repositories; a private one runs a smaller (2-core)
+          # runner and uses the account's Actions minutes.
+          - name: linux-arm64
+            os: ubuntu-24.04-arm
+            desktop: false
+            musl: aarch64-unknown-linux-musl
           - name: macos-universal
             os: macos-latest
+            desktop: true
           - name: windows-x86_64
             os: windows-latest
+            desktop: true
     steps:
       - uses: actions/checkout@v4
 
       - name: Check tag matches Cargo.toml version
         shell: bash
         run: |
-          version=$(awk -F'"' '/^\[package\]/{p=1;next} /^\[/{p=0} p && /^version *=/{print $2; exit}' Cargo.toml)
+          version=$(awk -F'"' '/^\[(workspace\.)?package\]/{p=1;next} /^\[/{p=0} p && /^version *=/{print $2; exit}' Cargo.toml)
           if [ "v$version" != "$GITHUB_REF_NAME" ]; then
             echo "::error::Tag $GITHUB_REF_NAME does not match Cargo.toml version $version"
             exit 1
@@ -35,14 +48,21 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ runner.os == 'macOS' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+          targets: ${{ runner.os == 'macOS' && 'aarch64-apple-darwin,x86_64-apple-darwin' || matrix.musl || '' }}
 
       - name: Install Linux dependencies
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && matrix.desktop
         run: |
           sudo apt-get update
           sudo apt-get install -y libfontconfig-dev libxkbcommon-dev libxkbcommon-x11-dev \
             libwayland-dev libx11-xcb-dev libxcb1-dev libvulkan-dev
+
+      # musl-gcc, for any C a dependency of Reef or Burrow may compile.
+      - name: Install musl tools
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -64,11 +84,42 @@ jobs:
           lipo -info target/universal/crusteo
           scripts/package-macos.sh target/universal/crusteo dist
 
+      - name: Build and package Reef and Burrow (macOS universal)
+        if: runner.os == 'macOS'
+        env:
+          MACOSX_DEPLOYMENT_TARGET: "10.15.7"
+        run: |
+          cargo build --release --locked --target aarch64-apple-darwin -p reef -p burrow-daemon
+          cargo build --release --locked --target x86_64-apple-darwin -p reef -p burrow-daemon
+          mkdir -p target/universal
+          for bin in reef burrow; do
+            lipo -create -output "target/universal/$bin" \
+              "target/aarch64-apple-darwin/release/$bin" \
+              "target/x86_64-apple-darwin/release/$bin"
+            lipo -info "target/universal/$bin"
+            "target/universal/$bin" --version
+          done
+          scripts/package-component.sh reef target/universal/reef macos-universal dist
+          scripts/package-component.sh burrow target/universal/burrow macos-universal dist
+
       - name: Build and package (Linux)
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && matrix.desktop
         run: |
           cargo build --release --locked
           scripts/package-linux.sh target/release/crusteo dist
+
+      # Static, so they run on any distribution.
+      - name: Build and package Reef and Burrow (Linux, static)
+        if: runner.os == 'Linux'
+        run: |
+          target=${{ matrix.musl }}
+          cargo build --release --locked --target "$target" -p reef -p burrow-daemon
+          for bin in reef burrow; do
+            file "target/$target/release/$bin"
+            "target/$target/release/$bin" --version
+          done
+          scripts/package-component.sh reef "target/$target/release/reef" "$target" dist
+          scripts/package-component.sh burrow "target/$target/release/burrow" "$target" dist
 
       # Release builds compile GPUI's HLSL shaders with fxc.exe from the
       # Windows SDK, which the hosted runner provides.
@@ -78,6 +129,16 @@ jobs:
         run: |
           cargo build --release --locked
           ./scripts/package-windows.ps1 -Binary target/release/crusteo.exe -OutDir dist
+
+      - name: Build and package Reef and Burrow (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          cargo build --release --locked -p reef -p burrow-daemon
+          target/release/reef.exe --version
+          target/release/burrow.exe --version
+          ./scripts/package-component.ps1 -Component reef -Binary target/release/reef.exe -OutDir dist
+          ./scripts/package-component.ps1 -Component burrow -Binary target/release/burrow.exe -OutDir dist
 
       - uses: actions/upload-artifact@v4
         with:
@@ -113,6 +174,7 @@ jobs:
             exit 1
           fi
           cat release-notes.md
+          # Every archive: crusteo, reef and burrow, on every platform.
           (cd dist && sha256sum * > SHA256SUMS.txt && cat SHA256SUMS.txt)
 
       - uses: softprops/action-gh-release@v2

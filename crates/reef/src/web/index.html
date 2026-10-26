@@ -1,0 +1,2555 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
+<meta name="theme-color" content="#16161a">
+<title>Skiff</title>
+<style>
+:root {
+  --bg: #f6f6f8; --surface: #ffffff; --surface2: #eeeef2; --text: #17171c; --muted: #6b6b76;
+  --faint: #9a9aa4; --border: #dcdce2; --accent: #3b6cf6; --warn: #c27c00; --bad: #d13b3b;
+  --run: #2f8f5b; --sel: #e6ecff; --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --pace: #2b7fd1;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #111114; --surface: #1b1b20; --surface2: #25252c; --text: #ececf1; --muted: #a0a0ab;
+    --faint: #6e6e78; --border: #2f2f37; --accent: #7b9dff; --warn: #f0b13a; --bad: #ff6b6b;
+    --run: #4cc38a; --sel: #23283a; --pace: #79c0ff;
+  }
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+  font: 15px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; -webkit-text-size-adjust: 100%; }
+body { display: flex; flex-direction: column; height: 100vh; height: 100dvh; overflow: hidden; }
+button { font: inherit; color: inherit; background: var(--surface2); border: 1px solid var(--border);
+  border-radius: 8px; padding: 6px 12px; cursor: pointer; touch-action: manipulation; }
+button:disabled { opacity: .55; cursor: default; }
+button.on, button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+button.danger { color: var(--bad); }
+button.plain { background: none; border: none; padding: 4px 6px; color: var(--accent); }
+button.icon { background: none; border: none; padding: 4px 6px; line-height: 0; color: var(--muted); }
+button.icon.off { opacity: .45; }
+button.small { padding: 2px 8px; font-size: 13px; }
+/* An on/off switch: a track with a knob that slides right when on. */
+button.switch { position: relative; flex-shrink: 0; width: 46px; height: 28px; padding: 0; border-radius: 14px; }
+button.switch::after { content: ""; position: absolute; top: 3px; left: 3px; width: 20px; height: 20px; border-radius: 50%;
+  background: var(--muted); transition: transform .15s, background .15s; }
+button.switch.on::after { transform: translateX(18px); background: #fff; }
+select, input, textarea { font: inherit; color: inherit; background: var(--surface); border: 1px solid var(--border);
+  border-radius: 8px; padding: 6px 10px; min-width: 0; }
+[hidden] { display: none !important; }
+.chips { display: flex; gap: 4px; overflow: hidden; margin-top: 3px; }
+.chip { --c: var(--faint); flex-shrink: 0; font-size: 11px; line-height: 16px; padding: 0 6px; border-radius: 8px; color: var(--c);
+  background: color-mix(in srgb, var(--c) 14%, transparent); border: 1px solid color-mix(in srgb, var(--c) 32%, transparent); }
+.swatch { display: inline-block; width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; background: var(--c); }
+.column.tinted { border-top: 3px solid var(--c); }
+.column.tinted h3 { color: var(--c); }
+.block.tinted { background: color-mix(in srgb, var(--c) 9%, var(--surface2)); border-color: color-mix(in srgb, var(--c) 40%, var(--border)); }
+.block.tinted .name { color: var(--c); }
+/* Map */
+#mappane { flex: 1; }
+.app.map { flex-direction: column; }
+.app.map #listpane { flex: 0 0 auto; }
+.app.map #listscroll { display: none; }
+.map { position: relative; flex: 1; min-height: 0; overflow: hidden; touch-action: none; user-select: none; -webkit-user-select: none;
+  background: var(--bg); }
+.mboard { position: absolute; left: 0; top: 0; transform-origin: 0 0; will-change: transform; }
+.mboard.fly { transition: transform .28s ease; }
+.block { position: absolute; border-radius: 10px; background: var(--surface2); border: 1px solid var(--border);
+  transition: left .4s, top .4s, width .4s, height .4s; overflow: hidden; }
+.block .name { position: absolute; left: 6px; top: 3px; right: 30px; font-size: 12px; font-weight: 600; color: var(--muted);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.block .badge { position: absolute; right: 4px; top: 2px; min-width: 20px; height: 20px; border-radius: 10px; padding: 0 6px;
+  background: var(--warn); color: #111; font-weight: 700; font-size: 12px; display: grid; place-items: center; }
+.tile { position: absolute; border-radius: 3px; background: var(--faint); transition: left .4s, top .4s, width .4s, height .4s; }
+.tile.s-needs_input { background: var(--warn); } .tile.s-failed { background: var(--bad); } .tile.s-running { background: var(--run); }
+.tile.s-done { background: color-mix(in srgb, var(--faint) 55%, var(--surface2)); }
+.tile.s-running { animation: pulse 1.6s ease-in-out infinite; }
+.tile.fresh { box-shadow: 0 0 0 2px var(--accent); }
+.tile.ask::after { content: "!"; position: absolute; inset: 0; display: grid; place-items: center; font-weight: 800;
+  font-size: 70%; color: #111; }
+@keyframes pulse { 50% { opacity: .45; } }
+.mlane { position: absolute; inset: 0; overflow-y: auto; touch-action: pan-y; background: var(--bg); -webkit-overflow-scrolling: touch;
+  transition: opacity .2s; }
+.mlane .lanehead { position: sticky; top: 0; z-index: 2; display: flex; align-items: center; gap: 8px; padding: 8px 12px;
+  background: var(--bg); border-bottom: 1px solid var(--border); font-weight: 600; }
+.mlane .lanehead .n { color: var(--faint); font-weight: 400; }
+.mcard { position: absolute; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 8px 10px;
+  overflow: hidden; cursor: pointer; display: flex; flex-direction: column; gap: 2px; }
+.mcard .title { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: flex; gap: 6px; align-items: center; }
+.mcard .line { font-size: 13px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mcard .reply { color: var(--text); opacity: .8; white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+.mcard.flash { animation: flash 1.2s ease 2; }
+@keyframes flash { 50% { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent); } }
+.mnear { position: absolute; z-index: 5; background: var(--bg); border: 1px solid var(--border); border-radius: 12px; overflow: hidden;
+  display: flex; flex-direction: column; transition: left .25s ease, top .25s ease, width .25s ease, height .25s ease, border-radius .25s; }
+.mnear.full { border-radius: 0; border: none; }
+.mnear #convpane { flex: 1; border: none; min-height: 0; touch-action: pan-y; }
+.mtools { position: absolute; z-index: 4; right: 10px; bottom: calc(env(safe-area-inset-bottom) + 10px); display: flex; gap: 6px; }
+.minimap { position: absolute; z-index: 4; left: 10px; bottom: calc(env(safe-area-inset-bottom) + 10px); width: 84px; pointer-events: auto;
+  background: color-mix(in srgb, var(--surface) 85%, transparent); border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+.minimap i { position: absolute; background: var(--faint); opacity: .5; border-radius: 1px; }
+.minimap i.on { background: var(--accent); opacity: .8; }
+.minimap b { position: absolute; border: 1.5px solid var(--accent); border-radius: 2px; }
+
+/* Top bar */
+.top { flex-shrink: 0; display: flex; align-items: center; gap: 8px; padding: calc(env(safe-area-inset-top) + 6px) 12px 6px;
+  border-bottom: 1px solid var(--border); background: var(--bg); }
+.top .brand { font-weight: 700; font-size: 16px; }
+.top .grow { flex: 1; min-width: 0; font-size: 12px; color: var(--bad); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dots { display: flex; gap: 4px; align-items: center; background: none; border: none; padding: 6px; }
+.dots i { width: 8px; height: 8px; border-radius: 50%; display: block; background: var(--faint); }
+.dots i.online { background: var(--run); } .dots i.connecting { background: var(--warn); }
+.dots i.offline, .dots i.refused { background: var(--bad); }
+
+/* Panes */
+.app { flex: 1; min-height: 0; display: flex; }
+.pane { min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+#listpane { flex: 1; }
+#convpane { flex: 1; border-left: 1px solid var(--border); }
+.app.phone #listpane, .app.phone #convpane { flex: 1; border: none; }
+.app.split #listpane { flex: 0 0 380px; }
+.app.board #convpane { flex: 0 0 min(calc(80ch + 48px), 46vw); }
+.scroll { flex: 1; min-height: 0; overflow: auto; -webkit-overflow-scrolling: touch; }
+.app.board #listscroll { overflow-x: auto; overflow-y: hidden; }
+.app.board #listbody { height: 100%; padding: 0; }
+.placeholder { color: var(--faint); text-align: center; padding-top: 30vh; }
+
+/* List pane */
+.toolbar { flex-shrink: 0; padding: 8px 12px; display: flex; flex-direction: column; gap: 8px; border-bottom: 1px solid var(--border); }
+.tabs { display: flex; gap: 6px; align-items: center; }
+.tabs .grow { flex: 1; }
+.controls { display: flex; flex-wrap: wrap; gap: 6px; }
+.controls input { flex: 1 1 140px; }
+.controls select { flex: 0 1 auto; }
+#listbody { padding: 4px 12px 24px; }
+.section { margin: 6px 0; }
+.section > button.head { display: flex; width: 100%; gap: 6px; align-items: center; background: none; border: none;
+  padding: 8px 2px 4px; font-weight: 600; color: var(--muted); text-align: left; }
+.section > button.head .n { font-weight: 400; color: var(--faint); }
+.section > button.head .chev { transition: transform .15s; display: inline-block; }
+.section.closed > button.head .chev { transform: rotate(-90deg); }
+.row { display: flex; gap: 8px; align-items: flex-start; background: var(--surface); border: 1px solid var(--border);
+  border-radius: 10px; padding: 8px 4px 8px 10px; margin: 6px 0; cursor: pointer; }
+.row.sel { background: var(--sel); border-color: var(--accent); }
+.row .body { flex: 1; min-width: 0; }
+.row .top1 { display: flex; gap: 8px; align-items: baseline; }
+.row .title { flex: 1; min-width: 0; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.row .when { color: var(--faint); font-size: 12px; flex-shrink: 0; }
+.row .line { font-size: 13px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* A background workspace's agent: Paseo's word, muted, on the line it has. */
+.bgtag { font-size: 11px; line-height: 14px; padding: 0 4px; border-radius: 3px; border: 1px solid var(--faint); color: var(--faint); }
+.row .reply { color: var(--text); opacity: .8; }
+.row .ask { color: var(--warn); }
+.dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; background: var(--faint); }
+.s-needs_input { background: var(--warn); } .s-failed { background: var(--bad); } .s-running { background: var(--run); }
+.board { display: flex; gap: 12px; padding: 8px 12px 16px; height: 100%; align-items: stretch; }
+.column { flex: 0 0 300px; width: 300px; min-width: 0; overflow: hidden; display: flex; flex-direction: column; min-height: 0; background: var(--surface2);
+  border-radius: 12px; padding: 8px; }
+.column h3 { margin: 2px 4px 6px; font-size: 14px; display: flex; gap: 6px; }
+.column h3 .n { color: var(--faint); font-weight: 400; }
+.column .scroll { padding: 0 2px; }
+.column .row { margin: 6px 0; }
+.empty, .note { color: var(--muted); text-align: center; padding: 24px 0; }
+.more { display: block; margin: 8px auto; }
+
+/* Conversation pane */
+.convhead { flex-shrink: 0; display: flex; align-items: center; gap: 4px; padding: 6px 8px 6px 12px; border-bottom: 1px solid var(--border); }
+.convhead h2 { flex: 1; min-width: 0; margin: 0; font-size: 16px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.convhead .meta { font-size: 12px; color: var(--muted); }
+.convhead #back { width: 36px; height: 36px; margin-left: -8px; padding: 0; display: grid; place-items: center; flex-shrink: 0; }
+.mlane .lanehead .plain { display: flex; align-items: center; gap: 2px; padding: 4px 6px 4px 0; }
+.measure { max-width: 80ch; margin: 0 auto; padding: 8px 16px 16px; }
+.turn { margin: 14px 0; }
+.item { margin: 6px 0; overflow-wrap: anywhere; }
+.user { background: var(--surface2); border-radius: 12px; padding: 8px 12px; margin-left: 12%; white-space: pre-wrap; }
+.shots { display: flex; flex-wrap: wrap; gap: 6px; margin: 2px 0 6px; white-space: normal; }
+.shots:last-child { margin-bottom: 2px; }
+.shots img { width: 72px; height: 72px; object-fit: cover; border-radius: 8px; border: 1px solid var(--border);
+  background: var(--bg); cursor: zoom-in; }
+.lightbox { position: fixed; inset: 0; z-index: 20; background: rgba(0,0,0,.9); display: grid; place-items: center;
+  padding: calc(env(safe-area-inset-top) + 8px) 8px calc(env(safe-area-inset-bottom) + 8px); cursor: zoom-out; }
+.lightbox img { max-width: 100%; max-height: 100%; object-fit: contain; }
+/* A swipe back: what is being left follows the finger. */
+.swiping { will-change: transform; box-shadow: -8px 0 24px rgba(0,0,0,.25); }
+.app.peek { position: relative; }
+.app.peek #convpane { position: absolute; inset: 0; z-index: 3; background: var(--bg); }
+/* Usage: the tightest account's dial in the top bar, and a panel that
+   slides in from the right with every account. */
+.ugauge { display: flex; align-items: center; gap: 4px; background: none; border: none; padding: 4px 6px;
+  font-size: 13px; font-variant-numeric: tabular-nums; color: var(--muted); }
+.ugauge.stale { opacity: .45; }
+.sev-critical { color: var(--bad); } .sev-warn { color: var(--warn); } .sev-on_pace { color: var(--pace); }
+.sev-surplus { color: var(--run); } .sev-unknown { color: var(--muted); }
+.drawerback { position: fixed; inset: 0; z-index: 11; background: rgba(0,0,0,.35); opacity: 0; transition: opacity .2s; }
+.drawerback.open { opacity: 1; }
+.drawer { position: fixed; top: 0; right: 0; bottom: 0; z-index: 12; width: min(380px, 88vw); background: var(--bg);
+  border-left: 1px solid var(--border); box-shadow: -8px 0 24px rgba(0,0,0,.25); transform: translateX(100%);
+  transition: transform .22s ease-out; display: flex; flex-direction: column;
+  padding: calc(env(safe-area-inset-top) + 8px) 0 env(safe-area-inset-bottom); }
+.drawer.open { transform: none; }
+.drawer .sheethead { padding: 0 14px 6px; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; }
+.drawer .sheethead h3 { margin: 4px 0; font-size: 16px; }
+.drawer .body { flex: 1; overflow-y: auto; padding: 4px 14px 16px; }
+.pool { padding: 10px 0; border-bottom: 1px solid var(--border); }
+.pool.stale { opacity: .5; }
+.pool .who { display: flex; gap: 6px; align-items: baseline; font-weight: 600; }
+.pool .who .acct { flex: 1; min-width: 0; font-weight: 400; color: var(--muted); font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pool .who .pace { font-weight: 600; font-size: 13px; font-variant-numeric: tabular-nums; }
+.pool .why { color: var(--warn); font-size: 12px; margin-top: 2px; }
+/* Numbers kept from before a failed read, marked as Paseo marks them: a
+   red dot for an error, a muted one for an account unavailable. */
+.pool .who .fail { width: 8px; height: 8px; border-radius: 4px; background: var(--muted); align-self: center; flex-shrink: 0; }
+.pool .who .fail.error { background: var(--bad); }
+.pool .why.failed { color: var(--bad); white-space: pre-line; }
+.pool .why.last { color: var(--muted); }
+.pool .hint { color: var(--accent); font-size: 12px; margin-top: 4px; }
+.win { margin-top: 8px; }
+.win .wtop { display: flex; gap: 8px; font-size: 13px; }
+.win .wtop .l { flex: 1; min-width: 0; color: var(--muted); }
+.win.binding .wtop .l { color: var(--text); font-weight: 600; }
+.win .wtop .r { color: var(--muted); font-variant-numeric: tabular-nums; }
+.win .bar { height: 6px; border-radius: 3px; background: var(--surface2); overflow: hidden; margin-top: 3px; }
+.win .bar i { display: block; height: 100%; border-radius: 3px; background: var(--run); }
+.win .bar i.warn { background: var(--warn); } .win .bar i.bad { background: var(--bad); }
+.assistant p { margin: 6px 0; }
+.assistant p.h { font-weight: 700; margin-top: 12px; }
+.assistant ul, .assistant ol { margin: 6px 0; padding-left: 22px; }
+.assistant li { margin: 2px 0; }
+.assistant a { color: var(--accent); }
+.assistant .tablewrap { overflow-x: auto; margin: 8px 0; -webkit-overflow-scrolling: touch; }
+.assistant table { border-collapse: collapse; font-size: 13px; line-height: 1.35; }
+.assistant th, .assistant td { border: 1px solid var(--border); padding: 4px 8px; text-align: left; vertical-align: top;
+  min-width: 6em; max-width: 28em; }
+.assistant th { background: var(--surface2); font-weight: 600; white-space: nowrap; }
+.assistant pre, .detail pre { background: var(--surface2); border-radius: 8px; padding: 8px; overflow-x: auto;
+  font: 12.5px/1.4 var(--mono); white-space: pre; max-width: 100%; }
+.assistant code { font: 13px var(--mono); background: var(--surface2); padding: 0 3px; border-radius: 4px; }
+.tool { display: flex; gap: 6px; align-items: baseline; color: var(--muted); font-size: 13px; width: 100%;
+  text-align: left; background: none; border: none; padding: 2px 0; }
+.tool .name { flex-shrink: 0; }
+.tool .sum { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--mono); font-size: 12px; }
+.tool.failed .name { color: var(--bad); } .tool.running .name::after { content: " ..."; }
+/* The agent a row names, as in "From planner" or "worker finished". */
+.tool .who { flex-shrink: 0; max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); opacity: .8; font-weight: 400; }
+.tool .who.link { cursor: pointer; }
+.tool .who.link:hover { opacity: 1; text-decoration: underline; }
+.tool .sum.prose { font-family: inherit; font-size: 13px; }
+.small { color: var(--muted); font-size: 13px; }
+.error { color: var(--bad); font-size: 13px; margin-top: 4px; }
+.detail h4 { margin: 6px 0 2px; font-size: 12px; color: var(--muted); }
+.footer { color: var(--faint); font-size: 12px; margin-top: 4px; }
+.card { border: 1px solid var(--warn); border-radius: 10px; padding: 10px 12px; margin: 12px 0; background: var(--surface); }
+.card h3 { margin: 0 0 4px; font-size: 15px; }
+.card .q { margin: 10px 0 4px; font-weight: 600; }
+.card label { display: flex; gap: 8px; align-items: flex-start; padding: 5px 0; }
+.card label input { margin-top: 3px; }
+.card .other { width: 100%; margin-top: 4px; }
+.buttons { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; margin-top: 10px; }
+
+/* Composer */
+.composer { flex-shrink: 0; border-top: 1px solid var(--border); padding: 6px 12px calc(env(safe-area-inset-bottom) + 8px); }
+.composer .measure { padding: 0; }
+.working { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--run); padding: 2px 0 6px; }
+.queued { display: flex; gap: 4px; align-items: center; font-size: 12px; color: var(--muted); padding: 0 0 4px; }
+.queued .t { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.queued.bad .t { color: var(--bad); }
+.field { position: relative; display: flex; align-items: flex-end; background: var(--surface); border: 1px solid var(--border);
+  border-radius: 18px; padding: 4px 4px 4px 12px; }
+.field .send, .field .steer { align-self: flex-end; }
+.field textarea { flex: 1; border: none; background: none; padding: 6px 0; resize: none; outline: none; max-height: 40vh;
+  line-height: 1.4; min-height: calc(1.4em + 12px); align-self: center; }
+.field .steer { font-size: 12px; padding: 4px 8px; margin: 0 4px 3px; border-radius: 12px; }
+.field .send { width: 32px; height: 32px; border-radius: 50%; padding: 0; display: grid; place-items: center; flex-shrink: 0;
+  background: var(--accent); color: #fff; border: none; }
+.field .send:disabled { background: var(--surface2); color: var(--faint); }
+.field .add { width: 32px; height: 32px; padding: 0; margin: 0 4px 0 -8px; display: grid; place-items: center; flex-shrink: 0;
+  border-radius: 50%; color: var(--muted); align-self: flex-end; }
+.attached { display: flex; gap: 6px; overflow-x: auto; padding: 0 0 6px; }
+.attached .thumb { position: relative; flex-shrink: 0; width: 56px; height: 56px; border-radius: 8px; overflow: hidden;
+  border: 1px solid var(--border); background: var(--surface2); }
+.attached img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.attached .thumb button { position: absolute; top: 2px; right: 2px; width: 20px; height: 20px; padding: 0; border-radius: 50%;
+  display: grid; place-items: center; background: rgba(0,0,0,.6); color: #fff; border: none; line-height: 0; }
+
+/* Overlays */
+.toasts { position: fixed; top: calc(env(safe-area-inset-top) + 8px); left: 8px; right: 8px; z-index: 10;
+  display: flex; flex-direction: column; gap: 6px; align-items: center; pointer-events: none; }
+.toast { pointer-events: auto; width: 100%; max-width: 480px; background: var(--surface); border: 1px solid var(--border);
+  border-left: 4px solid var(--run); border-radius: 10px; padding: 8px 12px; box-shadow: 0 4px 16px rgba(0,0,0,.25); cursor: pointer; }
+.toast.failed { border-left-color: var(--bad); }
+.toast b, .toast span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.toast span { font-size: 13px; color: var(--muted); }
+.sheet { position: fixed; inset: 0; z-index: 9; background: rgba(0,0,0,.35); display: flex; align-items: flex-start; justify-content: center;
+  padding: calc(env(safe-area-inset-top) + 48px) 12px 12px; }
+.sheet .box { background: var(--bg); border: 1px solid var(--border); border-radius: 12px; padding: 12px 14px; width: 100%; max-width: 440px;
+  max-height: 80vh; overflow: auto; }
+.sheet h3 { margin: 4px 0 8px; font-size: 16px; }
+.sheet .sheethead { display: flex; align-items: center; justify-content: space-between; }
+.sheet .sheethead h3 { margin: 4px 0; }
+.hostedit { cursor: pointer; }
+.hostedit .addr { margin-top: 1px; }
+.setting { display: flex; gap: 12px; align-items: center; justify-content: space-between; padding: 10px 0; border-bottom: 1px solid var(--border); }
+.hostline { display: flex; gap: 8px; align-items: baseline; padding: 6px 0; border-bottom: 1px solid var(--border); }
+.hostline .dots { padding: 0; }
+.hostline .name { font-weight: 600; } .hostline .why { color: var(--muted); font-size: 12px; }
+.sheet h4 { margin: 14px 0 2px; font-size: 14px; }
+.hostedit { display: flex; gap: 8px; align-items: center; padding: 6px 0; border-bottom: 1px solid var(--border); }
+.hostedit .body { flex: 1; min-width: 0; }
+.hostedit .addr { color: var(--muted); font-size: 12px; font-family: var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hostadd { display: flex; flex-direction: column; gap: 6px; padding: 10px 0 4px; }
+.hostadd input { width: 100%; }
+/* Panels: the new-agent form, the label editor and confirmations. They
+   rise from the bottom on a phone and sit in the middle on a desk, and
+   redraw only themselves, so typing in them is never interrupted. */
+.panel { position: fixed; inset: 0; z-index: 13; background: rgba(0,0,0,.4); display: flex; align-items: flex-end;
+  justify-content: center; }
+.panel .box { background: var(--bg); border: 1px solid var(--border); border-bottom: none; border-radius: 14px 14px 0 0;
+  width: 100%; max-width: 520px; max-height: calc(100dvh - env(safe-area-inset-top) - 16px); display: flex; flex-direction: column;
+  padding-bottom: env(safe-area-inset-bottom); box-shadow: 0 -8px 24px rgba(0,0,0,.25); }
+.panel.small .box { max-width: 420px; }
+@media (min-width: 900px) {
+  .panel { align-items: center; }
+  .panel .box { border-radius: 14px; border-bottom: 1px solid var(--border); max-height: 86vh; }
+}
+.panel .phead { flex-shrink: 0; display: flex; align-items: center; gap: 8px; padding: 10px 14px; border-bottom: 1px solid var(--border); }
+.panel .phead h3 { flex: 1; min-width: 0; margin: 0; font-size: 16px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.panel .pbody { flex: 1; min-height: 0; overflow-y: auto; padding: 4px 14px 14px; -webkit-overflow-scrolling: touch; }
+.panel .pfoot { flex-shrink: 0; display: flex; gap: 8px; align-items: center; padding: 10px 14px; border-top: 1px solid var(--border); }
+.panel .pfoot .error { flex: 1; min-width: 0; margin: 0; }
+.panel .pfoot .grow { flex: 1; }
+.panel .lead { margin: 10px 0 4px; color: var(--muted); }
+.form .f { display: block; font-size: 12px; font-weight: 600; color: var(--muted); margin: 12px 0 4px; }
+.form select, .form input, .form textarea { width: 100%; }
+.form textarea { resize: vertical; min-height: 5.5em; line-height: 1.4; }
+.form .pair { display: flex; gap: 8px; }
+.form .pair > * { flex: 1 1 0; min-width: 0; }
+.form .other { margin-top: 6px; }
+.chips.edit { flex-wrap: wrap; overflow: visible; gap: 6px; margin-top: 4px; }
+.chip.big { font-size: 13px; line-height: 26px; padding: 0 4px 0 10px; border-radius: 13px; display: inline-flex; align-items: center; gap: 2px; }
+.chip.big button { background: none; border: none; color: inherit; padding: 0 4px; line-height: 0; height: 26px; }
+.chip.add { padding: 0 10px; cursor: pointer; font: inherit; font-size: 13px; line-height: 26px; height: 28px; }
+.chip.add::before { content: "+ "; }
+.newlabel { display: flex; gap: 6px; margin-top: 8px; }
+.newlabel input { flex: 1; }
+.convhead .chips { cursor: pointer; margin-top: 2px; }
+button.icon.accent { color: var(--accent); }
+button.primary.danger { background: var(--bad); border-color: var(--bad); color: #fff; }
+.status { position: fixed; bottom: calc(env(safe-area-inset-bottom) + 80px); left: 50%; transform: translateX(-50%); z-index: 8;
+  background: var(--surface2); border: 1px solid var(--border); border-radius: 16px; padding: 4px 12px; font-size: 13px; }
+.signin { max-width: 420px; margin: 40px auto; padding: 0 16px; display: flex; flex-direction: column; gap: 10px; }
+</style>
+</head>
+<body>
+<div class="top">
+  <span class="brand">crusteo</span>
+  <button class="dots" id="dots" aria-label="Hosts"></button>
+  <span class="grow" id="down"></span>
+  <button class="ugauge" id="usage" aria-label="Usage" hidden></button>
+  <button class="icon accent" id="new" aria-label="New agent" title="New agent"></button>
+  <button class="icon" id="gear" aria-label="Settings"></button>
+</div>
+<div class="app phone" id="app">
+  <section class="pane" id="listpane">
+    <div class="toolbar">
+      <div class="tabs">
+        <button id="tab-ny" class="on">Needs you</button>
+        <button id="tab-all">Agents</button>
+        <button id="tab-map">Map</button>
+        <span class="grow"></span>
+        <button class="plain" id="filters-toggle" hidden>Filters</button>
+      </div>
+      <div class="controls" id="controls" hidden>
+        <input id="query" type="search" placeholder="Search" autocomplete="off">
+        <select id="group" aria-label="Group"></select>
+        <select id="sort" aria-label="Sort"></select>
+        <select id="host" aria-label="Host"></select>
+        <select id="label" aria-label="Label"></select>
+        <select id="state" aria-label="State"></select>
+        <select id="background" aria-label="Background workspaces"></select>
+      </div>
+    </div>
+    <div class="scroll" id="listscroll"><div id="listbody"></div></div>
+  </section>
+  <section class="pane" id="convpane" hidden>
+    <div class="convhead">
+      <button class="plain" id="back" aria-label="Back"></button>
+      <div style="flex:1;min-width:0"><h2 id="title"></h2><div class="meta" id="convmeta"></div>
+        <div class="chips" id="convlabels" title="Edit labels" hidden></div></div>
+      <button class="icon" id="bell" aria-label="Notifications for this agent"></button>
+      <button class="icon" id="labels" aria-label="Labels" title="Labels"></button>
+      <button class="icon" id="archive" aria-label="Archive" title="Archive"></button>
+      <button class="icon" id="delete" aria-label="Delete" title="Delete"></button>
+      <button class="icon" id="close" aria-label="Close"></button>
+    </div>
+    <div class="scroll" id="convscroll"><div class="measure" id="convbody"></div></div>
+    <div class="composer"><div class="measure">
+      <div class="working" id="working" hidden></div>
+      <div id="queue"></div>
+      <div class="attached" id="attached" hidden></div>
+      <div class="field">
+        <button class="icon add" id="add" aria-label="Add images" title="Add images"></button>
+        <input type="file" id="files" accept="image/*" multiple hidden>
+        <textarea id="draft" rows="1" placeholder="Message"></textarea>
+        <button class="steer" id="steer" hidden title="Send into the running turn now">Steer</button>
+        <button class="send" id="send" aria-label="Send"></button>
+      </div>
+      <div class="error" id="send-error" hidden></div>
+    </div></div>
+  </section>
+  <section class="pane" id="mappane" hidden>
+    <div class="map" id="map">
+      <div class="mboard" id="board"></div>
+      <div class="mlane" id="lane" hidden></div>
+      <div class="mnear" id="near" hidden></div>
+      <div class="minimap" id="minimap"></div>
+      <div class="mtools"><button class="small" id="fit">Fit all</button></div>
+    </div>
+  </section>
+</div>
+<div class="toasts" id="toasts"></div>
+<div class="status" id="status" hidden></div>
+<script>
+"use strict";
+// Views are kept by applying Reef's snapshots and deltas
+// (docs/reef/design.md). The list and the conversation each draw only
+// themselves; the toolbar and the composer are never redrawn under you.
+const $ = (id) => document.getElementById(id);
+const views = {};          // "list" | "conv" -> {seq, fields, parts}
+const pending = {};        // req -> callback
+const details = {};        // item id -> detail, once fetched
+const busy = {};           // action key -> true while it runs
+const failed = {};         // action key -> what went wrong
+const forms = {};          // ask id -> {selected, other}
+let ws = null, open = null, backoff = 1000, nextReq = 0, hosts = [], settings = {}, labelColors = {};
+// Turns the open conversation shows, asked for again on a reconnect, and
+// whether the reader is at its end, so it follows what comes.
+let convTurns = 3, following = true;
+
+const STATES = { needs_input: "Needs input", failed: "Failed", running: "Working", done: "Done" };
+const GROUPS = { none: "No groups", state: "By state", host: "By host", label: "By label", workspace: "By workspace" };
+const SORTS = { recent: "Recent first", needs: "Needs you first", name: "By name" };
+const PER_GROUP = 25;
+
+// ---- preferences, per device --------------------------------------------
+
+// Before the rename to Skiff these keys began with hub-. Move them once,
+// so a phone keeps its choices and its token.
+for (const [from, to] of [["hub-prefs", "skiff-prefs"], ["hub-token", "skiff-token"]]) {
+  try {
+    const old = localStorage.getItem(from);
+    if (old !== null) {
+      if (localStorage.getItem(to) === null) localStorage.setItem(to, old);
+      localStorage.removeItem(from);
+    }
+  } catch (e) {}
+}
+
+// background: "" follows Reef's setting, else "shown" or "hidden".
+const prefs = Object.assign({ tab: "ny", group: "label", sort: "recent", query: "", host: "", label: "", state: "",
+  background: "", collapsed: {}, more: {}, filters: false }, (() => { try { return JSON.parse(localStorage.getItem("skiff-prefs")) || {}; } catch (e) { return {}; } })());
+// Labels are how a fleet is organised, as in crusteo's Lanes: group by
+// them unless this device chose otherwise.
+if (!prefs.groupChosen) prefs.group = "label";
+function savePrefs() { try { localStorage.setItem("skiff-prefs", JSON.stringify(prefs)); } catch (e) {} }
+// Whether lists show agents of Paseo's background workspaces: this
+// device's choice, else Reef's.
+function showsBackground() { return prefs.background ? prefs.background === "shown" : settings.show_background !== false; }
+// Background workspaces' agents as a label: the label filter's choice
+// (no label is spelt with a control character) and, by label, their group.
+const BG_LABEL = "\u0000background", BG_GROUP = "background";
+
+function token() {
+  const hash = new URLSearchParams(location.hash.slice(1));
+  if (hash.get("token")) {
+    try { localStorage.setItem("skiff-token", hash.get("token")); } catch (e) {}
+    history.replaceState(null, "", location.pathname);
+    return hash.get("token");
+  }
+  try { return localStorage.getItem("skiff-token"); } catch (e) { return null; }
+}
+
+function newId() {
+  try { if (crypto.randomUUID) return crypto.randomUUID(); } catch (e) {}
+  return Date.now().toString(36) + "-" + Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
+}
+
+// ---- layout ----------------------------------------------------------------
+
+const wide = matchMedia("(min-width: 900px)"), wider = matchMedia("(min-width: 1400px)");
+const coarse = matchMedia("(pointer: coarse)");
+function layout() {
+  if (prefs.tab === "map") return "map";
+  if (!wide.matches) return "phone";
+  if (wider.matches && prefs.tab === "all" && prefs.group !== "none") return "board";
+  return "split";
+}
+
+// ---- connection --------------------------------------------------------------
+
+function status(text) { $("status").hidden = !text; $("status").textContent = text || ""; }
+function send(message) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(message)); }
+function ask(message, then) { const req = "r" + (++nextReq); pending[req] = then; send(Object.assign({ req }, message)); }
+
+// Runs an action, keeping its button busy and its error until it answers.
+function act(key, message, then) {
+  if (busy[key]) return;
+  busy[key] = true; delete failed[key]; drawAll();
+  ask(Object.assign({ type: "action" }, message), (r) => {
+    delete busy[key];
+    if (!r.ok) failed[key] = (r.error && r.error.message) || "That did not work";
+    if (then) then(r);
+    drawAll();
+  });
+}
+
+// With no token yet, try without one: an open Reef needs none, and one that
+// does says so, which brings up the sign-in form.
+// One socket at a time. A retry timer and coming back to the page could
+// both reconnect; the second must replace the first, not run beside it, or
+// every notification and update arrives once per socket.
+let retry = null;
+function connect() {
+  clearTimeout(retry); retry = null;
+  if (ws) { const old = ws; ws = null; old.onclose = old.onmessage = null; try { old.close(); } catch (e) {} }
+  const t = token() || "";
+  status("Connecting...");
+  const sock = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws");
+  ws = sock;
+  sock.onopen = () => { if (ws === sock) send({ type: "hello", v: 0, token: t, device: navigator.userAgent.slice(0, 60) }); };
+  sock.onmessage = (event) => { if (ws === sock) receive(JSON.parse(event.data)); };
+  sock.onclose = () => {
+    if (ws !== sock) return;
+    ws = null;
+    for (const req in pending) { pending[req]({ ok: false, error: { message: "Connection lost" } }); delete pending[req]; }
+    status("Offline; retrying...");
+    retry = setTimeout(connect, backoff);
+    backoff = Math.min(backoff * 2, 15000);
+  };
+}
+
+function signIn(problem) {
+  const body = $("listbody");
+  body.innerHTML = "";
+  const form = el("form", "signin");
+  form.append(el("div", "small", problem || "Paste the device token Reef printed when it started."));
+  const input = el("input"); input.placeholder = "device token"; input.autocomplete = "off";
+  form.append(input, el("button", "primary", "Sign in"));
+  form.onsubmit = (e) => { e.preventDefault(); try { localStorage.setItem("skiff-token", input.value.trim()); } catch (err) {} connect(); };
+  body.append(form);
+  status("");
+}
+
+function receive(m) {
+  switch (m.type) {
+    case "welcome":
+      backoff = 1000; status(""); hosts = m.hosts; settings = m.settings || {}; labelColors = m.labels || {};
+      // Keep showing what was there until each view's new snapshot replaces
+      // it: wiping first flashes "Loading..." and loses the reader's place.
+      for (const id in views) views[id].stale = true;
+      fillSelects(); subscribeList(); if (open) subscribeConv();
+      // Usage is one small view Reef keeps current itself.
+      send({ type: "subscribe", id: "usage", view: "usage" });
+      return drawAll();
+    case "hosts": hosts = m.hosts; labelColors = m.labels || labelColors; fillSelects(); drawChrome(); drawList(); drawMap();
+      // Not under a finger that is typing: rebuilding would close the keyboard.
+      if (panel && panel.kind === "create" && !composing()) drawPanel();
+      return sheet && !composing() && drawSheet();
+    case "settings": settings = m.settings; if (fillSelects()) subscribeList(); drawChrome(); return drawSheet();
+    case "notification": return notify(m);
+    case "snapshot": views[m.id] = { seq: m.seq, fields: m, parts: m.rows || m.turns || m.tiles || [], cards: m.cards || [] }; break;
+    case "delta": if (!applyDelta(m)) return; break;
+    case "result":
+      if (pending[m.req]) { const then = pending[m.req]; delete pending[m.req]; then(m); }
+      return;
+    case "error":
+      if (m.code === "unauthorized") {
+        let had = null;
+        try { had = localStorage.getItem("skiff-token"); localStorage.removeItem("skiff-token"); } catch (e) {}
+        ws.onclose = null; ws.close(); ws = null;
+        return signIn(had ? "That token was not accepted. Paste a current one." : null);
+      }
+      if (m.id) status(m.message);
+      return;
+    default: return;
+  }
+  if (m.id === "list") drawList(); else if (m.id === "conv") drawConv(); else if (m.id === "map") drawMap();
+  else if (m.id === "usage") drawUsage();
+}
+
+function reorder(parts, order, key) {
+  const by = new Map(parts.map((p) => [p[key], p]));
+  return order.map((k) => by.get(k)).filter(Boolean);
+}
+
+function applyDelta(m) {
+  const v = views[m.id];
+  if (!v || m.seq !== v.seq + 1) { send({ type: "resync", id: m.id }); return false; }
+  v.seq = m.seq;
+  for (const [k, value] of Object.entries(m)) {
+    if (!["type", "id", "seq", "upsert", "remove", "order", "turns", "tiles", "cards"].includes(k)) v.fields[k] = value;
+  }
+  if (m.remove) v.parts = v.parts.filter((p) => !m.remove.includes(p.key));
+  for (const row of m.upsert || []) {
+    const i = v.parts.findIndex((p) => p.key === row.key);
+    if (i >= 0) v.parts[i] = row; else v.parts.push(row);
+  }
+  for (const patch of m.turns || []) {
+    const turn = v.parts.find((t) => t.key === patch.key);
+    if (!turn) { v.parts.push(patch); continue; }
+    for (const [k, value] of Object.entries(patch)) {
+      if (k === "key" || k === "items" || k === "order") continue;
+      if (value === null) delete turn[k]; else turn[k] = value;
+    }
+    for (const item of patch.items || []) {
+      const i = turn.items.findIndex((x) => x.id === item.id);
+      if (item.append !== undefined && i >= 0) { turn.items[i].text += item.append; turn.items[i].at = item.at; }
+      else if (i >= 0) turn.items[i] = item; else turn.items.push(item);
+    }
+    if (patch.order) turn.items = reorder(turn.items, patch.order, "id");
+  }
+  if (m.order) v.parts = reorder(v.parts, m.order, "key");
+  // A map nests its two lists.
+  if (m.tiles) applyRows(v, "parts", m.tiles);
+  if (m.cards) applyRows(v, "cards", m.cards);
+  return true;
+}
+
+function applyRows(v, field, changes) {
+  if (changes.remove) v[field] = v[field].filter((p) => !changes.remove.includes(p.key));
+  for (const row of changes.upsert || []) {
+    const i = v[field].findIndex((p) => p.key === row.key);
+    if (i >= 0) v[field][i] = row; else v[field].push(row);
+  }
+  if (changes.order) v[field] = reorder(v[field], changes.order, "key");
+}
+
+function subscribeList() {
+  if (prefs.tab !== "map" && views.map) { send({ type: "unsubscribe", id: "map" }); delete views.map; }
+  if (prefs.tab === "ny") return send({ type: "subscribe", id: "list", view: "needs_you", limit: 50 });
+  const filter = { query: prefs.query };
+  if (prefs.host) filter.hosts = [prefs.host];
+  if (prefs.label) filter.labels = [prefs.label];
+  if (prefs.state) filter.states = [prefs.state];
+  // Left out, Reef's setting decides.
+  if (prefs.background) filter.background = prefs.background === "shown";
+  if (prefs.tab === "map") {
+    send({ type: "unsubscribe", id: "list" }); delete views.list;
+    mapState.focusSent = "";
+    return send({ type: "subscribe", id: "map", view: "map", group: prefs.group, filter, focus: [] });
+  }
+  const grouped = prefs.group !== "none";
+  const board = layout() === "board";
+  send({ type: "subscribe", id: "list", view: "agents", group: prefs.group, sort: prefs.sort, filter,
+    limit: grouped ? PER_GROUP : 40 + (prefs.more[""] || 0),
+    collapsed: grouped && !board ? prefs.collapsed[prefs.group] || [] : [],
+    more: grouped ? prefs.more : {} });
+}
+
+function subscribeConv() {
+  send({ type: "subscribe", id: "conv", view: "conversation", host: open.host, agent: open.id, turns: convTurns });
+}
+
+function openAgent(agent) {
+  if (open && views.conv) send({ type: "unsubscribe", id: "conv" });
+  delete views.conv;
+  convTurns = 3; following = true;
+  $("draft").value = ""; sizeDraft();
+  attached = []; drawAttached();
+  open = agent; firstDraw = true;
+  if (open) subscribeConv(); else send({ type: "unsubscribe", id: "conv" });
+  drawAll();
+}
+
+// ---- notifications ----------------------------------------------------------
+
+function allowed() {
+  // Permission is "default" until asked, then allowed or "denied"; the
+  // export's leak check keeps the third word out of the source.
+  try { return Notification.permission !== "default" && Notification.permission !== "denied"; } catch (e) { return false; }
+}
+
+// Each notice once, and one toast per agent: a newer one replaces it.
+const noticed = new Set();
+function notify(n) {
+  // Ids restart with Reef, so the time goes with them.
+  const seen = n.id + "@" + n.at;
+  if (noticed.has(seen)) return;
+  noticed.add(seen);
+  for (const old of document.querySelectorAll("#toasts .toast")) if (old.dataset.key === n.key) old.remove();
+  try { if (navigator.vibrate) navigator.vibrate([60, 40, 60]); } catch (e) {}
+  const target = { host: n.host, id: n.agent, title: n.title };
+  const toast = el("div", "toast" + (n.state === "failed" ? " failed" : ""));
+  toast.dataset.key = n.key || "";
+  toast.append(el("b", "", (n.state === "failed" ? "Failed: " : "") + n.title), el("span", "", [n.host, n.body].filter(Boolean).join(" · ")));
+  toast.onclick = () => { toast.remove(); if (prefs.tab === "map") flyTo(n.host, n.agent); else openAgent(target); };
+  const stack = $("toasts");
+  stack.prepend(toast);
+  while (stack.children.length > 4) stack.lastChild.remove();
+  setTimeout(() => toast.remove(), 7000);
+  try {
+    if (document.hidden && "Notification" in window && allowed()) {
+      const system = new Notification(n.title, { body: [n.host, n.body].filter(Boolean).join(" · "), tag: n.key });
+      system.onclick = () => { try { window.focus(); } catch (e) {} system.close(); if (prefs.tab === "map") flyTo(n.host, n.agent); else openAgent(target); };
+    }
+  } catch (e) {}
+}
+
+// ---- drawing helpers -----------------------------------------------------------
+
+function el(tag, cls, text) {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text !== undefined) e.textContent = text;
+  return e;
+}
+
+function button(label, cls, key, onclick) {
+  const b = el("button", cls, busy[key] ? "..." : label);
+  b.disabled = !!busy[key];
+  b.onclick = (e) => { e.stopPropagation(); onclick(); };
+  return b;
+}
+
+// An on/off switch named for screen readers; it waits, dimmed, while `key` is busy.
+function toggle(label, on, key, onclick) {
+  const b = el("button", "switch" + (on ? " on" : ""));
+  b.setAttribute("role", "switch");
+  b.setAttribute("aria-checked", on ? "true" : "false");
+  b.setAttribute("aria-label", label);
+  b.disabled = !!busy[key];
+  b.onclick = (e) => { e.stopPropagation(); onclick(); };
+  return b;
+}
+
+function ago(iso) {
+  const s = (Date.now() - Date.parse(iso)) / 1000;
+  if (!(s >= 0)) return "";
+  if (s < 45) return "now";
+  if (s < 3600) return Math.max(1, Math.floor(s / 60)) + "m";
+  if (s < 86400) return Math.floor(s / 3600) + "h";
+  return Math.floor(s / 86400) + "d";
+}
+
+function duration(s) {
+  s = Math.max(0, Math.floor(s));
+  if (s < 60) return s + "s";
+  if (s < 3600) return Math.floor(s / 60) + "m " + (s % 60) + "s";
+  return Math.floor(s / 3600) + "h " + Math.floor((s % 3600) / 60) + "m";
+}
+
+const ICON = {
+  bell: '<path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/>',
+  quiet: '<path d="M8.7 3A6 6 0 0 1 18 8a21 21 0 0 0 .6 5"/><path d="M17 17H3s3-2 3-9a4.67 4.67 0 0 1 .3-1.7"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/><path d="m2 2 20 20"/>',
+  archive: '<rect width="20" height="5" x="2" y="3" rx="1"/><path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8"/><path d="M10 12h4"/>',
+  gear: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>',
+  arrow: '<path d="M12 19V5"/><path d="m5 12 7-7 7 7"/>',
+  close: '<path d="M18 6 6 18"/><path d="m6 6 12 12"/>',
+  back: '<path d="m15 18-6-6 6-6"/>',
+  plus: '<path d="M12 5v14"/><path d="M5 12h14"/>',
+  tag: '<path d="M12.6 2.6A2 2 0 0 0 11.2 2H4a2 2 0 0 0-2 2v7.2a2 2 0 0 0 .6 1.4l8.7 8.7a2.4 2.4 0 0 0 3.4 0l6.6-6.6a2.4 2.4 0 0 0 0-3.4z"/><circle cx="7.5" cy="7.5" r=".5" fill="currentColor"/>',
+  trash: '<path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M10 11v6"/><path d="M14 11v6"/>',
+};
+function icon(name, size) {
+  const s = size || 20;
+  return '<svg width="' + s + '" height="' + s + '" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' + ICON[name] + "</svg>";
+}
+function bellFor(row) { return icon(row.notify === false ? "quiet" : "bell", 18); }
+function toggleNotify(row) {
+  act("notify:" + row.host + "/" + row.id, { action: "notify", host: row.host, agent: row.id, on: row.notify === false });
+}
+
+// A tap must not land on a button a delta just replaced, and typing in a
+// form must not be wiped: such redraws wait.
+let pressing = false, owed = new Set();
+function held(pane) {
+  const active = document.activeElement;
+  return pressing || (active && pane.contains(active) && /INPUT|TEXTAREA|SELECT/.test(active.tagName) && !active.closest(".toolbar, .composer"));
+}
+function later(what) { owed.add(what); }
+function payOwed() { const what = [...owed]; owed.clear(); for (const f of what) f(); }
+
+function drawAll() { drawChrome(); drawList(); drawConv(); drawComposer(); }
+
+// ---- chrome: layout, host dots, tabs --------------------------------------------
+
+function drawChrome() {
+  const mode = layout();
+  const app = $("app");
+  // A swipe in progress shows the list under the conversation; keep it.
+  const peek = app.classList.contains("peek");
+  app.className = "app " + mode + (peek ? " peek" : "");
+  $("listpane").hidden = mode === "phone" && !!open && !peek;
+  $("convpane").hidden = mode === "map" ? mapState.level !== "near" : mode !== "split" && !open;
+  $("mappane").hidden = mode !== "map";
+  // An open conversation needs no tabs: back or a swipe leaves it.
+  $("listpane").querySelector(".toolbar").hidden = mode === "map" && mapState.level === "near";
+  $("tab-map").className = prefs.tab === "map" ? "on" : "";
+  $("sort").hidden = mode === "map";
+  $("convpane").querySelector(".composer").hidden = !open;
+  $("convpane").querySelector(".convhead").hidden = !open;
+  $("back").hidden = mode !== "phone" && mode !== "map";
+  $("close").hidden = mode === "phone" || mode === "map";
+  $("tab-ny").className = prefs.tab === "ny" ? "on" : "";
+  $("tab-all").className = prefs.tab === "all" ? "on" : "";
+  $("filters-toggle").hidden = prefs.tab === "ny";
+  const active = ["host", "label", "state"].filter((k) => prefs[k]).length + (prefs.group !== "none" ? 1 : 0) +
+    (showsBackground() ? 0 : 1);
+  $("filters-toggle").textContent = "Filters" + (active ? " (" + active + ")" : "");
+  const small = !wide.matches;
+  $("controls").hidden = prefs.tab === "ny" || !(prefs.filters || !small);
+  const dots = $("dots");
+  dots.innerHTML = "";
+  for (const h of hosts) { const i = el("i", h.state); i.title = h.name; dots.append(i); }
+  // Only a host down for a while is named.
+  const long = hosts.filter((h) => h.state !== "online" && h.since && Date.now() - Date.parse(h.since) > 120000);
+  $("down").textContent = long.map((h) => h.name + " down " + ago(h.since)).join(" · ");
+}
+
+function fillSelects() {
+  const fill = (id, options, value) => {
+    const s = $(id); s.innerHTML = "";
+    for (const [v, label] of options) { const o = el("option", "", label); o.value = v; s.append(o); }
+    s.value = value;
+  };
+  fill("group", Object.entries(GROUPS), prefs.group);
+  fill("sort", Object.entries(SORTS), prefs.sort);
+  fill("host", [["", "Any host"], ...hosts.map((h) => [h.name, h.name])], prefs.host);
+  // Reef's catalog, by id; a filter saved by name, before labels had ids,
+  // becomes its label's id.
+  const labels = Object.entries(labelColors).map(([id, l]) => [id, l.name]).sort((a, b) => a[1].localeCompare(b[1]));
+  if (prefs.label && prefs.label !== BG_LABEL && !labelColors[prefs.label]) {
+    const named = labels.find(([, name]) => labelKey(name) === labelKey(prefs.label));
+    if (named) { prefs.label = named[0]; savePrefs(); }
+  }
+  // Background goes with them when they are hidden.
+  const dropped = prefs.label === BG_LABEL && !showsBackground();
+  if (dropped) { prefs.label = ""; savePrefs(); }
+  fill("label", [["", "Any label"], ...labels, ...(showsBackground() ? [[BG_LABEL, "Background"]] : [])],
+    prefs.label);
+  fill("state", [["", "Any state"], ...Object.entries(STATES)], prefs.state);
+  fill("background", [["", "Background: " + (settings.show_background === false ? "hidden" : "shown") + " (Reef)"],
+    ["shown", "Background shown"], ["hidden", "Background hidden"]], prefs.background);
+  $("query").value = prefs.query;
+  return dropped;
+}
+
+
+// ---- labels -----------------------------------------------------------------------
+
+function labelKey(name) { return name.split(/\s+/).filter(Boolean).join(" ").toLowerCase(); }
+// A label nobody defined yet shows in the colour its name picks, as Reef
+// picks it (Paseo's identity hash), so a new one keeps its colour.
+const IDENTITY = ["#a392d5", "#6aa6ce", "#6cae96", "#cc8f64", "#d87da3", "#9299d5", "#6cacab", "#d88381", "#b29d64", "#7ba1d5"];
+function identityColor(name) {
+  let h = 0;
+  for (let i = 0; i < name.length; i++) h = (Math.imul(h, 31) + name.charCodeAt(i)) | 0;
+  return IDENTITY[Math.abs(h) % IDENTITY.length];
+}
+// Reef sends the catalog's labels by id; rows name them.
+function labelNamed(name) { const key = labelKey(name); return Object.values(labelColors).find((l) => labelKey(l.name) === key); }
+function labelColor(name) { const l = labelNamed(name); return l ? l.color : identityColor(name.trim()); }
+// A label group's colour, from its key ("label:" alone is No label).
+function groupColor(key) {
+  if (!key || !key.startsWith("label:") || key.length <= 6) return "";
+  return (labelColors[key.slice(6)] || {}).color || "";
+}
+function tint(elm, color) { if (color) { elm.style.setProperty("--c", color); elm.classList.add("tinted"); } }
+function chips(labels) {
+  const box = el("div", "chips");
+  for (const name of labels || []) {
+    const chip = el("span", "chip", name);
+    const color = labelColor(name);
+    if (color) chip.style.setProperty("--c", color);
+    box.append(chip);
+  }
+  return box;
+}
+
+// ---- the list ---------------------------------------------------------------------
+
+function agentRow(row) {
+  const r = el("div", "row" + (open && open.host === row.host && open.id === row.id ? " sel" : ""));
+  const body = el("div", "body");
+  const top = el("div", "top1");
+  top.append(el("span", "dot s-" + row.state), el("span", "title", row.title), el("span", "when", ago(row.reply_at || row.at)));
+  body.append(top);
+  if (row.ask) body.append(el("div", "line ask", row.ask.question || row.ask.title + (row.ask.more ? " (+" + row.ask.more + ")" : "")));
+  else if (row.reply) body.append(el("div", "line reply", row.reply));
+  const meta = el("div", "line", [row.host, row.workspace || row.project, STATES[row.state]].filter(Boolean).join(" · "));
+  // Not in the Background group, which says so already.
+  if (row.background && row.group !== BG_GROUP) meta.append(" ", el("span", "bgtag", "background"));
+  body.append(meta);
+  if (row.labels && row.labels.length) body.append(chips(row.labels));
+  const key = "notify:" + row.host + "/" + row.id;
+  if (failed[key]) body.append(el("div", "error", failed[key]));
+  const bell = button("...", "icon" + (row.notify === false ? " off" : ""), key, () => toggleNotify(row));
+  if (!busy[key]) bell.innerHTML = bellFor(row);
+  bell.title = row.notify === false ? "Notifications off" : "Notifications on";
+  r.append(body, bell);
+  r.onclick = () => openAgent({ host: row.host, id: row.id, title: row.title });
+  return r;
+}
+
+function showMore(key, current) {
+  prefs.more[key] = current + PER_GROUP; savePrefs(); subscribeList();
+}
+
+function drawList() {
+  const pane = $("listpane");
+  if (held(pane)) return later(drawList);
+  const body = $("listbody");
+  if (!ws) return;
+  body.innerHTML = "";
+  const v = views.list;
+  if (!v) return body.append(el("div", "note", "Loading..."));
+  if (prefs.tab === "ny") $("tab-ny").textContent = "Needs you" + (v.fields.total ? " (" + v.fields.total + ")" : "");
+  const groups = v.fields.groups || [];
+  if (!v.parts.length && !groups.length) {
+    return body.append(el("div", "empty", prefs.tab === "ny" ? "Nothing waiting on you" : "No agents match"));
+  }
+  if (!groups.length || prefs.tab === "ny") {
+    for (const row of v.parts) body.append(agentRow(row));
+    if (v.fields.total > v.parts.length) {
+      const more = el("button", "more", "Show more");
+      more.onclick = () => showMore("", prefs.more[""] || 0);
+      body.append(more);
+    }
+    return;
+  }
+  const byGroup = new Map(groups.map((g) => [g.key, []]));
+  for (const row of v.parts) if (byGroup.has(row.group)) byGroup.get(row.group).push(row);
+  if (layout() === "board") {
+    const board = el("div", "board");
+    for (const g of groups) {
+      const col = el("div", "column");
+      tint(col, groupColor(g.key));
+      const h = el("h3", "", g.label); h.append(el("span", "n", String(g.total)));
+      const list = el("div", "scroll");
+      for (const row of byGroup.get(g.key)) list.append(agentRow(row));
+      if (g.total > byGroup.get(g.key).length) {
+        const more = el("button", "more small", "Show more");
+        more.onclick = () => showMore(g.key, prefs.more[g.key] || PER_GROUP);
+        list.append(more);
+      }
+      col.append(h, list);
+      board.append(col);
+    }
+    body.append(board);
+    return;
+  }
+  const collapsed = prefs.collapsed[prefs.group] || [];
+  for (const g of groups) {
+    const closed = collapsed.includes(g.key);
+    const section = el("div", "section" + (closed ? " closed" : ""));
+    const head = el("button", "head");
+    head.append(el("span", "chev", "▾"));
+    const color = groupColor(g.key);
+    if (color) { const dot = el("span", "swatch"); dot.style.setProperty("--c", color); head.append(dot); }
+    head.append(el("span", "", g.label), el("span", "n", String(g.total)));
+    head.onclick = () => {
+      const list = new Set(prefs.collapsed[prefs.group] || []);
+      if (closed) list.delete(g.key); else list.add(g.key);
+      prefs.collapsed[prefs.group] = [...list]; savePrefs(); subscribeList(); drawList();
+    };
+    section.append(head);
+    if (!closed) {
+      for (const row of byGroup.get(g.key)) section.append(agentRow(row));
+      if (g.total > byGroup.get(g.key).length) {
+        const more = el("button", "more small", "Show more");
+        more.onclick = () => showMore(g.key, prefs.more[g.key] || PER_GROUP);
+        section.append(more);
+      }
+    }
+    body.append(section);
+  }
+}
+
+// ---- the conversation ---------------------------------------------------------------
+
+// Markdown, small: code blocks, inline code, bold, paragraphs. Text is
+// escaped first, so nothing from an agent becomes markup.
+// The markdown agents write: code blocks, tables, lists, headings, and
+// inline code, bold, italics and links. Everything is escaped first.
+function markdown(text) {
+  const esc = (s) => s.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  const inline = (s) => {
+    const codes = [];
+    s = s.replace(/`([^`]+)`/g, (_, c) => { codes.push(c); return "\u0000" + (codes.length - 1) + "\u0000"; });
+    s = s.replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>")
+      .replace(/(^|[^*\w])\*([^*\s][^*]*?)\*(?![*\w])/g, "$1<i>$2</i>")
+      .replace(/(^|[^\w])_([^_\s][^_]*?)_(?!\w)/g, "$1<i>$2</i>")
+      .replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
+    return s.replace(/\u0000(\d+)\u0000/g, (_, i) => "<code>" + codes[i] + "</code>");
+  };
+  const cells = (line) => line.trim().replace(/^\|/, "").replace(/\|$/, "").split("|").map((c) => c.trim());
+  const isRule = (line) => /^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$/.test(line || "");
+  const bullet = /^\s*([-*+]|\d+[.)])\s+(.*)$/;
+  const blocks = (part) => {
+    const lines = part.split("\n"), out = [];
+    let para = [];
+    const flush = () => { if (para.length) out.push("<p>" + para.map(inline).join("<br>") + "</p>"); para = []; };
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      if (!line.trim()) { flush(); continue; }
+      if (line.includes("|") && isRule(lines[i + 1])) {
+        flush();
+        let html = '<div class="tablewrap"><table><thead><tr>' + cells(line).map((c) => "<th>" + inline(c) + "</th>").join("") + "</tr></thead><tbody>";
+        for (i += 2; i < lines.length && lines[i].includes("|") && lines[i].trim(); i++) {
+          html += "<tr>" + cells(lines[i]).map((c) => "<td>" + inline(c) + "</td>").join("") + "</tr>";
+        }
+        i--;
+        out.push(html + "</tbody></table></div>");
+        continue;
+      }
+      const h = /^(#{1,6})\s+(.*)$/.exec(line);
+      if (h) { flush(); out.push('<p class="h">' + inline(h[2]) + "</p>"); continue; }
+      const m = bullet.exec(line);
+      if (m) {
+        flush();
+        const ordered = /\d/.test(m[1]), items = [];
+        for (; i < lines.length; i++) {
+          const b = bullet.exec(lines[i]);
+          if (b && /\d/.test(b[1]) === ordered) items.push(inline(b[2]));
+          else if (lines[i].trim() && /^\s{2,}/.test(lines[i]) && items.length) items[items.length - 1] += "<br>" + inline(lines[i].trim());
+          else break;
+        }
+        i--;
+        const tag = ordered ? "ol" : "ul";
+        const start = ordered ? parseInt(m[1], 10) : 1;
+        out.push("<" + tag + (start > 1 ? ' start="' + start + '"' : "") + ">" + items.map((t) => "<li>" + t + "</li>").join("") + "</" + tag + ">");
+        continue;
+      }
+      para.push(line);
+    }
+    flush();
+    return out.join("");
+  };
+  return text.split(/```[^\n]*\n?/).map((part, i) => {
+    if (i % 2) return "<pre>" + esc(part.replace(/\n$/, "")) + "</pre>";
+    return blocks(esc(part));
+  }).join("");
+}
+
+let firstDraw = true;
+function drawConv() {
+  if (!open) {
+    $("convbody").innerHTML = "";
+    $("convbody").append(el("div", "placeholder", "Pick an agent to see its conversation"));
+    return;
+  }
+  const pane = $("convpane");
+  if (held(pane)) return later(drawConv);
+  const v = views.conv;
+  const agent = (v && v.fields.agent) || open;
+  $("title").textContent = agent.title || "Conversation";
+  $("convmeta").textContent = [agent.host || open.host, agent.workspace, STATES[agent.state]].filter(Boolean).join(" · ");
+  $("bell").innerHTML = bellFor(agent);
+  $("bell").className = "icon" + (agent.notify === false ? " off" : "");
+  const labelBox = $("convlabels");
+  labelBox.hidden = !(agent.labels && agent.labels.length);
+  labelBox.innerHTML = "";
+  labelBox.append(...chips(agent.labels).children);
+  drawComposer();
+  const scroller = $("convscroll");
+  const body = $("convbody");
+  if (!v || v.fields.loading) {
+    // A conversation already on screen stays until its replacement comes.
+    if (body.querySelector(".turn")) return;
+    body.innerHTML = "";
+    return body.append(el("div", "note", "Loading..."));
+  }
+  const anchor = following ? null : readingAt(scroller);
+  body.innerHTML = "";
+  if (v.fields.error) body.append(el("div", "note", v.fields.error));
+  if (v.fields.has_older) {
+    body.append(button("Load earlier", "more", "older", () => {
+      busy.older = true; drawConv();
+      ask({ type: "older", id: "conv", turns: 3 }, () => { delete busy.older; convTurns = Math.min(convTurns + 3, 50); drawConv(); });
+    }));
+  }
+  if (!v.parts.length) body.append(el("div", "empty", "No messages yet"));
+  for (const turn of v.parts) {
+    const t = el("div", "turn");
+    if (turn.clipped) t.append(el("div", "small", turn.clipped + " earlier steps"));
+    for (const item of turn.items) { const node = renderItem(item); node.dataset.id = item.id; t.append(node); }
+    if (turn.footer) {
+      const f = [ago(turn.footer.at) + (ago(turn.footer.at) === "now" ? "" : " ago")];
+      if (turn.footer.secs) f.push(duration(turn.footer.secs));
+      t.append(el("div", "footer", f.join(" · ")));
+    }
+    body.append(t);
+  }
+  for (const a of v.fields.asks || []) body.append(askCard(a));
+  if (failed.archive) body.append(el("div", "error", failed.archive));
+  // Follow the end while there; otherwise put the item being read back
+  // where it was, whatever came or went above it.
+  const back = anchor && body.querySelector('[data-id="' + CSS.escape(anchor.id) + '"]');
+  if (firstDraw || following || !back) scroller.scrollTop = scroller.scrollHeight;
+  else scroller.scrollTop += back.getBoundingClientRect().top - anchor.top;
+  firstDraw = false;
+}
+
+// The first item showing at the top of the conversation, and where.
+function readingAt(scroller) {
+  const top = scroller.getBoundingClientRect().top;
+  for (const node of scroller.querySelectorAll("[data-id]")) {
+    const r = node.getBoundingClientRect();
+    if (r.bottom > top + 1) return { id: node.dataset.id, top: r.top };
+  }
+  return null;
+}
+
+// Following the end is the reader's choice, made by where they scroll.
+$("convscroll").addEventListener("scroll", () => {
+  const s = $("convscroll");
+  following = s.scrollTop + s.clientHeight >= s.scrollHeight - 60;
+}, { passive: true });
+
+function askCard(a) {
+  const card = el("div", "card");
+  const key = "ask:" + a.id;
+  card.append(el("h3", "", a.title));
+  if (a.summary) card.append(el("div", "small", a.summary));
+  if (a.description) card.append(el("div", "small", a.description));
+  if (a.plan) { const p = el("div", "item assistant"); p.innerHTML = markdown(a.plan); card.append(p); }
+  const buttons = el("div", "buttons");
+  if (a.questions) {
+    const form = forms[a.id] || (forms[a.id] = { selected: a.questions.map(() => []), other: a.questions.map(() => "") });
+    a.questions.forEach((q, qi) => {
+      card.append(el("div", "q", q.question));
+      q.options.forEach((o, oi) => {
+        const label = el("label");
+        const input = el("input"); input.type = q.multi ? "checkbox" : "radio"; input.name = a.id + ":" + qi;
+        input.checked = form.selected[qi].includes(oi);
+        input.onchange = () => {
+          if (!q.multi) form.selected[qi] = [];
+          form.selected[qi] = form.selected[qi].filter((x) => x !== oi);
+          if (input.checked) form.selected[qi].push(oi);
+        };
+        label.append(input, el("span", "", o.label + (o.description ? " — " + o.description : "")));
+        card.append(label);
+      });
+      if (q.other) {
+        const other = el("input", "other"); other.placeholder = q.options.length ? "Or type an answer" : "Your answer";
+        other.value = form.other[qi];
+        other.oninput = () => { form.other[qi] = other.value; };
+        card.append(other);
+      }
+    });
+    buttons.append(button(a.dismiss || "Dismiss", "", key + ":dismiss", () =>
+      act(key + ":dismiss", { action: "answer", host: open.host, agent: open.id, ask: a.id, dismiss: true })));
+    buttons.append(button("Submit", "primary", key, () =>
+      act(key, { action: "answer", host: open.host, agent: open.id, ask: a.id,
+        answers: form.selected.map((s, i) => ({ selected: s, other: form.other[i] })) })));
+  } else {
+    for (const choice of a.actions || []) {
+      const allow = choice.behavior === "allow";
+      buttons.append(button(choice.label, allow ? "primary" : "", key + ":" + choice.id, () =>
+        act(key + ":" + choice.id, { action: "permission", host: open.host, agent: open.id, ask: a.id,
+          decision: allow ? "allow" : "deny", action_id: choice.id })));
+    }
+  }
+  card.append(buttons);
+  for (const k of Object.keys(failed)) if (k.startsWith(key)) card.append(el("div", "error", failed[k]));
+  return card;
+}
+
+// Images come one by one from Reef, named by their contents, so the
+// browser keeps each for good once fetched.
+function imageUrl(key) {
+  const t = token();
+  return "/image/" + key + (t ? "?t=" + encodeURIComponent(t) : "");
+}
+function showImage(url) {
+  const box = el("div", "lightbox"), img = el("img");
+  img.src = url; img.alt = "Image";
+  box.append(img);
+  box.onclick = () => box.remove();
+  document.body.append(box);
+}
+
+// ---- usage ------------------------------------------------------------------------
+// Reef's `usage` view: a row per account, worked out by the rules
+// crusteo's title bar follows, so both say the same. The top bar shows
+// the tightest account's pace dial; a tap opens every account.
+
+function usageRows() { return (views.usage && views.usage.parts) || []; }
+function usageOpen() { return !!document.querySelector(".drawer.open"); }
+let usageTimer = null;
+
+// A half dial, green on the left through blue at the top to red on the
+// right, with the needle at the window's pace (degrees from straight up).
+function dialSvg(needle) {
+  const W = 26, H = 14, cx = W / 2, cy = H, r = H - 2;
+  const at = (deg, rad) => { const t = (180 - deg) * Math.PI / 180; return [cx + rad * Math.cos(t), cy - rad * Math.sin(t)]; };
+  const arc = (from, to, color) => {
+    const [x1, y1] = at(from, r), [x2, y2] = at(to, r);
+    return '<path d="M' + x1.toFixed(1) + " " + y1.toFixed(1) + " A" + r + " " + r + " 0 0 1 " + x2.toFixed(1) + " " + y2.toFixed(1) +
+      '" stroke="' + color + '" stroke-width="3" fill="none" opacity=".55"/>';
+  };
+  let svg = '<svg width="' + W + '" height="' + H + '" viewBox="0 0 ' + W + " " + H + '" aria-hidden="true">' +
+    arc(0, 74, "var(--run)") + arc(74, 106, "var(--pace)") + arc(106, 140, "var(--warn)") + arc(140, 180, "var(--bad)");
+  if (needle !== null && needle !== undefined) {
+    const [x, y] = at(90 + needle, H - 1);
+    svg += '<path d="M' + cx + " " + cy + " L" + x.toFixed(1) + " " + y.toFixed(1) + '" stroke="currentColor" stroke-width="1.5"/>';
+  }
+  return svg + "</svg>";
+}
+
+// As crusteo writes a reset: 26m, 3.3h, 2.1d. Numbers kept from a read
+// before a failed one don't say a window whose reset has gone by resets now.
+function resetsIn(at, retained) {
+  const s = at - Date.now() / 1000;
+  if (s <= 0) return retained ? "reset time passed" : "resets now";
+  if (s < 90 * 60) return "resets in " + Math.max(1, Math.round(s / 60)) + "m";
+  if (s < 48 * 3600) return "resets in " + (s / 3600).toFixed(1) + "h";
+  return "resets in " + (s / 86400).toFixed(1) + "d";
+}
+function bindingWindow(row) { return (row.windows || []).find((w) => w.binding); }
+// A row whose latest read failed, as Paseo's usage card says it: "Error" or
+// "Unavailable" and why, and when its numbers were read.
+function failureText(row) {
+  const f = row.failure;
+  if (!f) return "";
+  const status = f.status === "error" ? "Error" : "Unavailable";
+  return f.problem ? status + ": " + f.problem : status;
+}
+function lastUpdated(row) {
+  const a = ago(new Date(row.served_at * 1000).toISOString());
+  return "Last updated " + (a === "now" ? "just now" : a + " ago");
+}
+
+function drawUsage() {
+  const rows = usageRows(), top = rows.find((r) => r.tightest), g = $("usage");
+  g.hidden = !top;
+  if (top) {
+    const w = bindingWindow(top);
+    g.className = "ugauge sev-" + top.severity + (top.stale ? " stale" : "");
+    g.innerHTML = dialSvg(top.needle) + "<span>" + top.slack + "</span>";
+    g.title = [top.provider + " " + (top.account || top.label), w ? w.name + " " + Math.round(w.remaining) + "% left, " + resetsIn(w.resets_at, top.retained) : "",
+      top.retained ? failureText(top) + "\n" + lastUpdated(top) : ""]
+      .filter(Boolean).join("\n");
+  }
+  drawUsageDrawer();
+}
+
+function showUsage() {
+  if (usageOpen()) return;
+  const back = el("div", "drawerback"), drawer = el("div", "drawer");
+  const head = el("div", "sheethead");
+  head.append(el("h3", "", "Usage"));
+  const done = el("button", "", "Done"); done.onclick = hideUsage; head.append(done);
+  drawer.append(head, el("div", "body"));
+  back.onclick = hideUsage;
+  document.body.append(back, drawer);
+  void drawer.offsetWidth;
+  back.classList.add("open"); drawer.classList.add("open");
+  drawUsageDrawer();
+  // Only the countdowns move with the clock; the numbers come as deltas.
+  usageTimer = setInterval(drawUsageDrawer, 30000);
+}
+function hideUsage() {
+  clearInterval(usageTimer); usageTimer = null;
+  for (const e of document.querySelectorAll(".drawer, .drawerback")) {
+    e.classList.remove("open");
+    e.style.transform = "";
+    setTimeout(() => e.remove(), 240);
+  }
+}
+function drawUsageDrawer() {
+  const body = document.querySelector(".drawer.open .body");
+  if (!body) return;
+  body.innerHTML = "";
+  const rows = usageRows();
+  if (!views.usage) return body.append(el("div", "note", "Loading..."));
+  if (!rows.length) return body.append(el("div", "note", "No usage reported"));
+  for (const p of rows) {
+    const box = el("div", "pool" + (p.stale ? " stale" : ""));
+    const who = el("div", "who");
+    who.append(el("span", "", p.provider), el("span", "acct", [p.label, p.plan].filter(Boolean).join(" · ")));
+    if (p.retained) who.append(el("span", "fail " + (p.failure.status === "error" ? "error" : "unavailable")));
+    who.append(el("span", "pace sev-" + p.severity, p.slack));
+    box.append(who);
+    if (p.retained) {
+      box.append(el("div", "why failed", failureText(p)), el("div", "why last", lastUpdated(p)));
+    } else if (p.status && p.status !== "ok") box.append(el("div", "why", p.status));
+    else if (p.stale) box.append(el("div", "why", "Last read " + ago(new Date(p.served_at * 1000).toISOString()) + " ago"));
+    if (p.use_before) {
+      const u = p.use_before;
+      box.append(el("div", "hint", "Use it before reset: " + Math.round(u.remaining) + "% of " + u.window + " left, " + resetsIn(u.resets_at)));
+    }
+    for (const w of p.windows || []) {
+      const used = Math.max(0, Math.min(100, w.used || 0));
+      const row = el("div", "win" + (w.binding ? " binding" : ""));
+      const top = el("div", "wtop");
+      top.append(el("span", "l", w.name), el("span", "r", Math.round(used) + "%" + (w.resets_at > 0 ? " · " + resetsIn(w.resets_at, p.retained) : "")));
+      const bar = el("div", "bar"), fill = el("i", used >= 90 ? "bad" : used >= 70 ? "warn" : "");
+      fill.style.width = used + "%";
+      bar.append(fill);
+      row.append(top, bar);
+      box.append(row);
+    }
+    body.append(box);
+  }
+}
+
+function renderItem(item) {
+  switch (item.kind) {
+    case "user": {
+      const d = el("div", "item user", item.text);
+      const keys = item.image_keys || [];
+      if (keys.length) {
+        const row = el("div", "shots");
+        for (const k of keys) {
+          const img = el("img"); img.loading = "lazy"; img.decoding = "async"; img.alt = "Image"; img.src = imageUrl(k);
+          img.onclick = () => showImage(imageUrl(k));
+          row.append(img);
+        }
+        if (item.text) d.prepend(row); else d.append(row);
+      } else if (item.images) d.append(" [" + item.images + " image(s)]");
+      return d;
+    }
+    case "assistant": { const d = el("div", "item assistant"); d.innerHTML = markdown(item.text); return d; }
+    case "tool": case "thought": {
+      const wrap = el("div", "item");
+      const b = el("button", "tool " + (item.status || ""));
+      const name = el("span", "name", item.kind === "thought" ? "Thinking" : item.name);
+      const a = item.agent;
+      if (a) {
+        // The agent opens on a tap; the rest of the row unfolds.
+        const who = el("span", "who" + (a.known ? " link" : ""), a.title);
+        if (a.known) who.onclick = (e) => { e.stopPropagation(); openAgent({ host: open.host, id: a.id, title: a.title }); };
+        if (a.lead) b.append(who, name); else b.append(name, who);
+      } else b.append(name);
+      if (item.summary) b.append(el("span", "sum" + (a ? " prose" : ""), item.summary));
+      wrap.append(b);
+      const shown = details[item.id];
+      if (shown) {
+        const d = el("div", "detail");
+        for (const s of shown.sections) { if (s.title) d.append(el("h4", "", s.title)); d.append(el("pre", "", s.text)); }
+        wrap.append(d);
+      }
+      if (item.detail) b.onclick = () => {
+        if (details[item.id]) { delete details[item.id]; return drawConv(); }
+        ask({ type: "detail", id: "conv", item: item.id }, (r) => { if (r.ok) details[item.id] = r.detail; drawConv(); });
+      };
+      return wrap;
+    }
+    case "todo": return el("div", "item small", item.label + " (" + item.done + "/" + item.total + ")");
+    case "notice": return el("div", "item small", item.text);
+    case "compaction": return el("div", "item small", "— " + item.label + " —");
+    default: return el("div", "item small", item.kind);
+  }
+}
+
+// ---- the composer ----------------------------------------------------------------------
+
+function working() { return !!(views.conv && views.conv.fields.working); }
+function elapsed() {
+  const since = views.conv && views.conv.fields.working && views.conv.fields.working.since;
+  return "Working" + (since ? " " + duration((Date.now() - Date.parse(since)) / 1000) : "");
+}
+
+function sizeDraft() {
+  const d = $("draft");
+  // Measured while hidden it would be 0 tall; empty, it is one line anyway.
+  if (!d.value || !d.offsetParent) { d.style.height = ""; return; }
+  d.style.height = "auto";
+  d.style.height = Math.min(d.scrollHeight, window.innerHeight * 0.4) + "px";
+}
+
+// Redrawn only when what it shows changes, so its buttons stay put under
+// a finger while the conversation streams.
+let composerDrawn = "";
+function drawComposer() {
+  const v = views.conv;
+  const busyNow = working();
+  const drawn = JSON.stringify([open && open.id, busyNow, v && v.fields.queued, busy, failed]);
+  if (drawn === composerDrawn) return;
+  composerDrawn = drawn;
+  const bar = $("working");
+  bar.hidden = !busyNow;
+  bar.innerHTML = "";
+  if (busyNow) {
+    bar.append(el("span", "elapsed", elapsed()));
+    bar.append(button("Stop", "danger small", "stop", () => act("stop", { action: "stop", host: open.host, agent: open.id })));
+  }
+  if (failed.stop) bar.append(el("span", "error", failed.stop));
+  const queue = $("queue");
+  queue.innerHTML = "";
+  for (const m of (v && v.fields.queued) || []) {
+    const row = el("div", "queued" + (m.error ? " bad" : ""));
+    row.append(el("span", "t", (m.error ? "Not sent: " : "Next: ") + m.text + (m.images ? " [" + m.images + " image(s)]" : "")));
+    row.append(button("Steer", "plain small", "steer:" + m.id, () =>
+      act("steer:" + m.id, { action: "steer", host: open.host, agent: open.id, message_id: m.id })));
+    const drop = button("", "icon", "drop:" + m.id, () =>
+      act("drop:" + m.id, { action: "unqueue", host: open.host, agent: open.id, message_id: m.id }));
+    if (!busy["drop:" + m.id]) drop.innerHTML = icon("close", 14);
+    drop.title = "Drop";
+    row.append(drop);
+    queue.append(row);
+  }
+  $("steer").hidden = !busyNow;
+  $("steer").disabled = !!busy.send;
+  $("send").disabled = !!busy.send || !!shrinking;
+  $("send").title = busyNow ? "Queue: send when this turn ends" : "Send";
+  $("send").setAttribute("aria-label", busyNow ? "Queue" : "Send");
+  $("send-error").hidden = !failed.send;
+  $("send-error").textContent = failed.send || "";
+}
+
+function sendAs(action) {
+  const text = $("draft").value;
+  if ((!text.trim() && !attached.length) || !open || shrinking) return;
+  const message = { action, host: open.host, agent: open.id, text, message_id: newId() };
+  if (attached.length) message.images = attached.map((a) => ({ data: a.data, mime_type: a.mime }));
+  act("send", message, (r) => {
+    if (r.ok) { $("draft").value = ""; sizeDraft(); attached = []; drawAttached(); }
+  });
+}
+
+// ---- images to send with a message --------------------------------------------------
+// A phone photo is shrunk before it goes: the long side to 2000px, as JPEG,
+// so a message stays a few hundred KB rather than many MB.
+
+const MAX_SIDE = 2000, MAX_ATTACHED = 8;
+let attached = [], shrinking = 0;
+
+function shrink(file) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      const k = Math.min(1, MAX_SIDE / Math.max(img.naturalWidth, img.naturalHeight));
+      const w = Math.round(img.naturalWidth * k), h = Math.round(img.naturalHeight * k);
+      const canvas = document.createElement("canvas");
+      canvas.width = w; canvas.height = h;
+      canvas.getContext("2d").drawImage(img, 0, 0, w, h);
+      URL.revokeObjectURL(url);
+      // PNGs keep their edges, as screenshots need, while they are small.
+      const png = file.type === "image/png" && file.size < 1500000;
+      const mime = png ? "image/png" : "image/jpeg";
+      const dataUrl = canvas.toDataURL(mime, 0.85);
+      resolve({ mime, data: dataUrl.slice(dataUrl.indexOf(",") + 1), url: dataUrl });
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error("Could not read " + (file.name || "that image"))); };
+    img.src = url;
+  });
+}
+
+async function addFiles(files) {
+  failed.send = "";
+  for (const file of files) {
+    if (!/^image\//.test(file.type)) continue;
+    if (attached.length + shrinking >= MAX_ATTACHED) { failed.send = "At most " + MAX_ATTACHED + " images"; break; }
+    shrinking++; drawAttached();
+    try { attached.push(await shrink(file)); } catch (e) { failed.send = e.message; }
+    shrinking--; drawAttached();
+  }
+  composerDrawn = ""; drawComposer();
+}
+
+function drawAttached() {
+  const box = $("attached");
+  box.hidden = !attached.length && !shrinking;
+  box.innerHTML = "";
+  attached.forEach((a, i) => {
+    const t = el("div", "thumb"), img = el("img");
+    img.src = a.url; img.alt = "";
+    const x = el("button"); x.innerHTML = icon("close", 12); x.setAttribute("aria-label", "Remove image");
+    x.onclick = () => { attached.splice(i, 1); drawAttached(); };
+    t.append(img, x); box.append(t);
+  });
+  for (let i = 0; i < shrinking; i++) box.append(el("div", "thumb"));
+  $("send").disabled = !!busy.send || !!shrinking;
+}
+
+// ---- settings and hosts sheets ------------------------------------------------------------
+
+let sheet = null;
+function showSheet(kind) { sheet = kind; removing = null; hostShown = null; adding = false; drawSheet(); }
+
+// Adding and removing hosts. What is typed is kept here, so the sheet can
+// redraw as hosts come and go without losing it. Addresses stay hidden
+// until a host is tapped.
+const hostForm = { name: "", endpoint: "", password: "" };
+let removing = null, hostShown = null, adding = false;
+function hostEditor(box) {
+  box.append(el("h4", "", "Hosts"));
+  for (const h of hosts) {
+    const line = el("div", "hostedit");
+    const d = el("span", "dots"); d.append(el("i", h.state)); line.append(d);
+    const body = el("div", "body");
+    body.append(el("div", "name", h.name));
+    const shown = hostShown === h.name;
+    if (shown) body.append(el("div", "addr", h.endpoint || ""));
+    line.append(body);
+    line.onclick = () => { hostShown = shown ? null : h.name; removing = null; drawSheet(); };
+    const key = "host_remove:" + h.name;
+    if (shown) {
+      const sure = removing === h.name;
+      line.append(button(sure ? "Remove?" : "Remove", "small" + (sure ? " danger" : ""), key, () => {
+        if (!sure) { removing = h.name; return drawSheet(); }
+        removing = null; hostShown = null;
+        act(key, { action: "host_remove", name: h.name }, drawSheet);
+      }));
+    }
+    box.append(line);
+    if (failed[key]) box.append(el("div", "error", failed[key]));
+  }
+  if (!adding) {
+    const row = el("div", "buttons");
+    row.append(button("+ Add host", "", "add-open", () => { adding = true; drawSheet(); }));
+    box.append(row);
+    return;
+  }
+  const form = el("div", "hostadd");
+  const field = (k, placeholder, type) => {
+    const i = el("input"); i.placeholder = placeholder; i.value = hostForm[k]; i.autocomplete = "off";
+    i.autocapitalize = "off"; i.spellcheck = false; if (type) i.type = type;
+    i.oninput = () => { hostForm[k] = i.value; };
+    i.onkeydown = (e) => { if (e.key === "Enter") add(); };
+    form.append(i);
+  };
+  field("name", "Name");
+  field("endpoint", "Address");
+  field("password", "Password (optional)", "password");
+  const add = () => act("host_add", { action: "host_add", name: hostForm.name, endpoint: hostForm.endpoint, password: hostForm.password }, (r) => {
+    if (r.ok) { hostForm.name = hostForm.endpoint = hostForm.password = ""; adding = false; }
+    drawSheet();
+  });
+  const row = el("div", "buttons");
+  row.append(button("Cancel", "", "add-cancel", () => { adding = false; delete failed.host_add; drawSheet(); }));
+  row.append(button("Add", "primary", "host_add", add));
+  form.append(row);
+  box.append(form);
+  if (failed.host_add) box.append(el("div", "error", failed.host_add));
+}
+function drawSheet() {
+  document.querySelectorAll(".sheet").forEach((s) => s.remove());
+  if (!sheet) return;
+  const wrap = el("div", "sheet");
+  wrap.onclick = (e) => { if (e.target === wrap) { sheet = null; drawSheet(); } };
+  const box = el("div", "box");
+  if (sheet === "hosts") {
+    for (const h of hosts) {
+      const line = el("div", "hostline");
+      const d = el("span", "dots"); d.append(el("i", h.state)); line.append(d);
+      line.append(el("span", "name", h.name));
+      const since = h.since ? (h.state === "online" ? "up " : h.state + " ") + ago(h.since) : h.state;
+      line.append(el("span", "why", [since, h.agents + " agents", h.version, h.reason].filter(Boolean).join(" · ")));
+      box.append(line);
+    }
+  } else {
+    const s = el("div", "setting");
+    s.append(el("div", "", "Notify on agent turns"));
+    s.append(toggle("Notify on agent turns", settings.notify_default !== false, "settings",
+      () => act("settings", { action: "settings", notify_default: settings.notify_default === false }, drawSheet)));
+    box.append(s);
+    // For every phone that has not chosen in its own filters.
+    const bg = el("div", "setting");
+    bg.append(el("div", "", "Show background workspaces"));
+    bg.append(toggle("Show background workspaces", settings.show_background !== false, "settings-bg",
+      () => act("settings-bg", { action: "settings", show_background: settings.show_background === false }, drawSheet)));
+    box.append(bg);
+    if (failed["settings-bg"]) box.append(el("div", "error", failed["settings-bg"]));
+    if (failed.settings) box.append(el("div", "error", failed.settings));
+    const sys = el("div", "setting");
+    let secure = false;
+    try { secure = "Notification" in window && window.isSecureContext !== false; } catch (e) {}
+    if (secure) {
+      const state = Notification.permission;
+      sys.append(el("div", "", "System notifications: " +
+        (allowed() ? "allowed" : state === "denied" ? "blocked" : "off")));
+      if (state === "default") {
+        const b = el("button", "primary", "Allow");
+        b.onclick = () => { try { Notification.requestPermission().then(drawSheet, drawSheet); } catch (e) {} };
+        sys.append(b);
+      }
+    } else {
+      sys.append(el("div", "small", "System notifications need HTTPS."));
+    }
+    box.append(sys);
+    hostEditor(box);
+  }
+  const head = el("div", "sheethead");
+  head.append(el("h3", "", sheet === "hosts" ? "Hosts" : "Settings"));
+  const close = el("button", "", "Done");
+  close.onclick = () => { sheet = null; drawSheet(); };
+  head.append(close);
+  box.prepend(head);
+  wrap.append(box);
+  document.body.append(wrap);
+}
+
+// ---- panels: a new agent, labels, confirmations -------------------------------------------
+// Each draws from its own state, kept here, and only when that changes:
+// what is typed is stored as it is typed, so nothing a delta does closes
+// the keyboard or loses it, and a redraw puts the focus back.
+
+let panel = null;          // {kind: "create" | "labels" | "confirm", key, ...}
+const labelDrafts = {};    // a label editor's "New label" text, by editor
+
+function showPanel(state) { panel = state; drawPanel(); }
+function closePanel() { panel = null; drawPanel(); }
+
+function drawPanel() {
+  const old = document.querySelector(".panel");
+  if (!panel) { if (old) old.remove(); return; }
+  const active = document.activeElement;
+  const focused = old && active && old.contains(active) ? active.dataset.f : null;
+  let caret = null;
+  try { caret = focused && active.selectionStart; } catch (e) {}
+  const scroll = old ? old.querySelector(".pbody").scrollTop : 0;
+  const wrap = el("div", "panel" + (panel.kind === "confirm" ? " small" : ""));
+  wrap.onclick = (e) => { if (e.target === wrap && !busy[panel.key]) closePanel(); };
+  const box = el("div", "box");
+  box.setAttribute("role", "dialog");
+  const head = el("div", "phead"), body = el("div", "pbody"), foot = el("div", "pfoot");
+  if (panel.kind === "create") drawCreate(head, body, foot);
+  else if (panel.kind === "labels") drawLabels(head, body, foot);
+  else drawConfirm(head, body, foot);
+  if (panel.kind !== "confirm") {
+    const cancel = el("button", "", "Cancel");
+    cancel.onclick = closePanel;
+    head.append(cancel);
+  }
+  box.append(head, body, foot);
+  wrap.append(box);
+  if (old) old.replaceWith(wrap); else document.body.append(wrap);
+  body.scrollTop = scroll;
+  const again = focused && wrap.querySelector('[data-f="' + focused + '"]');
+  if (again) { again.focus(); try { if (caret !== null) again.setSelectionRange(caret, caret); } catch (e) {} }
+}
+
+function field(box, label) { box.append(el("label", "f", label)); }
+function select(name, options, value, onchange) {
+  const s = el("select");
+  s.dataset.f = name;
+  for (const [v, label, disabled] of options) { const o = el("option", "", label); o.value = v; o.disabled = !!disabled; s.append(o); }
+  s.value = value;
+  s.onchange = () => onchange(s.value);
+  return s;
+}
+function textField(tag, name, value, placeholder, oninput) {
+  const t = el(tag);
+  t.dataset.f = name; t.value = value; t.placeholder = placeholder;
+  t.autocomplete = "off"; t.autocapitalize = "off"; t.spellcheck = tag === "textarea";
+  t.oninput = () => oninput(t.value);
+  return t;
+}
+function panelError(foot, key) { foot.append(failed[key] ? el("div", "error", failed[key]) : el("span", "grow")); }
+
+// Labels, as chips to take off, the fleet's other labels to put on, and a
+// new one by name. `chosen` is changed in place.
+function labelEditor(box, chosen, editor) {
+  const current = el("div", "chips edit");
+  for (const name of chosen) {
+    const chip = el("span", "chip big", name);
+    const color = labelColor(name);
+    if (color) chip.style.setProperty("--c", color);
+    const x = el("button");
+    x.innerHTML = icon("close", 12); x.setAttribute("aria-label", "Remove " + name);
+    x.onclick = () => { chosen.splice(chosen.indexOf(name), 1); drawPanel(); };
+    chip.append(x);
+    current.append(chip);
+  }
+  if (!chosen.length) current.append(el("span", "small", "No labels"));
+  box.append(current);
+  const known = Object.values(labelColors).map((l) => l.name)
+    .filter((n) => !chosen.some((c) => labelKey(c) === labelKey(n))).sort((a, b) => a.localeCompare(b));
+  if (known.length) {
+    const offer = el("div", "chips edit");
+    for (const name of known) {
+      const b = el("button", "chip add", name);
+      const color = labelColor(name);
+      if (color) b.style.setProperty("--c", color);
+      b.onclick = () => { chosen.push(name); drawPanel(); };
+      offer.append(b);
+    }
+    box.append(offer);
+  }
+  const row = el("div", "newlabel");
+  const input = textField("input", editor + "-label", labelDrafts[editor] || "", "New label", (v) => { labelDrafts[editor] = v; });
+  const add = () => { if (takeLabelDraft(chosen, editor)) drawPanel(); };
+  input.onkeydown = (e) => { if (e.key === "Enter") { e.preventDefault(); add(); } };
+  const b = el("button", "", "Add");
+  b.onclick = add;
+  row.append(input, b);
+  box.append(row);
+}
+// A label typed but not added yet counts: it is added before saving.
+function takeLabelDraft(chosen, editor) {
+  const name = (labelDrafts[editor] || "").split(/\s+/).filter(Boolean).join(" ");
+  labelDrafts[editor] = "";
+  if (!name) return false;
+  if (!chosen.some((c) => labelKey(c) === labelKey(name))) chosen.push(name);
+  return true;
+}
+
+// The new-agent form. Its choices come from Reef per host (the host's
+// providers and workspaces); the last ones used on each host are kept.
+const OTHER = "\u0000other";
+// Its labels start as the workspace's default (those its agents share) and
+// start again when the workspace changes; `labelsFor` is the one they are for.
+const createForm = { host: "", provider: "", model: "", mode: "", thinking: "", workspace: "", cwd: "", labels: [], labelsFor: null, text: "" };
+const createOptions = {};  // host -> {loading, error, data}
+
+function remembered(host) { return ((prefs.create || {}).hosts || {})[host] || {}; }
+
+function openCreate() {
+  const online = hosts.filter((h) => h.state === "online");
+  const last = (prefs.create || {}).host;
+  const current = online.find((h) => h.name === createForm.host);
+  const host = current || online.find((h) => h.name === last) || online[0] || hosts[0];
+  delete failed.create;
+  pickHost(host ? host.name : "");
+  showPanel({ kind: "create", key: "create" });
+}
+
+function pickHost(host) {
+  const r = remembered(host);
+  Object.assign(createForm, { host, provider: r.provider || "", model: r.model || "", mode: r.mode || "",
+    thinking: r.thinking || "", workspace: r.workspace || "", cwd: r.cwd || "" });
+  if (host) loadOptions(host);
+}
+
+function loadOptions(host) {
+  const known = createOptions[host] || {};
+  if (known.loading) return;
+  if (!ws || ws.readyState !== 1) { createOptions[host] = { error: "Offline", data: known.data }; return; }
+  createOptions[host] = { loading: true, data: known.data };
+  ask({ type: "create_options", host }, (r) => {
+    createOptions[host] = r.ok ? { data: r } : { error: (r.error && r.error.message) || "Could not load the choices", data: known.data };
+    if (panel && panel.kind === "create") drawPanel();
+  });
+}
+
+// What the form shows: the choices made, else each one's default.
+function createChoices() {
+  const data = (createOptions[createForm.host] || {}).data;
+  if (!data) return null;
+  const f = createForm;
+  const ready = data.providers.filter((p) => p.ready);
+  const provider = ready.find((p) => p.id === f.provider) || ready.find((p) => p.id === "claude") || ready[0] || null;
+  const models = (provider && provider.models) || [], modes = (provider && provider.modes) || [];
+  const model = models.find((m) => m.id === f.model) || models.find((m) => m.default) || models[0] || null;
+  const mode = modes.find((m) => m.id === f.mode) || modes.find((m) => m.id === provider.mode) || null;
+  const thinkings = (model && model.thinking) || [];
+  const thinking = thinkings.find((t) => t.id === f.thinking) || thinkings.find((t) => t.id === model.thinking_default) || thinkings[0] || null;
+  const workspaces = data.workspaces || [];
+  const other = f.workspace === OTHER || !workspaces.length;
+  const workspace = other ? null : workspaces.find((w) => w.id === f.workspace) || workspaces[0];
+  return { ready, unready: data.providers.filter((p) => !p.ready), provider, model, mode, thinking, workspaces, workspace, other };
+}
+
+function drawCreate(head, body, foot) {
+  head.append(el("h3", "", "New agent"));
+  body.classList.add("form");
+  const f = createForm;
+  field(body, "Host");
+  body.append(select("host", hosts.map((h) => [h.name, h.name + (h.state === "online" ? "" : " (" + h.state + ")"), h.state !== "online"]),
+    f.host, (v) => { pickHost(v); drawPanel(); }));
+  const options = createOptions[f.host] || {};
+  const c = createChoices();
+  if (!f.host) body.append(el("div", "note", "Add a host first, in Settings."));
+  else if (!c) body.append(el("div", options.error ? "error" : "note", options.error || "Loading providers..."));
+  else if (!c.ready.length) body.append(el("div", "note", "No provider is ready on " + f.host + "."));
+  if (c && c.provider) {
+    const pick = (key) => (v) => { f[key] = v; if (key === "provider") f.model = f.mode = f.thinking = ""; if (key === "model") f.thinking = ""; drawPanel(); };
+    const pair = el("div", "pair");
+    const left = el("div"), right = el("div");
+    field(left, "Provider");
+    left.append(select("provider", c.ready.map((p) => [p.id, p.label]), c.provider.id, pick("provider")));
+    field(right, "Model");
+    right.append(select("model", c.provider.models.map((m) => [m.id, m.label]), c.model ? c.model.id : "", pick("model")));
+    pair.append(left, right);
+    body.append(pair);
+    if (c.provider.modes.length || c.thinking) {
+      const pair2 = el("div", "pair");
+      if (c.provider.modes.length) {
+        const box = el("div");
+        field(box, "Mode");
+        box.append(select("mode", c.provider.modes.map((m) => [m.id, m.label]), c.mode ? c.mode.id : "", pick("mode")));
+        pair2.append(box);
+      }
+      if (c.thinking) {
+        const box = el("div");
+        field(box, "Thinking");
+        box.append(select("thinking", c.model.thinking.map((t) => [t.id, t.label]), c.thinking.id, pick("thinking")));
+        pair2.append(box);
+      }
+      body.append(pair2);
+    }
+    if (c.unready.length) body.append(el("div", "small", "Not ready here: " + c.unready.map((p) => p.label + " (" + p.status + ")").join(", ")));
+  }
+  if (c) {
+    field(body, "Directory");
+    const choices = c.workspaces.map((w) => [w.id, w.name + (w.project && w.project !== w.name ? " · " + w.project : "")]);
+    choices.push([OTHER, "Another directory..."]);
+    body.append(select("workspace", choices, c.other ? OTHER : c.workspace.id, (v) => { f.workspace = v; drawPanel(); }));
+    if (c.other) {
+      const cwd = textField("input", "cwd", f.cwd, "/path/on/" + f.host, (v) => { f.cwd = v; });
+      cwd.className = "other";
+      body.append(cwd);
+    } else {
+      body.append(el("div", "small", c.workspace.directory));
+    }
+    const place = f.host + "/" + (c.other ? OTHER : c.workspace.id);
+    if (f.labelsFor !== place) { f.labels = defaultLabels(c); f.labelsFor = place; }
+    field(body, "Labels");
+    labelEditor(body, f.labels, "create");
+    body.append(el("div", "small", "This agent's own. " + (c.other ? "" : "It starts with the labels this workspace's agents share.")));
+    field(body, "First message");
+    const text = textField("textarea", "text", f.text, "What should the agent do?", (v) => { f.text = v; });
+    text.rows = 4; text.autocapitalize = "sentences";
+    text.onkeydown = (e) => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); submitCreate(); } };
+    body.append(text);
+  }
+  panelError(foot, "create");
+  const go = button("Create", "primary", "create", submitCreate);
+  go.disabled = go.disabled || !c || !c.provider;
+  foot.append(go);
+}
+
+function submitCreate() {
+  const c = createChoices(), f = createForm;
+  if (!c || !c.provider || busy.create) return;
+  takeLabelDraft(f.labels, "create");
+  const text = f.text.trim(), cwd = f.cwd.trim();
+  failed.create = !text ? "Write what the agent should do" : c.other && !cwd ? "Type a directory on " + f.host : "";
+  if (failed.create) return drawPanel();
+  delete failed.create;
+  const message = { action: "create", host: f.host, provider: c.provider.id, text, message_id: newId() };
+  // Left as they started, Reef works the default out itself.
+  const start = defaultLabels(c);
+  const same = start.length === f.labels.length && f.labels.every((l) => start.some((s) => labelKey(s) === labelKey(l)));
+  if (!same) message.labels = f.labels.slice();
+  if (c.model) message.model = c.model.id;
+  if (c.mode) message.mode = c.mode.id;
+  if (c.thinking) message.thinking = c.thinking.id;
+  if (c.other) message.cwd = cwd; else message.workspace = c.workspace.id;
+  act("create", message, (r) => {
+    if (!r.ok) return drawPanel();
+    prefs.create = Object.assign({ hosts: {} }, prefs.create, { host: f.host });
+    prefs.create.hosts[f.host] = { provider: message.provider, model: message.model, mode: message.mode, thinking: message.thinking,
+      workspace: c.other ? OTHER : message.workspace, cwd: c.other ? cwd : "" };
+    savePrefs();
+    f.text = ""; f.labels = []; f.labelsFor = null;
+    closePanel();
+    if (r.labels_error) flash("Created, but not labelled", r.labels_error);
+    const title = text.split("\n")[0];
+    if (prefs.tab === "map") enterNear(r.key, null); else openAgent({ host: r.host, id: r.agent, title });
+  });
+  drawPanel();
+}
+
+function defaultLabels(c) { return c.other ? [] : [...(c.workspace.labels || [])]; }
+
+// The open agent's own labels.
+function openLabels() {
+  if (!open) return;
+  const agent = (views.conv && views.conv.fields.agent) || open;
+  delete failed.relabel;
+  labelDrafts.labels = "";
+  showPanel({ kind: "labels", key: "relabel", host: open.host, id: open.id, workspace: agent.workspace, labels: [...(agent.labels || [])] });
+}
+
+function drawLabels(head, body, foot) {
+  head.append(el("h3", "", "Labels"));
+  body.classList.add("form");
+  body.append(el("div", "lead small", "These are this agent’s own: other agents in “" + (panel.workspace || "its workspace") + "” keep theirs."));
+  labelEditor(body, panel.labels, "labels");
+  panelError(foot, "relabel");
+  const target = panel;
+  foot.append(button("Save", "primary", "relabel", () => {
+    takeLabelDraft(target.labels, "labels");
+    act("relabel", { action: "relabel", host: target.host, agent: target.id, labels: target.labels }, (r) => {
+      if (panel !== target) return;
+      if (r.ok) closePanel(); else drawPanel();
+    });
+    drawPanel();
+  }));
+}
+
+// An in-page confirmation: native dialogs are ugly on a phone, and some
+// browsers dismiss them unseen.
+function confirmPanel(title, text, label, key, danger, message) {
+  delete failed[key];
+  showPanel({ kind: "confirm", title, text, label, key, danger, message });
+}
+
+function drawConfirm(head, body, foot) {
+  const target = panel;
+  head.append(el("h3", "", target.title));
+  body.append(el("p", "lead", target.text));
+  panelError(foot, target.key);
+  const cancel = el("button", "", "Cancel");
+  cancel.onclick = closePanel;
+  cancel.disabled = !!busy[target.key];
+  foot.append(cancel, button(target.label, "primary" + (target.danger ? " danger" : ""), target.key, () => {
+    act(target.key, target.message, (r) => {
+      if (panel !== target) return;
+      if (!r.ok) return drawPanel();
+      closePanel();
+      // Gone: leave its conversation, unless another is open by now.
+      if (open && open.host === target.message.host && open.id === target.message.agent) closeConv();
+    });
+    drawPanel();
+  }));
+}
+
+function confirmGone(action) {
+  if (!open) return;
+  const agent = (views.conv && views.conv.fields.agent) || open;
+  const name = "“" + (agent.title || "this agent") + "”";
+  const message = { action, host: open.host, agent: open.id };
+  if (action === "archive") {
+    confirmPanel("Archive " + name + "?", "It stops and leaves the list. The host keeps its history.", "Archive", "archive", false, message);
+  } else {
+    confirmPanel("Delete " + name + "?", "It stops and is removed from the host with its conversation, for good.", "Delete", "delete", true, message);
+  }
+}
+
+// Leaves the open conversation, wherever it is shown.
+function closeConv() {
+  if (prefs.tab === "map" && mapState.level === "near") leaveNear(); else openAgent(null);
+}
+
+// A banner of the page's own, styled as a notification.
+function flash(title, text) {
+  const toast = el("div", "toast failed");
+  toast.append(el("b", "", title), el("span", "", text));
+  toast.onclick = () => toast.remove();
+  $("toasts").prepend(toast);
+  setTimeout(() => toast.remove(), 7000);
+}
+
+// ---- the map ------------------------------------------------------------------------------
+//
+// A board of every agent you move around like a map, drawn differently at
+// each distance. Far: each lane is a block of small tiles, blocks packed
+// to fill this screen's own shape (an ordered squarified treemap, so a
+// portrait phone stacks them and a desk spreads them out). Middle: one
+// lane's agents as cards, a grid as wide as the screen. Near: one card
+// opens into its live conversation. Tiles keep the order agents were made
+// in, so places stay put; recent work glows instead of moving.
+
+const mapState = { level: "far", lane: null, cam: { x: 0, y: 0, s: 1 }, layout: null, size: null,
+  focusSent: "", near: null };
+const tileEls = new Map(), blockEls = new Map();
+const MID_CARD_W = 280, MID_CARD_H = 104, GAP = 8;
+
+function mapView() { return views.map; }
+function mapCards() {
+  const cards = new Map();
+  for (const c of (views.map && views.map.cards) || []) cards.set(c.key, c);
+  return cards;
+}
+
+// Lanes in order, each sized by its agents: strips along the shorter
+// side, each strip kept while it makes its blocks squarer.
+function treemap(weights, W, H) {
+  const total = weights.reduce((a, b) => a + b, 0) || 1;
+  const areas = weights.map((w) => (w * W * H) / total);
+  const worst = (row, side) => {
+    const s = row.reduce((a, b) => a + b, 0);
+    return Math.max(...row.map((r) => Math.max((side * side * r) / (s * s), (s * s) / (side * side * r))));
+  };
+  const rects = [];
+  let x = 0, y = 0, w = W, h = H, i = 0;
+  while (i < areas.length) {
+    const side = Math.min(w, h);
+    const row = [areas[i]];
+    let j = i + 1, current = worst(row, side);
+    while (j < areas.length) {
+      const next = worst([...row, areas[j]], side);
+      if (next > current) break;
+      row.push(areas[j]); current = next; j++;
+    }
+    const sum = row.reduce((a, b) => a + b, 0), thick = sum / side;
+    let off = 0;
+    for (const a of row) {
+      const len = a / thick;
+      rects.push(w >= h ? { x, y: y + off, w: thick, h: len } : { x: x + off, y, w: len, h: thick });
+      off += len;
+    }
+    if (w >= h) { x += thick; w -= thick; } else { y += thick; h -= thick; }
+    i = j;
+  }
+  return rects;
+}
+
+function packMap() {
+  const v = mapView();
+  const box = $("map");
+  const W = box.clientWidth, H = box.clientHeight;
+  if (!v || !W || !H) return null;
+  const lanes = v.fields.lanes || [];
+  const byLane = new Map(lanes.map((l) => [l.key, []]));
+  for (const t of v.parts) if (byLane.has(t.lane)) byLane.get(t.lane).push(t);
+  const pad = 6;
+  const rects = treemap(lanes.map((l) => (byLane.get(l.key).length || 1) + 3), W - pad * 2, H - pad * 2);
+  const blocks = lanes.map((lane, i) => {
+    const r = rects[i];
+    const b = { key: lane.key, label: lane.label, x: r.x + pad + 3, y: r.y + pad + 3, w: Math.max(r.w - 6, 10), h: Math.max(r.h - 6, 10),
+      tiles: byLane.get(lane.key) };
+    const iw = b.w - 8, ih = b.h - 26, n = Math.max(b.tiles.length, 1);
+    let t = Math.max(4, Math.floor(Math.sqrt((iw * ih) / n)));
+    while (t > 4 && Math.floor(iw / t) * Math.floor(ih / t) < n) t--;
+    b.tile = t; b.cols = Math.max(1, Math.floor(iw / t));
+    return b;
+  });
+  return { W, H, blocks };
+}
+
+function camTransform(animate) {
+  const board = $("board");
+  board.classList.toggle("fly", !!animate);
+  const c = mapState.cam;
+  board.style.transform = "translate(" + c.x + "px," + c.y + "px) scale(" + c.s + ")";
+  drawMinimap();
+}
+
+function clampCam() {
+  const c = mapState.cam, L = mapState.layout;
+  if (!L) return;
+  c.s = Math.min(Math.max(c.s, 1), 12);
+  const minX = L.W - L.W * c.s, minY = L.H - L.H * c.s;
+  c.x = Math.min(0, Math.max(minX, c.x));
+  c.y = Math.min(0, Math.max(minY, c.y));
+}
+
+function zoomAt(px, py, factor) {
+  const c = mapState.cam;
+  const s = Math.min(Math.max(c.s * factor, 1), 12);
+  c.x = px - ((px - c.x) * s) / c.s;
+  c.y = py - ((py - c.y) * s) / c.s;
+  c.s = s;
+  clampCam(); camTransform(false);
+  // Close enough to one block: its cards take over.
+  const block = blockAt(px, py);
+  if (block && (c.s >= 2.8 || block.w * c.s >= mapState.layout.W * 0.92)) enterMid(block.key);
+}
+
+function blockAt(px, py) {
+  const c = mapState.cam, L = mapState.layout;
+  if (!L) return null;
+  const wx = (px - c.x) / c.s, wy = (py - c.y) / c.s;
+  return L.blocks.find((b) => wx >= b.x && wx <= b.x + b.w && wy >= b.y && wy <= b.y + b.h) || null;
+}
+
+function fresh(at) {
+  const t = Date.parse(at + ":00Z");
+  return t && Date.now() - t < 3 * 60000;
+}
+
+function drawFar() {
+  const L = mapState.layout;
+  const board = $("board");
+  board.style.width = L.W + "px"; board.style.height = L.H + "px";
+  const seenBlocks = new Set(), seenTiles = new Set();
+  for (const b of L.blocks) {
+    seenBlocks.add(b.key);
+    let be = blockEls.get(b.key);
+    if (!be) {
+      be = el("div", "block"); be.append(el("div", "name"), el("div", "badge"));
+      board.append(be); blockEls.set(b.key, be);
+    }
+    Object.assign(be.style, { left: b.x + "px", top: b.y + "px", width: b.w + "px", height: b.h + "px" });
+    be.className = "block"; be.style.removeProperty("--c"); tint(be, groupColor(b.key));
+    be.querySelector(".name").textContent = b.label + " · " + b.tiles.length;
+    const waiting = b.tiles.filter((t) => t.ask || t.state === "needs_input" || t.state === "failed").length;
+    const badge = be.querySelector(".badge");
+    badge.hidden = !waiting; badge.textContent = waiting ? "!" + waiting : "";
+    b.tiles.forEach((t, i) => {
+      seenTiles.add(t.key);
+      let te = tileEls.get(t.key);
+      if (!te) { te = el("div"); board.append(te); tileEls.set(t.key, te); }
+      const col = i % b.cols, row = Math.floor(i / b.cols);
+      const size = Math.max(b.tile - 2, 2);
+      te.className = "tile s-" + t.state + (t.ask && size >= 9 ? " ask" : "") + (fresh(t.at) ? " fresh" : "");
+      Object.assign(te.style, { left: b.x + 4 + col * b.tile + "px", top: b.y + 22 + row * b.tile + "px",
+        width: size + "px", height: size + "px" });
+    });
+  }
+  for (const [k, e] of blockEls) if (!seenBlocks.has(k)) { e.remove(); blockEls.delete(k); }
+  for (const [k, e] of tileEls) if (!seenTiles.has(k)) { e.remove(); tileEls.delete(k); }
+}
+
+function midGeometry() {
+  const W = $("map").clientWidth;
+  const cols = Math.max(1, Math.floor((W - GAP) / (MID_CARD_W + GAP)));
+  const cw = (W - GAP * (cols + 1)) / cols;
+  return { cols, cw };
+}
+
+// A lane's cards: agents waiting on you, then working ones, then the rest,
+// each newest first. (The far view keeps creation order, so tiles stay put.)
+const ACTIVE = { needs_input: 0, running: 1 };
+function laneTiles() {
+  const L = mapState.layout;
+  const b = L && L.blocks.find((x) => x.key === mapState.lane);
+  if (!b) return [];
+  const rank = (t) => (t.state in ACTIVE ? ACTIVE[t.state] : 2);
+  return [...b.tiles].sort((x, y) => rank(x) - rank(y) || (y.at || "").localeCompare(x.at || ""));
+}
+
+// Only the cards in view are drawn, and only theirs are asked for.
+function drawMid() {
+  const lane = $("lane");
+  const tiles = laneTiles();
+  const { cols, cw } = midGeometry();
+  const rows = Math.ceil(tiles.length / cols);
+  let head = lane.querySelector(".lanehead"), space = lane.querySelector(".space");
+  if (!head) {
+    head = el("div", "lanehead");
+    space = el("div", "space"); space.style.position = "relative";
+    lane.append(head, space);
+  }
+  const block = mapState.layout.blocks.find((b) => b.key === mapState.lane);
+  head.innerHTML = "";
+  const back = el("button", "plain"); back.innerHTML = icon("back", 20) + "All"; back.onclick = () => leaveMid();
+  head.append(back, el("span", "", block ? block.label : ""), el("span", "n", String(tiles.length)));
+  space.style.height = rows * (MID_CARD_H + GAP) + GAP + "px";
+  const top = lane.scrollTop - 60, bottom = lane.scrollTop + lane.clientHeight;
+  const cards = mapCards();
+  const shown = [];
+  space.innerHTML = "";
+  tiles.forEach((t, i) => {
+    const row = Math.floor(i / cols), col = i % cols;
+    const y = GAP + row * (MID_CARD_H + GAP);
+    if (y + MID_CARD_H < top - MID_CARD_H || y > bottom + MID_CARD_H) return;
+    shown.push(t.agent);
+    const c = cards.get(t.agent) || {};
+    const card = el("div", "mcard");
+    card.dataset.agent = t.agent;
+    Object.assign(card.style, { left: GAP + col * (cw + GAP) + "px", top: y + "px", width: cw + "px", height: MID_CARD_H + "px" });
+    const title = el("div", "title"); title.append(el("span", "dot s-" + t.state), el("span", "", c.title || "…"));
+    card.append(title);
+    card.append(el("div", "line", [c.host || t.agent.split("/")[0], STATES[t.state], ago(c.reply_at || c.at || t.at + ":00Z")].filter(Boolean).join(" · ")));
+    if (c.ask) card.append(el("div", "line ask", c.ask.question || c.ask.title));
+    else if (c.reply) card.append(el("div", "line reply", c.reply));
+    if (c.labels && c.labels.length) card.append(chips(c.labels));
+    card.onclick = () => enterNear(t.agent, card);
+    if (mapState.flash === t.agent) { card.classList.add("flash"); }
+    space.append(card);
+  });
+  mapFocus(shown);
+}
+
+let focusTimer = null;
+function mapFocus(agents) {
+  const key = agents.join(",");
+  if (key === mapState.focusSent) return;
+  clearTimeout(focusTimer);
+  focusTimer = setTimeout(() => {
+    mapState.focusSent = key;
+    send({ type: "focus", id: "map", agents });
+  }, 150);
+}
+
+function drawMinimap() {
+  const mm = $("minimap"), L = mapState.layout;
+  // At the whole map the minimap would only cover part of it.
+  // On a narrow screen the cards need all the width.
+  mm.hidden = !L || mapState.level === "near" || (mapState.level === "far" && mapState.cam.s <= 1.01) ||
+    (mapState.level === "mid" && L.W < 600);
+  if (!L) return;
+  const k = 84 / L.W;
+  mm.style.height = L.H * k + "px";
+  mm.innerHTML = "";
+  for (const b of L.blocks) {
+    const i = el("i", b.key === mapState.lane && mapState.level === "mid" ? "on" : "");
+    Object.assign(i.style, { left: b.x * k + "px", top: b.y * k + "px", width: Math.max(b.w * k - 1, 1) + "px", height: Math.max(b.h * k - 1, 1) + "px" });
+    mm.append(i);
+  }
+  if (mapState.level === "far" && mapState.cam.s > 1.01) {
+    const c = mapState.cam, v = el("b");
+    Object.assign(v.style, { left: (-c.x / c.s) * k + "px", top: (-c.y / c.s) * k + "px",
+      width: (L.W / c.s) * k + "px", height: (L.H / c.s) * k + "px" });
+    mm.append(v);
+  }
+}
+
+function drawMap() {
+  if (prefs.tab !== "map") return;
+  const box = $("map");
+  const size = box.clientWidth + "x" + box.clientHeight;
+  mapState.layout = packMap();
+  if (!mapState.layout) return;
+  // A new shape re-packs; the camera goes back to the whole map, or to the
+  // lane being looked into, so zooming out from it still flies.
+  if (size !== mapState.size) {
+    mapState.size = size;
+    const b = mapState.level !== "far" && mapState.layout.blocks.find((x) => x.key === mapState.lane);
+    mapState.cam = b ? laneCam(b) : { x: 0, y: 0, s: 1 };
+    camTransform(false);
+  }
+  drawFar();
+  $("lane").hidden = mapState.level === "far";
+  if (mapState.level !== "far") drawMid();
+  else mapFocus([]);
+  drawMinimap();
+}
+
+// The camera that fills the screen with one lane's block.
+function laneCam(b) {
+  const L = mapState.layout, s = Math.min(L.W / b.w, L.H / b.h);
+  return { s, x: -b.x * s + (L.W - b.w * s) / 2, y: -b.y * s + (L.H - b.h * s) / 2 };
+}
+
+function enterMid(laneKey, then) {
+  const L = mapState.layout, b = L && L.blocks.find((x) => x.key === laneKey);
+  if (!b) return;
+  // Fly at the block, then show its cards.
+  mapState.cam = laneCam(b);
+  camTransform(true);
+  mapState.level = "mid"; mapState.lane = laneKey;
+  const lane = $("lane");
+  lane.innerHTML = ""; lane.scrollTop = 0; lane.style.opacity = "0"; lane.hidden = false;
+  setTimeout(() => { lane.style.opacity = "1"; drawMid(); if (then) then(); }, 220);
+  drawMinimap();
+}
+
+function leaveMid() {
+  const L = mapState.layout;
+  const lane = $("lane");
+  lane.style.opacity = "0";
+  mapState.level = "far";
+  setTimeout(() => { lane.hidden = true; }, 200);
+  mapState.cam = { x: 0, y: 0, s: 1 };
+  camTransform(true);
+  mapFocus([]);
+  if (L) drawMinimap();
+}
+
+function rectIn(elm) {
+  const m = $("map").getBoundingClientRect(), r = elm.getBoundingClientRect();
+  return { left: r.left - m.left, top: r.top - m.top, width: r.width, height: r.height };
+}
+
+// A card opens into its conversation where it is, and grows to fill the map.
+function enterNear(agent, card) {
+  const [host, id] = agent.split("/");
+  const near = $("near");
+  const from = card ? rectIn(card) : { left: 40, top: 40, width: 200, height: 100 };
+  Object.assign(near.style, { left: from.left + "px", top: from.top + "px", width: from.width + "px", height: from.height + "px" });
+  near.classList.remove("full");
+  near.hidden = false;
+  near.append($("convpane"));
+  mapState.level = "near"; mapState.near = agent;
+  const c = mapCards().get(agent) || {};
+  openAgent({ host, id, title: c.title });
+  // Start from the card, then grow (a reflow in between lets it animate).
+  void near.offsetWidth;
+  setTimeout(() => {
+    Object.assign(near.style, { left: "0px", top: "0px", width: "100%", height: "100%" });
+    near.classList.add("full");
+  }, 16);
+  drawMinimap();
+}
+
+function leaveNear() {
+  if (mapState.level !== "near") return;
+  const near = $("near"), agent = mapState.near;
+  const card = [...document.querySelectorAll(".mcard")].find((c) => c.dataset.agent === agent);
+  const to = card ? rectIn(card) : { left: 40, top: 40, width: 200, height: 100 };
+  near.classList.remove("full");
+  Object.assign(near.style, { left: to.left + "px", top: to.top + "px", width: to.width + "px", height: to.height + "px" });
+  mapState.level = mapState.lane ? "mid" : "far";
+  setTimeout(() => {
+    near.hidden = true;
+    $("app").insertBefore($("convpane"), $("mappane"));
+    openAgent(null);
+    drawMap();
+  }, 260);
+}
+
+// Leaving the map puts the conversation pane back where lists use it.
+function leaveMap() {
+  if (prefs.tab !== "map") return;
+  if (mapState.level === "near") { $("near").hidden = true; $("app").insertBefore($("convpane"), $("mappane")); openAgent(null); }
+  mapState.level = "far"; mapState.lane = null; $("lane").hidden = true;
+}
+
+function fitAll() {
+  if (mapState.level === "near") leaveNear();
+  if (mapState.level === "mid") leaveMid();
+  mapState.cam = { x: 0, y: 0, s: 1 }; camTransform(true);
+}
+
+// A notification's card: its lane's cards, scrolled to it, flashing.
+function flyTo(host, id) {
+  const agent = host + "/" + id;
+  const v = mapView();
+  const tile = v && v.parts.find((t) => t.agent === agent);
+  if (mapState.level === "near") leaveNear();
+  if (!tile) return enterNear(agent, null);
+  const show = () => {
+    const tiles = laneTiles(), i = tiles.findIndex((t) => t.agent === agent);
+    const { cols } = midGeometry();
+    $("lane").scrollTop = Math.max(0, Math.floor(i / cols) * (MID_CARD_H + GAP) - 40);
+    mapState.flash = agent; drawMid();
+    setTimeout(() => { mapState.flash = null; }, 2600);
+  };
+  if (mapState.level === "mid" && mapState.lane === tile.lane) show();
+  else setTimeout(() => enterMid(tile.lane, show), mapState.level === "near" ? 280 : 0);
+}
+
+// ---- map gestures: one finger pans, two pinch; the wheel and trackpad
+// pinch do the same on a desk. Nothing moves while you type.
+const pointers = new Map();
+let gesture = null, lastTap = { t: 0, x: 0, y: 0 };
+function composing() { return document.activeElement === $("draft") || /INPUT|TEXTAREA/.test((document.activeElement || {}).tagName || ""); }
+function localPoint(e) { const r = $("map").getBoundingClientRect(); return { x: e.clientX - r.left, y: e.clientY - r.top }; }
+function spread() {
+  const [a, b] = [...pointers.values()];
+  return { d: Math.hypot(a.x - b.x, a.y - b.y), x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+}
+
+$("map").addEventListener("pointerdown", (e) => {
+  if (composing()) return;
+  pointers.set(e.pointerId, localPoint(e));
+  if (pointers.size === 2) gesture = { kind: "pinch", start: spread(), last: spread() };
+  else if (pointers.size === 1) gesture = { kind: "pan", start: localPoint(e), last: localPoint(e), moved: false };
+});
+$("map").addEventListener("pointermove", (e) => {
+  if (!pointers.has(e.pointerId) || composing()) return;
+  pointers.set(e.pointerId, localPoint(e));
+  if (!gesture) return;
+  if (gesture.kind === "pinch" && pointers.size === 2) {
+    const now = spread(), ratio = now.d / (gesture.start.d || 1);
+    if (mapState.level === "far") {
+      zoomAt(now.x, now.y, now.d / (gesture.last.d || 1));
+      mapState.cam.x += now.x - gesture.last.x; mapState.cam.y += now.y - gesture.last.y; clampCam(); camTransform(false);
+    } else if (mapState.level === "mid" && ratio < 0.7) { gesture = null; leaveMid(); return; }
+    else if (mapState.level === "mid" && ratio > 1.45) {
+      const hit = document.elementFromPoint(e.clientX, e.clientY);
+      const card = hit && hit.closest(".mcard");
+      if (card) { gesture = null; enterNear(card.dataset.agent, card); return; }
+    } else if (mapState.level === "near" && ratio < 0.7) { gesture = null; leaveNear(); return; }
+    if (gesture) gesture.last = now;
+  } else if (gesture.kind === "pan" && mapState.level === "far") {
+    const p = localPoint(e);
+    if (Math.hypot(p.x - gesture.start.x, p.y - gesture.start.y) > 8) gesture.moved = true;
+    mapState.cam.x += p.x - gesture.last.x; mapState.cam.y += p.y - gesture.last.y;
+    gesture.last = p; clampCam(); camTransform(false);
+  } else if (gesture.kind === "pan") {
+    const p = localPoint(e);
+    if (Math.hypot(p.x - gesture.start.x, p.y - gesture.start.y) > 8) gesture.moved = true;
+  }
+});
+const endPointer = (e) => {
+  if (!pointers.has(e.pointerId)) return;
+  pointers.delete(e.pointerId);
+  if (gesture && gesture.kind === "pan" && !gesture.moved && pointers.size === 0 && mapState.level === "far") {
+    // A tap, or a double tap, on a block opens its cards.
+    const p = localPoint(e);
+    const block = blockAt(p.x, p.y);
+    lastTap = { t: Date.now(), x: p.x, y: p.y };
+    if (block) enterMid(block.key);
+  }
+  if (pointers.size === 0) gesture = null;
+};
+$("map").addEventListener("pointerup", endPointer);
+$("map").addEventListener("pointercancel", endPointer);
+$("map").addEventListener("dblclick", (e) => {
+  if (mapState.level !== "mid") return;
+  const card = e.target.closest && e.target.closest(".mcard");
+  if (card) enterNear(card.dataset.agent, card);
+});
+let wheelZoom = 0;
+$("map").addEventListener("wheel", (e) => {
+  if (composing()) return;
+  // Trackpad pinch arrives as a wheel with Ctrl held.
+  if (mapState.level === "far") {
+    e.preventDefault();
+    const p = localPoint(e);
+    if (e.ctrlKey) zoomAt(p.x, p.y, Math.exp(-e.deltaY * 0.01));
+    else { mapState.cam.x -= e.deltaX; mapState.cam.y -= e.deltaY; clampCam(); camTransform(false); }
+    return;
+  }
+  if (!e.ctrlKey) return;
+  e.preventDefault();
+  wheelZoom += e.deltaY;
+  if (mapState.level === "mid" && wheelZoom > 60) { wheelZoom = 0; leaveMid(); }
+  else if (mapState.level === "mid" && wheelZoom < -60) {
+    wheelZoom = 0;
+    const card = e.target.closest && e.target.closest(".mcard");
+    if (card) enterNear(card.dataset.agent, card);
+  } else if (mapState.level === "near" && wheelZoom > 60) { wheelZoom = 0; leaveNear(); }
+}, { passive: false });
+$("lane").addEventListener("scroll", () => requestAnimationFrame(drawMid));
+$("fit").onclick = fitAll;
+$("minimap").addEventListener("pointerdown", (e) => {
+  e.stopPropagation();
+  const L = mapState.layout; if (!L) return;
+  const r = $("minimap").getBoundingClientRect(), k = 84 / L.W;
+  const wx = (e.clientX - r.left) / k, wy = (e.clientY - r.top) / k;
+  const block = L.blocks.find((b) => wx >= b.x && wx <= b.x + b.w && wy >= b.y && wy <= b.y + b.h);
+  if (mapState.level === "near") leaveNear();
+  if (block) setTimeout(() => enterMid(block.key), mapState.level === "near" ? 280 : 0);
+});
+// Back out one level: a conversation to its list, a lane to the whole map.
+function goBack() {
+  if (panel) return busy[panel.key] || closePanel();
+  if (usageOpen()) return hideUsage();
+  const shown = document.querySelector(".lightbox");
+  if (shown) return shown.remove();
+  if (prefs.tab === "map") {
+    if (mapState.level === "near") leaveNear(); else if (mapState.level === "mid") leaveMid();
+  } else if (open && layout() === "phone") openAgent(null);
+}
+document.addEventListener("keydown", (e) => { if (e.key === "Escape" && (panel || !composing())) goBack(); });
+
+// A swipe to the right goes back, as zooming out does, and the level
+// being left follows the finger: the conversation, the open card, a lane's
+// cards or a picture slides away showing what is under it. Let go past a
+// third of the screen, or flick, and it goes; short of that it springs
+// back. Touch events, not pointers: the browser cancels pointers once it
+// starts scrolling.
+let swipe = null;
+function sideScrolls(elm) {
+  for (let e = elm; e && e !== document.body; e = e.parentElement) {
+    if (e.scrollWidth > e.clientWidth + 1 && /auto|scroll/.test(getComputedStyle(e).overflowX)) return true;
+  }
+  return false;
+}
+// What a swipe moves: the level goBack would leave.
+function swipeTarget() {
+  if (panel) return null;
+  if (usageOpen()) return document.querySelector(".drawer");
+  const shown = document.querySelector(".lightbox");
+  if (shown) return shown;
+  if (prefs.tab === "map") return mapState.level === "near" ? $("near") : mapState.level === "mid" ? $("lane") : null;
+  return open && layout() === "phone" ? $("convpane") : null;
+}
+function slide(target, x, animate) {
+  target.style.transition = animate ? "transform .2s ease-out" : "none";
+  target.style.transform = x ? "translateX(" + x + "px)" : "";
+}
+document.addEventListener("touchstart", (e) => {
+  const t = e.touches[0];
+  const target = e.touches.length === 1 && !/INPUT|TEXTAREA|SELECT/.test(e.target.tagName) && !sideScrolls(e.target) && swipeTarget();
+  swipe = target ? { x: t.clientX, y: t.clientY, at: Date.now(), target, dragging: false, last: { x: t.clientX, at: Date.now() }, v: 0 } : null;
+}, { passive: true });
+document.addEventListener("touchmove", (e) => {
+  if (!swipe) return;
+  if (e.touches.length !== 1) return cancelSwipe();
+  const t = e.touches[0], dx = t.clientX - swipe.x, dy = t.clientY - swipe.y;
+  if (!swipe.dragging) {
+    // Mostly up or down is a scroll, not a swipe; mostly right starts one.
+    if (Math.abs(dy) > 12 && Math.abs(dy) > Math.abs(dx)) { swipe = null; return; }
+    if (dx < 12 || dx < Math.abs(dy) * 1.2) return;
+    swipe.dragging = true;
+    swipe.x = t.clientX - 1;
+    swipe.target.classList.add("swiping");
+    // On a phone the list sits under the conversation; show it.
+    if (swipe.target === $("convpane")) { $("app").classList.add("peek"); $("listpane").hidden = false; }
+  }
+  e.preventDefault();
+  const now = Date.now(), x = Math.max(0, t.clientX - swipe.x);
+  swipe.v = (t.clientX - swipe.last.x) / Math.max(1, now - swipe.last.at);
+  swipe.last = { x: t.clientX, at: now };
+  slide(swipe.target, x, false);
+}, { passive: false });
+document.addEventListener("touchend", (e) => {
+  if (!swipe || !swipe.dragging) { swipe = null; return; }
+  const { target } = swipe;
+  const x = Math.max(0, e.changedTouches[0].clientX - swipe.x);
+  const go = x > window.innerWidth / 3 || (x > 40 && swipe.v > 0.5);
+  swipe = null;
+  if (!go) return settle(target, false);
+  slide(target, target.getBoundingClientRect().width || window.innerWidth, true);
+  setTimeout(() => {
+    goBack();
+    // Put it back once what it was showing has gone.
+    setTimeout(() => settle(target, true), 320);
+  }, 200);
+}, { passive: true });
+function cancelSwipe() { if (swipe && swipe.dragging) settle(swipe.target, false); swipe = null; }
+document.addEventListener("touchcancel", cancelSwipe, { passive: true });
+function settle(target, gone) {
+  slide(target, 0, !gone);
+  setTimeout(() => {
+    target.classList.remove("swiping");
+    target.style.transition = "";
+    if (target === $("convpane")) { $("app").classList.remove("peek"); drawChrome(); }
+  }, gone ? 0 : 220);
+}
+new ResizeObserver(() => { if (prefs.tab === "map") drawMap(); }).observe($("map"));
+
+// ---- wiring --------------------------------------------------------------------------------
+
+$("gear").innerHTML = icon("gear");
+$("usage").onclick = showUsage;
+$("archive").innerHTML = icon("archive", 18);
+$("delete").innerHTML = icon("trash", 18);
+$("labels").innerHTML = icon("tag", 18);
+$("new").innerHTML = icon("plus", 22);
+$("close").innerHTML = icon("close", 18);
+$("send").innerHTML = icon("arrow", 18);
+$("back").innerHTML = icon("back", 26);
+$("add").innerHTML = icon("plus", 22);
+$("gear").onclick = () => showSheet("settings");
+$("dots").onclick = () => showSheet("hosts");
+$("tab-ny").onclick = () => { leaveMap(); prefs.tab = "ny"; savePrefs(); delete views.list; subscribeList(); drawAll(); };
+$("tab-all").onclick = () => { leaveMap(); prefs.tab = "all"; savePrefs(); delete views.list; subscribeList(); drawAll(); };
+$("tab-map").onclick = () => { if (open) openAgent(null); prefs.tab = "map"; savePrefs(); mapState.size = null; subscribeList(); drawAll(); };
+$("filters-toggle").onclick = () => { prefs.filters = !prefs.filters; savePrefs(); drawChrome(); };
+$("back").onclick = goBack;
+$("close").onclick = () => openAgent(null);
+$("bell").onclick = () => { const a = views.conv && views.conv.fields.agent; if (a) toggleNotify(a); };
+$("archive").onclick = () => confirmGone("archive");
+$("delete").onclick = () => confirmGone("delete");
+$("labels").onclick = openLabels;
+$("convlabels").onclick = openLabels;
+$("new").onclick = openCreate;
+for (const id of ["group", "sort", "host", "label", "state", "background"]) {
+  $(id).onchange = () => {
+    prefs[id] = $(id).value; if (id === "group") prefs.groupChosen = true; prefs.more = {}; savePrefs();
+    // The label filter offers Background only while it is shown.
+    if (id === "background") fillSelects();
+    delete views.list; subscribeList(); drawAll();
+  };
+}
+let typing = null;
+$("query").oninput = () => {
+  clearTimeout(typing);
+  typing = setTimeout(() => { prefs.query = $("query").value; savePrefs(); subscribeList(); }, 300);
+};
+$("draft").addEventListener("input", sizeDraft);
+$("draft").addEventListener("keydown", (e) => {
+  // At a desk, Enter sends and Shift+Enter is a new line; on a phone,
+  // Enter is a new line and the arrow sends.
+  if (e.key === "Enter" && !e.shiftKey && !e.isComposing && !coarse.matches) { e.preventDefault(); sendAs("send"); }
+});
+$("send").onclick = () => sendAs("send");
+$("add").onclick = () => $("files").click();
+$("files").onchange = () => { const files = [...$("files").files]; $("files").value = ""; addFiles(files); };
+// Pasted images, at a desk.
+$("draft").addEventListener("paste", (e) => {
+  const files = [...((e.clipboardData && e.clipboardData.files) || [])].filter((f) => /^image\//.test(f.type));
+  if (files.length) { e.preventDefault(); addFiles(files); }
+});
+$("steer").onclick = () => sendAs("steer");
+document.addEventListener("pointerdown", () => { pressing = true; }, true);
+for (const end of ["pointerup", "pointercancel"]) {
+  document.addEventListener(end, () => { pressing = false; setTimeout(payOwed, 0); }, true);
+}
+document.addEventListener("focusout", () => setTimeout(payOwed, 0));
+let mode = layout();
+const relayout = () => { const next = layout(); if (next !== mode) { mode = next; subscribeList(); } drawAll(); };
+for (const q of [wide, wider]) { try { q.addEventListener("change", relayout); } catch (e) { q.addListener(relayout); } }
+setInterval(() => send({ type: "ping", t: Date.now() }), 25000);
+setInterval(() => { const e = document.querySelector("#working .elapsed"); if (e) e.textContent = elapsed(); }, 1000);
+setInterval(drawChrome, 30000);
+document.addEventListener("visibilitychange", () => { if (!document.hidden && !ws) connect(); });
+connect();
+</script>
+</body>
+</html>

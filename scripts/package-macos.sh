@@ -12,7 +12,7 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 binary="${1:-$root/target/release/crusteo}"
 out_dir="${2:-$root/dist}"
 
-version="$(awk -F'"' '/^\[package\]/{p=1;next} /^\[/{p=0} p && /^version *=/{print $2; exit}' "$root/Cargo.toml")"
+version="$(awk -F'"' '/^\[(workspace\.)?package\]/{p=1;next} /^\[/{p=0} p && /^version *=/{print $2; exit}' "$root/Cargo.toml")"
 [ -n "$version" ] || { echo "error: could not read version from Cargo.toml" >&2; exit 1; }
 [ -f "$binary" ] || { echo "error: binary not found: $binary" >&2; exit 1; }
 # macOS wants a numeric bundle version: 0.1.0-alpha.1 is 0.1.0 there; the zip keeps the full one.

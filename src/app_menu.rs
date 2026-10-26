@@ -98,7 +98,7 @@ pub fn set_menus(commands: &[crate::extensions::Command], cx: &mut App) {
         ]),
         Menu::new("File").items([
             MenuItem::action("New Workspace", NewWorkspace),
-            MenuItem::action("New Agent Tab", NewAgentTab),
+            MenuItem::action("New Agent", NewAgentTab),
             MenuItem::action("New Terminal", NewTerminal),
         ]),
         Menu::new("Edit").items([

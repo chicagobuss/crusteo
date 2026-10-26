@@ -1,5 +1,6 @@
 //! A terminal tab: the cell grid for one daemon PTY.
 
+use fleet::HostId;
 use std::cell::Cell;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
@@ -50,7 +51,7 @@ struct Metrics {
 
 pub struct TerminalView {
     core: Core,
-    host: String,
+    host: HostId,
     terminal_id: String,
     session: Entity<TerminalSession>,
     focus: FocusHandle,
@@ -75,7 +76,7 @@ const BLINK: Duration = Duration::from_millis(800);
 impl TerminalView {
     pub fn new(
         core: Core,
-        host: &str,
+        host: &HostId,
         terminal_id: &str,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -92,7 +93,7 @@ impl TerminalView {
         focus.focus(window, cx);
         Self {
             core,
-            host: host.to_string(),
+            host: host.clone(),
             terminal_id: terminal_id.to_string(),
             session,
             focus,

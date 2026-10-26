@@ -1,0 +1,31 @@
+// Thinking and model changes, and steers into a running turn.
+{"dir":"in","frame":{"type":"get_state"}}
+{"dir":"out","frame":{"id":"$REQ","type":"response","command":"get_state","success":true,"data":{"model":{"provider":"google","id":"gemini-2.5-flash-lite","input":["text"]},"thinkingLevel":"off","isStreaming":false,"sessionId":"sess-1","messageCount":0,"pendingMessageCount":0}}}
+{"cmd":{"thinking":"high"}}
+{"dir":"in","frame":{"type":"set_thinking_level","level":"high"}}
+{"dir":"out","frame":{"type":"thinking_level_changed","level":"high"}}
+{"dir":"out","frame":{"id":"$REQ","type":"response","command":"set_thinking_level","success":true}}
+// Not one of pi's levels: Paseo asks for medium.
+{"cmd":{"thinking":"ultracode"}}
+{"dir":"in","frame":{"type":"set_thinking_level","level":"medium"}}
+{"dir":"out","frame":{"id":"$REQ","type":"response","command":"set_thinking_level","success":true}}
+{"cmd":{"model":"doubleword/deepseek-ai/DeepSeek-V4-Pro"}}
+{"dir":"in","frame":{"type":"set_model","provider":"doubleword","modelId":"deepseek-ai/DeepSeek-V4-Pro"}}
+{"dir":"out","frame":{"id":"$REQ","type":"response","command":"set_model","success":false,"error":"Model not found: doubleword/deepseek-ai/DeepSeek-V4-Pro"}}
+{"cmd":{"prompt":{"turn":"foreground-turn-1","text":"Start"}}}
+{"dir":"in","frame":{"type":"prompt","message":"Start"}}
+{"dir":"out","frame":{"id":"$REQ","type":"response","command":"prompt","success":true,"data":{"disposition":"started"}}}
+{"dir":"out","frame":{"type":"agent_start"}}
+{"cmd":{"steer":"also this"}}
+{"dir":"in","frame":{"type":"steer","message":"also this"}}
+{"dir":"out","frame":{"id":"$REQ","type":"response","command":"steer","success":true,"data":{"disposition":"queued"}}}
+// pi takes extension commands only as prompts.
+{"cmd":{"steer":"/compact"}}
+{"dir":"in","frame":{"type":"prompt","message":"/compact","streamingBehavior":"steer"}}
+{"dir":"out","frame":{"id":"$REQ","type":"response","command":"prompt","success":true,"data":{"disposition":"handled"}}}
+{"dir":"out","frame":{"type":"compaction_start","reason":"manual"}}
+{"dir":"out","frame":{"type":"compaction_end","reason":"manual"}}
+{"dir":"out","frame":{"type":"agent_end","messages":[{"role":"assistant","content":[{"type":"text","text":"ok"}],"stopReason":"stop"}],"willRetry":false}}
+{"dir":"out","frame":{"type":"agent_settled"}}
+{"dir":"in","frame":{"type":"get_session_stats"}}
+{"dir":"out","frame":{"id":"$REQ","type":"response","command":"get_session_stats","success":false,"error":"Unknown command: get_session_stats"}}

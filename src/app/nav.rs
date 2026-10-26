@@ -5,17 +5,28 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
-use fleet::Fleet;
 use fleet::lanes::{LabelLaneMode, LaneGrouping};
 use fleet::sidebar::{Filters, Grouping};
+use fleet::{Fleet, HostId};
 use gpui_kit::gpui::{Context, EventEmitter};
 
 use crate::app::config::{self, UiState};
 use crate::app::notifications;
 
 pub const LANE_WIDTH_DEFAULT: f32 = 360.;
-pub const LANE_WIDTH_MIN: f32 = 200.;
-pub const LANE_WIDTH_MAX: f32 = 600.;
+/// The narrowest and widest a layout's columns can be set, in every
+/// layout of columns.
+pub const COLUMN_WIDTH_MIN: f32 = 200.;
+pub const COLUMN_WIDTH_MAX: f32 = 600.;
+
+/// A layout's column width until the user picks one.
+pub fn column_width_default(layout: &str) -> f32 {
+    match layout {
+        "fleet" => 300.,
+        "board" => 280.,
+        _ => LANE_WIDTH_DEFAULT,
+    }
+}
 /// Seconds a card opened from a notification blinks, until changed.
 pub const NOTIFICATION_FLASH_DEFAULT: u8 = 4;
 /// The choices Settings offers for it, 0 being off.
@@ -38,8 +49,6 @@ pub fn parse_hex(hex: &str) -> Option<u32> {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Tab {
     Agent(String),
-    /// A not-yet-created agent; the id is local.
-    Draft(String),
     /// A daemon PTY, keyed by terminal id.
     Terminal(String),
 }
@@ -48,16 +57,16 @@ impl Tab {
     pub fn key(&self) -> String {
         match self {
             Tab::Agent(id) => format!("agent:{id}"),
-            Tab::Draft(id) => format!("draft:{id}"),
             Tab::Terminal(id) => format!("terminal:{id}"),
         }
     }
 
+    /// A saved tab. New Agent tabs (`draft:`) from before the New agent
+    /// dialog are dropped.
     pub fn parse(key: &str) -> Option<Self> {
         let (kind, id) = key.rsplit_once(':')?;
         match kind {
             "agent" => Some(Tab::Agent(id.to_string())),
-            "draft" => Some(Tab::Draft(id.to_string())),
             "terminal" => Some(Tab::Terminal(id.to_string())),
             _ => None,
         }
@@ -68,7 +77,7 @@ impl Tab {
 pub enum Screen {
     Workspace,
     NewWorkspace {
-        host: Option<String>,
+        host: Option<HostId>,
         project: Option<String>,
     },
     Hosts,
@@ -78,7 +87,7 @@ pub enum Screen {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Selection {
-    pub host: String,
+    pub host: HostId,
     pub workspace: String,
 }
 
@@ -149,9 +158,24 @@ fn place_as_shown(keys: &[String], shown: &[String], key: &str) -> Option<Vec<St
     (order != keys).then_some(order)
 }
 
-/// A workspace as pins and card order name it.
-pub fn workspace_key(host: &str, workspace: &str) -> String {
+/// A workspace as pins, tabs and card order name it: its host's id, then the
+/// workspace's. Hosts saved before ids existed have their old name as id, so
+/// keys saved then still match.
+pub fn workspace_key(host: &HostId, workspace: &str) -> String {
     format!("{host}:{workspace}")
+}
+
+/// An agent's key in saved per-agent state, as [workspace_key] makes a
+/// workspace's.
+pub fn agent_key(host: &HostId, agent: &str) -> String {
+    format!("{host}:{agent}")
+}
+
+/// The host and workspace of a [workspace_key]. Until saved state is typed
+/// (stage 3 of the beta plan), the last `:` separates them.
+pub fn parse_workspace_key(key: &str) -> Option<(HostId, &str)> {
+    let (host, workspace) = key.rsplit_once(':')?;
+    Some((HostId::new(host), workspace))
 }
 
 /// Which agents Lanes shows. Within a kind, any chosen value matches;
@@ -159,10 +183,11 @@ pub fn workspace_key(host: &str, workspace: &str) -> String {
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct LaneFilter {
-    pub hosts: BTreeSet<String>,
+    pub hosts: BTreeSet<HostId>,
     /// Provider ids: `claude`, `codex`, …
     pub tools: BTreeSet<String>,
-    /// Label keys, as [`fleet::directory::label_key`] makes them.
+    /// Label keys, as [`fleet::directory::label_key`] makes them, or
+    /// [`fleet::lanes::UNLABELLED`] or [`fleet::lanes::BACKGROUND`].
     pub labels: BTreeSet<String>,
     /// Agent states, as [`fleet::Bucket::as_str`] names them.
     pub states: BTreeSet<String>,
@@ -195,8 +220,6 @@ pub struct Nav {
     pub hidden_agents: BTreeMap<String, BTreeSet<String>>,
     pub layout: String,
     pub command_open: bool,
-    /// Provider to preselect on the next draft tab. Not saved.
-    pub pending_provider: Option<String>,
     /// The extension panel open beside the layout, by id. Not saved.
     pub panel: Option<String>,
     /// Text the panel should adopt, such as a question, bumped with
@@ -213,6 +236,9 @@ pub struct Nav {
     /// Lanes column width, before fitting to the view.
     pub lane_width: f32,
     pub lane_fit: bool,
+    /// Other layouts' column widths, by layout id; see [`Self::column_width`].
+    column_widths: BTreeMap<String, f32>,
+    column_fit: BTreeSet<String>,
     pub follow_relabel: bool,
     pub colored_lanes: bool,
     pub recency_headers: bool,
@@ -233,13 +259,16 @@ pub struct Nav {
     /// Agents of one state singled out on the Lanes board, after a click on
     /// the title bar's counts; not saved.
     pub state_highlight: Option<fleet::Bucket>,
+    /// The state whose agents the slide-out list shows, after a click on
+    /// its count in the title bar; not saved.
+    pub state_list: Option<fleet::Bucket>,
     /// Local display overrides by canonical label-derived lane key. Retained when a label
     /// disappears so returning hosts keep their choices; renames use a new key.
     pub lane_color_choices: BTreeMap<String, String>,
     /// Conversations Lanes is showing, kept streaming alongside open tabs.
-    pub pinned_sessions: BTreeSet<(String, String)>,
+    pub pinned_sessions: BTreeSet<(HostId, String)>,
     /// Terminals Lanes is showing, kept attached alongside open tabs.
-    pub pinned_terminals: BTreeSet<(String, String)>,
+    pub pinned_terminals: BTreeSet<(HostId, String)>,
     pub notification_corner: notifications::Corner,
     pub notification_route: notifications::Route,
     /// Seconds a card opened from a notification blinks its outline; 0 is
@@ -257,8 +286,24 @@ pub struct Nav {
     pub window_border_color: String,
     /// An agent Lanes should focus and expand, e.g. after a notification
     /// click. Lanes takes it. Not saved.
-    pub reveal_agent: Option<(String, String)>,
-    next_draft: u64,
+    pub reveal_agent: Option<(HostId, String)>,
+    /// Agents popped out of Lanes into windows of their own, by window (see
+    /// [`crate::popout`]). Not saved.
+    pub popouts: BTreeMap<(HostId, String), gpui_kit::gpui::AnyWindowHandle>,
+    /// Colours pinned for agents, by [`agent_key`], as LANE_COLORS names.
+    pub agent_colors: BTreeMap<String, String>,
+    /// Where each agent's popped-out window was last, by [`agent_key`].
+    pub popout_bounds: BTreeMap<String, [f32; 4]>,
+    /// How the last new workspace in each project was made, by
+    /// [`workspace_key`] of host and project.
+    pub workspace_choices: BTreeMap<String, fleet::creation::Remembered>,
+    /// The host the last project was added on.
+    pub add_project_host: Option<HostId>,
+    /// What the last new agent on each host was made with, by host id.
+    pub agent_choices: BTreeMap<String, fleet::creation::AgentChoice>,
+    /// What was typed in New agent when it closed without creating, given
+    /// back the next time it opens. Not saved.
+    pub new_agent_stash: Option<String>,
 }
 
 impl EventEmitter<NavEvent> for Nav {}
@@ -301,6 +346,7 @@ impl Nav {
             filters: Filters {
                 hosts: ui.host_filter,
                 labels: Vec::new(),
+                hide_background: !ui.show_background.unwrap_or(true),
             },
             tabs,
             focused,
@@ -311,7 +357,6 @@ impl Nav {
                 .collect(),
             layout: ui.layout.unwrap_or_else(|| "paseo".into()),
             command_open: false,
-            pending_provider: None,
             panel: None,
             panel_input: None,
             panel_gen: 0,
@@ -323,8 +368,12 @@ impl Nav {
             lane_width: ui
                 .lane_width
                 .unwrap_or(LANE_WIDTH_DEFAULT)
-                .clamp(LANE_WIDTH_MIN, LANE_WIDTH_MAX),
+                .clamp(COLUMN_WIDTH_MIN, COLUMN_WIDTH_MAX),
             lane_fit: ui.lane_fit,
+            column_widths: (ui.column_widths.into_iter())
+                .map(|(layout, width)| (layout, width.clamp(COLUMN_WIDTH_MIN, COLUMN_WIDTH_MAX)))
+                .collect(),
+            column_fit: ui.column_fit.into_iter().collect(),
             follow_relabel: ui.follow_relabel.unwrap_or(true),
             colored_lanes: ui.colored_lanes,
             recency_headers: ui.recency_headers.unwrap_or(true),
@@ -336,7 +385,10 @@ impl Nav {
             card_order: ui.card_order,
             ordering_revision: 0,
             state_highlight: None,
+            state_list: None,
             lane_color_choices: ui.lane_color_choices,
+            agent_colors: ui.agent_colors,
+            popout_bounds: ui.popout_bounds,
             pinned_sessions: BTreeSet::new(),
             pinned_terminals: BTreeSet::new(),
             notification_corner: notifications::Corner::parse(&ui.notification_corner),
@@ -352,7 +404,48 @@ impl Nav {
                 .map(|_| ui.window_border_color.clone())
                 .unwrap_or_else(|| WINDOW_BORDER_COLOR.to_string()),
             reveal_agent: None,
-            next_draft: 0,
+            popouts: BTreeMap::new(),
+            workspace_choices: ui.workspace_choices,
+            add_project_host: ui.add_project_host,
+            agent_choices: ui.agent_choices,
+            new_agent_stash: None,
+        }
+    }
+
+    /// Remembers how a workspace was made in `project` on `host`.
+    pub fn remember_workspace(
+        &mut self,
+        host: &HostId,
+        project: &str,
+        choice: fleet::creation::Remembered,
+        cx: &mut Context<Self>,
+    ) {
+        let key = workspace_key(host, project);
+        if self.workspace_choices.get(&key) != Some(&choice) {
+            self.workspace_choices.insert(key, choice);
+            self.save();
+        }
+        cx.notify();
+    }
+
+    pub fn set_agent_choice(
+        &mut self,
+        host: &HostId,
+        choice: fleet::creation::AgentChoice,
+        cx: &mut Context<Self>,
+    ) {
+        if self.agent_choices.get(host.as_str()) != Some(&choice) {
+            self.agent_choices.insert(host.as_str().to_string(), choice);
+            self.save();
+            cx.notify();
+        }
+    }
+
+    pub fn set_add_project_host(&mut self, host: &HostId, cx: &mut Context<Self>) {
+        if self.add_project_host.as_ref() != Some(host) {
+            self.add_project_host = Some(host.clone());
+            self.save();
+            cx.notify();
         }
     }
 
@@ -367,6 +460,7 @@ impl Nav {
             collapsed: self.collapsed.iter().cloned().collect(),
             collapsed_pinned: self.collapsed_pinned,
             host_filter: self.filters.hosts.clone(),
+            show_background: Some(self.show_background()),
             tabs: self
                 .tabs
                 .iter()
@@ -407,6 +501,8 @@ impl Nav {
             pinned_workspaces: self.pinned_workspaces.iter().cloned().collect(),
             card_order: self.card_order.clone(),
             lane_color_choices: self.lane_color_choices.clone(),
+            agent_colors: self.agent_colors.clone(),
+            popout_bounds: self.popout_bounds.clone(),
             notification_corner: self.notification_corner.as_str().to_string(),
             notification_route: self.notification_route.as_str().to_string(),
             notification_flash: Some(self.notification_flash),
@@ -415,6 +511,11 @@ impl Nav {
             notification_keep: Some(self.notification_keep),
             window_border: self.window_border,
             window_border_color: self.window_border_color.clone(),
+            column_widths: self.column_widths.clone(),
+            column_fit: self.column_fit.iter().cloned().collect(),
+            workspace_choices: self.workspace_choices.clone(),
+            add_project_host: self.add_project_host.clone(),
+            agent_choices: self.agent_choices.clone(),
         };
         config::save_ui(&ui);
     }
@@ -432,9 +533,9 @@ impl Nav {
         cx.notify();
     }
 
-    pub fn select(&mut self, host: &str, workspace: &str, cx: &mut Context<Self>) {
+    pub fn select(&mut self, host: &HostId, workspace: &str, cx: &mut Context<Self>) {
         self.selection = Some(Selection {
-            host: host.to_string(),
+            host: host.clone(),
             workspace: workspace.to_string(),
         });
         self.screen = Screen::Workspace;
@@ -515,35 +616,6 @@ impl Nav {
         cx.notify();
     }
 
-    pub fn new_draft(&mut self, key: &str, cx: &mut Context<Self>) -> Tab {
-        self.next_draft += 1;
-        let tab = Tab::Draft(format!("d{}", self.next_draft));
-        self.focus_tab(key, tab.clone(), cx);
-        tab
-    }
-
-    /// Replaces a draft tab with the agent it became, keeping its position.
-    pub fn promote_draft(
-        &mut self,
-        key: &str,
-        draft: &Tab,
-        agent_id: &str,
-        cx: &mut Context<Self>,
-    ) {
-        let agent = Tab::Agent(agent_id.to_string());
-        if let Some(tabs) = self.tabs.get_mut(key) {
-            tabs.retain(|t| t != &agent);
-            if let Some(slot) = tabs.iter_mut().find(|t| *t == draft) {
-                *slot = agent.clone();
-            } else {
-                tabs.push(agent.clone());
-            }
-        }
-        self.focused.insert(key.to_string(), agent);
-        self.save();
-        cx.notify();
-    }
-
     /// Closes a tab and picks the neighbour to focus. The caller archives an
     /// agent or kills a terminal.
     pub fn close_tab(&mut self, key: &str, tab: &Tab, cx: &mut Context<Self>) -> Option<Closed> {
@@ -573,7 +645,6 @@ impl Nav {
                 Some(Closed::Agent(id.clone()))
             }
             Tab::Terminal(id) => Some(Closed::Terminal(id.clone())),
-            Tab::Draft(_) => None,
         };
         self.save();
         cx.notify();
@@ -607,7 +678,6 @@ impl Nav {
             let before = tabs.len();
             tabs.retain(|tab| match tab {
                 Tab::Agent(id) => input.live.contains(id),
-                Tab::Draft(_) => true,
                 // A missing id means the PTY died. Keep the tab so the view can
                 // say so; the user closes it. New ids are added below.
                 Tab::Terminal(_) => true,
@@ -633,23 +703,39 @@ impl Nav {
         changed
     }
 
-    /// Every (host, agent) a tab or an expanded Lanes card currently shows.
-    pub fn open_agents(&self) -> BTreeSet<(String, String)> {
+    /// Every (host, agent) a tab, an expanded Lanes card or a popped-out
+    /// window currently shows.
+    pub fn open_agents(&self) -> BTreeSet<(HostId, String)> {
         let mut out = self.open_agent_tabs();
         out.extend(self.pinned_sessions.iter().cloned());
+        out.extend(self.popouts.keys().cloned());
         out
     }
 
+    /// Records `agent`'s popped-out window, or with None that it closed.
+    pub fn set_popout(
+        &mut self,
+        agent: (HostId, String),
+        window: Option<gpui_kit::gpui::AnyWindowHandle>,
+        cx: &mut Context<Self>,
+    ) {
+        match window {
+            Some(window) => self.popouts.insert(agent, window),
+            None => self.popouts.remove(&agent),
+        };
+        cx.notify();
+    }
+
     /// Every (host, agent) with a tab open.
-    pub fn open_agent_tabs(&self) -> BTreeSet<(String, String)> {
+    pub fn open_agent_tabs(&self) -> BTreeSet<(HostId, String)> {
         let mut out = BTreeSet::new();
         for (key, tabs) in &self.tabs {
-            let Some((host, _)) = key.rsplit_once(':') else {
+            let Some((host, _)) = parse_workspace_key(key) else {
                 continue;
             };
             for tab in tabs {
                 if let Tab::Agent(id) = tab {
-                    out.insert((host.to_string(), id.clone()));
+                    out.insert((host.clone(), id.clone()));
                 }
             }
         }
@@ -674,11 +760,41 @@ impl Nav {
         cx.notify();
     }
 
+    /// The column width the user picked in `layout`, before fitting to the
+    /// view. Each layout of columns keeps its own; Lanes' is
+    /// [`Self::lane_width`].
+    pub fn column_width(&self, layout: &str) -> f32 {
+        match layout {
+            "lanes" => self.lane_width,
+            _ => (self.column_widths.get(layout).copied())
+                .unwrap_or_else(|| column_width_default(layout)),
+        }
+    }
+
+    /// Whether `layout`'s columns shrink, down to a floor, to fit in view.
+    pub fn column_fit(&self, layout: &str) -> bool {
+        match layout {
+            "lanes" => self.lane_fit,
+            _ => self.column_fit.contains(layout),
+        }
+    }
+
     /// `persist: false` while a slider is still being dragged.
-    pub fn set_lane_width(&mut self, width: f32, persist: bool, cx: &mut Context<Self>) {
-        let width = width.clamp(LANE_WIDTH_MIN, LANE_WIDTH_MAX);
-        if self.lane_width != width {
-            self.lane_width = width;
+    pub fn set_column_width(
+        &mut self,
+        layout: &str,
+        width: f32,
+        persist: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let width = width.clamp(COLUMN_WIDTH_MIN, COLUMN_WIDTH_MAX);
+        if self.column_width(layout) != width {
+            match layout {
+                "lanes" => self.lane_width = width,
+                _ => {
+                    self.column_widths.insert(layout.to_string(), width);
+                }
+            }
             cx.notify();
         }
         if persist {
@@ -686,12 +802,21 @@ impl Nav {
         }
     }
 
-    pub fn set_lane_fit(&mut self, fit: bool, cx: &mut Context<Self>) {
-        if self.lane_fit != fit {
-            self.lane_fit = fit;
-            self.save();
-            cx.notify();
+    pub fn set_column_fit(&mut self, layout: &str, fit: bool, cx: &mut Context<Self>) {
+        if self.column_fit(layout) == fit {
+            return;
         }
+        match layout {
+            "lanes" => self.lane_fit = fit,
+            _ if fit => {
+                self.column_fit.insert(layout.to_string());
+            }
+            _ => {
+                self.column_fit.remove(layout);
+            }
+        }
+        self.save();
+        cx.notify();
     }
 
     pub fn set_follow_relabel(&mut self, follow: bool, cx: &mut Context<Self>) {
@@ -779,8 +904,30 @@ impl Nav {
     }
 
     /// Asks Lanes to focus and expand an agent's card.
-    pub fn reveal_in_lanes(&mut self, host: &str, agent: &str, cx: &mut Context<Self>) {
-        self.reveal_agent = Some((host.to_string(), agent.to_string()));
+    /// Shows an agent: its card in Lanes, or anywhere else its tab in the
+    /// Paseo layout.
+    pub fn open_agent(
+        &mut self,
+        host: &HostId,
+        workspace: &str,
+        agent: &str,
+        cx: &mut Context<Self>,
+    ) {
+        if self.layout == "lanes" {
+            self.reveal_in_lanes(host, agent, cx);
+            return;
+        }
+        self.layout = "paseo".into();
+        self.select(host, workspace, cx);
+        self.focus_tab(
+            &format!("{host}:{workspace}"),
+            Tab::Agent(agent.to_string()),
+            cx,
+        );
+    }
+
+    pub fn reveal_in_lanes(&mut self, host: &HostId, agent: &str, cx: &mut Context<Self>) {
+        self.reveal_agent = Some((host.clone(), agent.to_string()));
         cx.notify();
     }
 
@@ -791,7 +938,7 @@ impl Nav {
     }
 
     /// Pins a workspace to the top of its lane, or unpins it.
-    pub fn toggle_workspace_pin(&mut self, host: &str, workspace: &str, cx: &mut Context<Self>) {
+    pub fn toggle_workspace_pin(&mut self, host: &HostId, workspace: &str, cx: &mut Context<Self>) {
         let key = workspace_key(host, workspace);
         if !self.pinned_workspaces.remove(&key) {
             self.pinned_workspaces.insert(key);
@@ -805,7 +952,7 @@ impl Nav {
     /// back to most urgent, then most recent, first.
     pub fn set_card_order(
         &mut self,
-        host: &str,
+        host: &HostId,
         workspace: &str,
         order: Vec<String>,
         cx: &mut Context<Self>,
@@ -828,11 +975,68 @@ impl Nav {
         }
     }
 
+    /// Opens the slide-out list of one state's agents, or with None closes
+    /// it.
+    pub fn set_state_list(&mut self, state: Option<fleet::Bucket>, cx: &mut Context<Self>) {
+        if self.state_list != state {
+            self.state_list = state;
+            cx.notify();
+        }
+    }
+
+    /// Reef mode: what Lanes saved by label name (lane order, collapsed
+    /// lanes, colour choices, the label filter) keyed by the catalog's
+    /// label ids instead, as its lanes are. Keys already ids, and names the
+    /// catalog lacks, stay as they are.
+    pub fn adopt_label_ids(&mut self, catalog: &fleet::labels::Catalog, cx: &mut Context<Self>) {
+        let map =
+            |key: &String| fleet::lanes::key_with_ids(catalog, key).unwrap_or_else(|| key.clone());
+        let order: Vec<String> = self.lane_order.iter().map(map).collect();
+        let collapsed: BTreeSet<String> = self.lane_collapsed.iter().map(map).collect();
+        let colors: BTreeMap<String, String> = (self.lane_color_choices.iter())
+            .map(|(key, color)| (map(key), color.clone()))
+            .collect();
+        let labels: BTreeSet<String> = self.lane_filter.labels.iter().map(map).collect();
+        if order == self.lane_order
+            && collapsed == self.lane_collapsed
+            && colors == self.lane_color_choices
+            && labels == self.lane_filter.labels
+        {
+            return;
+        }
+        self.lane_order = order;
+        self.lane_collapsed = collapsed;
+        self.lane_color_choices = colors;
+        self.lane_filter.labels = labels;
+        self.save();
+        cx.notify();
+    }
+
     pub fn set_lane_filter(&mut self, filter: LaneFilter, cx: &mut Context<Self>) {
         if self.lane_filter == filter {
             return;
         }
         self.lane_filter = filter;
+        self.save();
+        cx.notify();
+    }
+
+    /// Whether views list Paseo's background workspaces and their agents.
+    /// One setting for every view; the daemons always send them.
+    pub fn show_background(&self) -> bool {
+        !self.filters.hide_background
+    }
+
+    pub fn set_show_background(&mut self, show: bool, cx: &mut Context<Self>) {
+        if self.show_background() == show {
+            return;
+        }
+        self.filters.hide_background = !show;
+        // The Lanes label filter's Background choice goes with them, or
+        // the board would filter to nothing.
+        if !show {
+            self.lane_filter.labels.remove(fleet::lanes::BACKGROUND);
+        }
         self.save();
         cx.notify();
     }
@@ -856,6 +1060,39 @@ impl Nav {
         self.box_single_workspaces = enabled;
         self.save();
         cx.notify();
+    }
+
+    /// Pins `index` (into LANE_COLORS) as `host`/`agent`'s colour, or with
+    /// None goes back to its label's.
+    pub fn set_agent_color(
+        &mut self,
+        host: &HostId,
+        agent: &str,
+        index: Option<usize>,
+        cx: &mut Context<Self>,
+    ) {
+        let key = agent_key(host, agent);
+        match index.and_then(|index| crate::theme::LANE_COLORS.get(index)) {
+            Some((name, _)) => self.agent_colors.insert(key, name.to_string()),
+            None => self.agent_colors.remove(&key),
+        };
+        self.save();
+        cx.notify();
+    }
+
+    /// The colour pinned for `host`/`agent`, as an index into LANE_COLORS.
+    pub fn agent_color(&self, host: &HostId, agent: &str) -> Option<usize> {
+        let name = self.agent_colors.get(&agent_key(host, agent))?;
+        crate::theme::LANE_COLORS
+            .iter()
+            .position(|(n, _)| n == name)
+    }
+
+    /// Remembers where `host`/`agent`'s popped-out window was.
+    pub fn remember_popout_bounds(&mut self, host: &HostId, agent: &str, bounds: [f32; 4]) {
+        self.popout_bounds.insert(agent_key(host, agent), bounds);
+        // Saved on window close and app quit, not for every move event.
+        // A crash may lose moves since the last close; normal quit flushes them.
     }
 
     pub fn set_lane_color(&mut self, key: &str, index: usize, cx: &mut Context<Self>) {
@@ -946,7 +1183,7 @@ impl Nav {
 
     pub fn set_pinned_sessions(
         &mut self,
-        pins: BTreeSet<(String, String)>,
+        pins: BTreeSet<(HostId, String)>,
         cx: &mut Context<Self>,
     ) {
         if self.pinned_sessions == pins {
@@ -958,7 +1195,7 @@ impl Nav {
 
     pub fn set_pinned_terminals(
         &mut self,
-        pins: BTreeSet<(String, String)>,
+        pins: BTreeSet<(HostId, String)>,
         cx: &mut Context<Self>,
     ) {
         if self.pinned_terminals == pins {
@@ -969,15 +1206,15 @@ impl Nav {
     }
 
     /// Every (host, terminal) a tab currently shows.
-    pub fn open_terminals(&self) -> BTreeSet<(String, String)> {
+    pub fn open_terminals(&self) -> BTreeSet<(HostId, String)> {
         let mut out = BTreeSet::new();
         for (key, tabs) in &self.tabs {
-            let Some((host, _)) = key.rsplit_once(':') else {
+            let Some((host, _)) = parse_workspace_key(key) else {
                 continue;
             };
             for tab in tabs {
                 if let Tab::Terminal(id) = tab {
-                    out.insert((host.to_string(), id.clone()));
+                    out.insert((host.clone(), id.clone()));
                 }
             }
         }
@@ -1022,7 +1259,7 @@ pub fn reconcile_inputs(
                 .remove(workspace.id.as_str())
                 .unwrap_or_default();
             roots.sort_by(|a, b| a.created_at.cmp(&b.created_at).then(a.id.cmp(&b.id)));
-            let key = format!("{}:{}", host.config.name, workspace.id);
+            let key = workspace_key(host.id(), &workspace.id);
             out.push(ReconcileInput {
                 roots: roots.into_iter().map(|a| a.id.clone()).collect(),
                 live: live.clone(),
@@ -1052,12 +1289,14 @@ mod selection_reconcile_tests {
     #[test]
     fn removes_only_authoritatively_missing_selection_on_the_exact_host() {
         let selection = Selection {
-            host: "mac".into(),
+            host: HostId::new("mac"),
             workspace: "w".into(),
         };
         let mut fleet = Fleet {
+            labels: None,
             hosts: vec![Host {
                 config: HostConfig {
+                    id: HostId::new("mac"),
                     name: "mac".into(),
                     ..Default::default()
                 },
@@ -1079,7 +1318,7 @@ mod selection_reconcile_tests {
         assert!(!selection_is_gone(
             &fleet,
             &Selection {
-                host: "other".into(),
+                host: HostId::new("other"),
                 ..selection
             }
         ));

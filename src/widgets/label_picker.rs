@@ -1,11 +1,16 @@
-//! A bounded, searchable workspace-label editor. Changes are applied together
-//! so the containing card does not move while the user is still choosing.
+//! A bounded, searchable label editor. Changes are applied together so the
+//! containing card does not move while the user is still choosing.
+//!
+//! It edits a workspace's Paseo labels, or, in reef mode, the labels of the
+//! agents it is for: Reef's catalog offered, those every one of them has
+//! ticked ([`fleet::labels::workspace_default`]).
 
 use crate::{
     app::{Core, store::LabelChange},
     theme::{palette, size},
     ui,
 };
+use fleet::HostId;
 use fleet::directory::label_key;
 use gpui_kit::component::{
     Sizable,
@@ -20,13 +25,16 @@ use gpui_kit::gpui::{
 use gpui_kit::prelude::FluentBuilder;
 use std::collections::BTreeMap;
 
-gpui_kit::actions!(workspace_labels, [NextLabel, PreviousLabel]);
+gpui_kit::actions!(workspace_labels, [NextLabel, PreviousLabel, AddLabel]);
 
 pub fn bind_keys(cx: &mut App) {
     use gpui_kit::gpui::KeyBinding;
     cx.bind_keys([
         KeyBinding::new("down", NextLabel, Some("WorkspaceLabels > Input")),
         KeyBinding::new("up", PreviousLabel, Some("WorkspaceLabels > Input")),
+        // Handled here: the search field passes Enter on, and the popover
+        // around the picker takes it as "close".
+        KeyBinding::new("enter", AddLabel, Some("WorkspaceLabels > Input")),
     ]);
 }
 
@@ -44,20 +52,53 @@ struct Choice {
 struct Choices(BTreeMap<String, Choice>);
 
 impl Choices {
-    fn load(core: &Core, host: &str, workspace: &str, cx: &App) -> Self {
+    fn load(core: &Core, host: &HostId, workspace: &str, agents: &[String], cx: &App) -> Self {
         let mut choices = Self::default();
         let store = core.store.read(cx);
+        if let Some(catalog) = &store.fleet.labels
+            && !agents.is_empty()
+        {
+            for label in &catalog.labels {
+                choices.0.entry(label_key(&label.name)).or_insert(Choice {
+                    name: label.name.clone(),
+                    color: label.color.clone(),
+                    assigned: false,
+                    initial: false,
+                });
+            }
+            let found = store.fleet.host(host);
+            let directory = found.map(|host| &host.directory);
+            let workspace = directory.and_then(|d| d.workspaces.get(workspace));
+            let agents = (directory.into_iter())
+                .flat_map(|d| agents.iter().filter_map(|id| d.agents.get(id)));
+            let shared = match workspace {
+                Some(workspace) => fleet::labels::workspace_default(agents, workspace, catalog),
+                None => {
+                    let mut agents = agents;
+                    (agents.next()).map_or_else(Vec::new, |agent| {
+                        fleet::labels::effective(agent, None, catalog)
+                    })
+                }
+            };
+            for id in shared {
+                if let Some(label) = catalog.get(&id)
+                    && let Some(choice) = choices.0.get_mut(&label_key(&label.name))
+                {
+                    choice.assigned = true;
+                    choice.initial = true;
+                }
+            }
+            return choices;
+        }
         // Each host keeps its own labels, but Lanes treats a name as one
         // label across the fleet: offer them all, as this workspace's host
         // names and colours them where it has them. Picking one another host
         // made creates it here.
-        let hosts = store.fleet.host(host).into_iter().chain(
-            store
-                .fleet
-                .hosts
-                .iter()
-                .filter(|other| other.name() != host),
-        );
+        let hosts = store
+            .fleet
+            .host(host)
+            .into_iter()
+            .chain(store.fleet.hosts.iter().filter(|other| other.id() != host));
         for other in hosts {
             for label in &other.directory.labels {
                 choices.0.entry(label_key(&label.name)).or_insert(Choice {
@@ -127,8 +168,11 @@ pub struct ApplyLabels(pub Vec<LabelChange>);
 
 pub struct LabelPicker {
     core: Core,
-    host: String,
+    host: HostId,
     workspace: String,
+    /// In reef mode, the agents whose own labels it edits; none edits the
+    /// workspace's.
+    agents: Vec<String>,
     input: Entity<InputState>,
     bounds: Bounds<Pixels>,
     choices: Choices,
@@ -146,30 +190,27 @@ impl Focusable for LabelPicker {
 impl LabelPicker {
     pub fn new(
         core: Core,
-        host: &str,
+        host: &HostId,
         workspace: &str,
+        agents: Vec<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let input = cx.new(|cx| InputState::new(window, cx).placeholder("Find or create a label…"));
-        cx.subscribe_in(
-            &input,
-            window,
-            |this, _, event: &InputEvent, window, cx| match event {
-                InputEvent::Change => {
-                    this.highlighted = None;
-                    cx.notify();
-                }
-                InputEvent::PressEnter { .. } => this.add_query(window, cx),
-                _ => {}
-            },
-        )
+        // Enter is the AddLabel action, not the field's PressEnter.
+        cx.subscribe(&input, |this, _, event: &InputEvent, cx| {
+            if let InputEvent::Change = event {
+                this.highlighted = None;
+                cx.notify();
+            }
+        })
         .detach();
         Self {
-            choices: Choices::load(&core, host, workspace, cx),
+            choices: Choices::load(&core, host, workspace, &agents, cx),
             core,
-            host: host.into(),
+            host: host.clone(),
             workspace: workspace.into(),
+            agents,
             input,
             bounds: Bounds::default(),
             highlighted: None,
@@ -188,7 +229,7 @@ impl LabelPicker {
         }
         self.open = open;
         if open {
-            self.choices = Choices::load(&self.core, &self.host, &self.workspace, cx);
+            self.choices = Choices::load(&self.core, &self.host, &self.workspace, &self.agents, cx);
             self.highlighted = None;
             self.input.update(cx, |input, cx| {
                 input.set_value("", window, cx);
@@ -262,6 +303,12 @@ impl Render for LabelPicker {
         let new_name = query.trim().to_string();
         let can_create =
             !new_name.is_empty() && !self.choices.0.contains_key(&label_key(&new_name));
+        let reef_mode = self.core.store.read(cx).fleet.labels.is_some() && !self.agents.is_empty();
+        let title = match (reef_mode, self.agents.len()) {
+            (false, _) => "Workspace labels",
+            (true, 1) => "This agent's labels",
+            (true, _) => "These agents' labels",
+        };
         let bounds = self.bounds;
         let width = (bounds.size.width - px(4.)).max(px(1.)).min(px(320.));
         let height = (bounds.size.height - px(4.))
@@ -282,12 +329,13 @@ impl Render for LabelPicker {
             .key_context("WorkspaceLabels")
             .on_action(cx.listener(|this, _: &NextLabel, _, cx| this.step(true, cx)))
             .on_action(cx.listener(|this, _: &PreviousLabel, _, cx| this.step(false, cx)))
+            .on_action(cx.listener(|this, _: &AddLabel, window, cx| this.add_query(window, cx)))
             .child(
                 div()
                     .flex_shrink_0()
                     .text_size(size::sm())
                     .text_color(p.muted)
-                    .child("Workspace labels"),
+                    .child(title),
             )
             .child(div().flex_shrink_0().child(Input::new(&self.input).small()))
             .when(can_create, |d| {

@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 
 use paseo_client::proto::{Bucket, Workspace};
 
-use crate::Fleet;
+use crate::{Fleet, HostId};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Grouping {
@@ -16,7 +16,7 @@ pub enum Grouping {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SidebarRow {
-    pub host: String,
+    pub host: HostId,
     pub workspace_id: String,
     pub title: String,
     pub branch: Option<String>,
@@ -31,15 +31,17 @@ pub struct SidebarRow {
     pub workspace_kind: String,
     pub pull_request: Option<(u64, String)>,
     pub status_entered_at: Option<String>,
+    /// A background workspace, listed because background ones are shown.
+    pub background: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SidebarProject {
     pub key: String,
     pub name: String,
-    pub hosts: Vec<String>,
+    pub hosts: Vec<HostId>,
     /// (host, projectId, rootPath, kind) for creating workspaces.
-    pub placements: Vec<(String, String, String, String)>,
+    pub placements: Vec<(HostId, String, String, String)>,
     pub rows: Vec<SidebarRow>,
 }
 
@@ -64,8 +66,10 @@ pub struct SidebarView {
 
 #[derive(Debug, Clone, Default)]
 pub struct Filters {
-    pub hosts: Vec<String>,
+    pub hosts: Vec<HostId>,
     pub labels: Vec<String>,
+    /// Leaves out background workspaces, and projects only they were in.
+    pub hide_background: bool,
 }
 
 impl SidebarView {
@@ -74,9 +78,13 @@ impl SidebarView {
         let mut pinned = Vec::new();
         let mut all_rows = Vec::new();
         let mut hosts_with_projects = std::collections::BTreeSet::new();
+        // Projects that lost a workspace to the background filter, and those
+        // that still list one, pinned or not.
+        let mut thinned = std::collections::BTreeSet::new();
+        let mut listed = std::collections::BTreeSet::new();
 
         for host in &fleet.hosts {
-            if !filters.hosts.is_empty() && !filters.hosts.contains(&host.config.name) {
+            if !filters.hosts.is_empty() && !filters.hosts.contains(host.id()) {
                 continue;
             }
             let dir = &host.directory;
@@ -85,7 +93,7 @@ impl SidebarView {
                     .project_key
                     .clone()
                     .filter(|key| !key.is_empty())
-                    .unwrap_or_else(|| format!("{}\u{0}{}", host.config.name, project.project_id));
+                    .unwrap_or_else(|| format!("{}\u{0}{}", host.id(), project.project_id));
                 let entry = projects
                     .entry(key.clone())
                     .or_insert_with(|| SidebarProject {
@@ -95,16 +103,16 @@ impl SidebarView {
                         placements: Vec::new(),
                         rows: Vec::new(),
                     });
-                if !entry.hosts.contains(&host.config.name) {
-                    entry.hosts.push(host.config.name.clone());
+                if !entry.hosts.contains(host.id()) {
+                    entry.hosts.push(host.id().clone());
                 }
                 entry.placements.push((
-                    host.config.name.clone(),
+                    host.id().clone(),
                     project.project_id.clone(),
                     project.project_root_path.clone(),
                     project.project_kind.clone(),
                 ));
-                hosts_with_projects.insert(host.config.name.clone());
+                hosts_with_projects.insert(host.id().clone());
             }
             let newest_roots = dir.newest_roots();
             for workspace in dir.workspaces.values() {
@@ -113,11 +121,13 @@ impl SidebarView {
                     .and_then(|p| p.project_key.clone())
                     .or_else(|| workspace.project_key().map(str::to_string))
                     .filter(|key| !key.is_empty())
-                    .unwrap_or_else(|| {
-                        format!("{}\u{0}{}", host.config.name, workspace.project_id)
-                    });
+                    .unwrap_or_else(|| format!("{}\u{0}{}", host.id(), workspace.project_id));
+                if filters.hide_background && workspace.background {
+                    thinned.insert(key);
+                    continue;
+                }
                 let row = row(
-                    host.config.name.as_str(),
+                    host.id(),
                     dir,
                     workspace,
                     project.map(|p| p.name()),
@@ -126,7 +136,8 @@ impl SidebarView {
                 if !filters.labels.is_empty() && !label_match(&row, &filters.labels) {
                     continue;
                 }
-                hosts_with_projects.insert(host.config.name.clone());
+                hosts_with_projects.insert(host.id().clone());
+                listed.insert(key.clone());
                 all_rows.push(row.clone());
                 if row.pinned_at.is_some() {
                     pinned.push(row);
@@ -147,6 +158,9 @@ impl SidebarView {
         if !filters.labels.is_empty() {
             projects.retain(|project| !project.rows.is_empty());
         }
+        // A project only background work was in goes with it; one that was
+        // empty to begin with stays, to create a workspace in.
+        projects.retain(|project| !thinned.contains(&project.key) || listed.contains(&project.key));
         projects.sort_by(|a, b| natural(&a.name, &b.name).then(a.key.cmp(&b.key)));
         for project in &mut projects {
             project.rows.sort_by(|a, b| {
@@ -227,7 +241,7 @@ fn empty_project(key: &str, workspace: &Workspace) -> SidebarProject {
 }
 
 fn row(
-    host: &str,
+    host: &HostId,
     dir: &crate::Directory,
     workspace: &Workspace,
     project_name: Option<String>,
@@ -239,7 +253,7 @@ fn row(
         .and_then(|github| github.pull_request.as_ref())
         .and_then(|pr| pr.number.map(|n| (n, pr_state(pr))));
     SidebarRow {
-        host: host.to_string(),
+        host: host.clone(),
         workspace_id: workspace.id.clone(),
         title: if workspace.name.is_empty() {
             workspace.id.clone()
@@ -273,6 +287,7 @@ fn row(
         workspace_kind: workspace.workspace_kind.clone(),
         pull_request,
         status_entered_at: workspace.status_entered_at.clone(),
+        background: workspace.background,
     }
 }
 
@@ -340,6 +355,7 @@ pub fn natural(a: &str, b: &str) -> std::cmp::Ordering {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::HostId;
     use crate::{Fleet, HostConfig};
     use serde_json::json;
 
@@ -348,13 +364,11 @@ mod tests {
         let mut fleet = Fleet::new([
             HostConfig {
                 name: "a".into(),
-                endpoint: None,
-                password: None,
+                ..Default::default()
             },
             HostConfig {
                 name: "b".into(),
-                endpoint: None,
-                password: None,
+                ..Default::default()
             },
         ]);
         let ws = |id: &str, pinned: Option<&str>| {
@@ -364,17 +378,17 @@ mod tests {
                 "project": {"projectKey": "remote:github.com/x/demo"}}}})
         };
         fleet
-            .host_mut("a")
+            .host_mut(&HostId::new("a"))
             .unwrap()
             .directory
             .apply_push(&ws("w10", None));
         fleet
-            .host_mut("a")
+            .host_mut(&HostId::new("a"))
             .unwrap()
             .directory
             .apply_push(&ws("w9", Some("2026-10-01T00:00:00Z")));
         fleet
-            .host_mut("b")
+            .host_mut(&HostId::new("b"))
             .unwrap()
             .directory
             .apply_push(&ws("w2", None));
@@ -388,6 +402,56 @@ mod tests {
             .collect();
         assert_eq!(titles, vec!["w2", "w10"]);
         assert!(view.multi_host);
+    }
+
+    #[test]
+    fn background_workspaces_are_marked_or_left_out_with_their_project() {
+        let mut fleet = Fleet::new([HostConfig {
+            name: "a".into(),
+            ..Default::default()
+        }]);
+        let ws = |id: &str, project: &str, background: bool| {
+            json!({"type": "workspace_update", "payload": {"kind": "upsert", "workspace": {
+                "id": id, "projectId": project, "projectDisplayName": project,
+                "projectRootPath": format!("/{project}"), "projectKind": "git", "name": id,
+                "status": "done", "background": background}}})
+        };
+        let dir = &mut fleet.host_mut(&HostId::new("a")).unwrap().directory;
+        dir.projects_from_workspaces = true;
+        dir.apply_push(&ws("front", "app", false));
+        dir.apply_push(&ws("helper", "app", true));
+        dir.apply_push(&ws("bot", "chores", true));
+        let names = |view: &SidebarView| -> Vec<(String, Vec<(String, bool)>)> {
+            (view.projects.iter())
+                .map(|p| {
+                    let rows = p.rows.iter().map(|r| (r.title.clone(), r.background));
+                    (p.name.clone(), rows.collect())
+                })
+                .collect()
+        };
+        let shown = SidebarView::build(&fleet, Grouping::Project, &Filters::default());
+        assert_eq!(
+            names(&shown),
+            vec![
+                (
+                    "app".into(),
+                    vec![("front".into(), false), ("helper".into(), true)]
+                ),
+                ("chores".into(), vec![("bot".into(), true)]),
+            ]
+        );
+        let hide = Filters {
+            hide_background: true,
+            ..Default::default()
+        };
+        let hidden = SidebarView::build(&fleet, Grouping::Project, &hide);
+        assert_eq!(
+            names(&hidden),
+            vec![("app".into(), vec![("front".into(), false)])]
+        );
+        let by_status = SidebarView::build(&fleet, Grouping::Status, &hide);
+        let rows: usize = by_status.groups.iter().map(|(_, rows)| rows.len()).sum();
+        assert_eq!(rows, 1);
     }
 
     #[test]
