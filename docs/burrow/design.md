@@ -62,7 +62,7 @@ Modules inside `burrow-daemon`:
 | `agents`, `agent_requests`, `coalesce` | The agent manager: provider sessions, turns, permissions, attention, 60 ms coalescing |
 | `labels` | The workspace label catalog, assignments and the label change journal |
 | `persist` | Records and append-only timelines in the home directory, written off the store lock |
-| `paseo_import` | `burrow import-paseo`: Paseo's Claude agents, projects and workspaces into the store, once |
+| `paseo_import` | `burrow import-paseo`: Paseo's agents (every provider both run), projects and workspaces into the store, once |
 | `git` | What a workspace's checkout is; the `git` CLI with timeouts; path rules |
 | `workspace_requests` | Adding projects, making and archiving workspaces, the forms' reads |
 | `worktrees` | Burrow-owned git worktrees in Paseo's layout; branch reads and in-place branch changes |
@@ -499,7 +499,7 @@ Answered:
 - **Providers:** Claude, then Codex.
 - **Auth:** no password is needed on the locked-down networks Burrow runs on.
 - **Migration:** Burrow runs next to Paseo with its own state. A host that switches over
-  imports its Claude agents once with `burrow import-paseo`, which only reads `~/.paseo`.
+  imports its agents once with `burrow import-paseo`, which only reads `~/.paseo`.
 - **Platforms:** Linux and Mac hosts for now.
 
 Still open:

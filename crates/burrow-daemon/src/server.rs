@@ -17,7 +17,7 @@ pub struct Running {
     pub daemon: Arc<Daemon>,
     pub local_addr: SocketAddr,
     shutdown: watch::Sender<bool>,
-    task: JoinHandle<()>,
+    tasks: Vec<JoinHandle<()>>,
 }
 
 impl Running {
@@ -29,24 +29,68 @@ impl Running {
     /// Closes every socket with 1001 and stops accepting.
     pub async fn shutdown(self) {
         let _ = self.shutdown.send(true);
-        let _ = self.task.await;
+        for task in self.tasks {
+            let _ = task.await;
+        }
     }
 }
 
-/// Binds `config.listen` and starts serving. The socket is listening when
-/// this returns: connects queue in the backlog until the accept loop runs.
+/// Binds `config.listen` and starts serving, and each of
+/// `config.also_listen` once it can be bound. `config.listen` is listening
+/// when this returns: connects queue in the backlog until the accept loop
+/// runs.
 pub async fn start(daemon: Arc<Daemon>) -> std::io::Result<Running> {
     let listener = TcpListener::bind(daemon.config.listen).await?;
     let local_addr = listener.local_addr()?;
     let (shutdown, shutdown_rx) = watch::channel(false);
     info!(%local_addr, server_id = %daemon.config.server_id, "listening on ws://{local_addr}/ws");
-    let task = tokio::spawn(accept_loop(daemon.clone(), listener, shutdown_rx));
+    let mut tasks = vec![tokio::spawn(accept_loop(
+        daemon.clone(),
+        listener,
+        shutdown_rx.clone(),
+    ))];
+    for &addr in &daemon.config.also_listen {
+        tasks.push(tokio::spawn(listen_when_possible(
+            daemon.clone(),
+            addr,
+            shutdown_rx.clone(),
+        )));
+    }
     Ok(Running {
         daemon,
         local_addr,
         shutdown,
-        task,
+        tasks,
     })
+}
+
+/// Binds `addr`, trying again every `listen_retry` until it can, then
+/// serves it. A failure is logged when it starts or changes, not on every
+/// try.
+async fn listen_when_possible(
+    daemon: Arc<Daemon>,
+    addr: SocketAddr,
+    mut shutdown: watch::Receiver<bool>,
+) {
+    let retry = daemon.config.timing.listen_retry;
+    let mut failing = None;
+    let listener = loop {
+        match TcpListener::bind(addr).await {
+            Ok(listener) => break listener,
+            Err(err) => {
+                if failing != Some(err.kind()) {
+                    warn!(%addr, %err, "cannot listen here yet; trying again every {retry:?}");
+                    failing = Some(err.kind());
+                }
+            }
+        }
+        tokio::select! {
+            _ = tokio::time::sleep(retry) => {}
+            _ = shutdown.changed() => return,
+        }
+    };
+    info!(%addr, "listening on ws://{addr}/ws");
+    accept_loop(daemon, listener, shutdown).await;
 }
 
 async fn accept_loop(

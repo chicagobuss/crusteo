@@ -197,6 +197,14 @@ pub struct WorkspaceRecord {
     /// When it was archived; an archived workspace is out of the directory.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub archived_at: Option<String>,
+    /// When it was made. Absent for one made before Burrow kept it: its
+    /// first agent's creation stands in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<String>,
+    /// Its setup's latest status (`running`, `completed`, `failed`,
+    /// `blocked`), absent when it has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub setup_status: Option<String>,
 }
 
 impl WorkspaceRecord {
@@ -515,6 +523,15 @@ impl Store {
             .min_by_key(|bucket| bucket_rank(*bucket))
             .unwrap_or(StateBucket::Done);
         let activity_at = members().map(|agent| agent.updated_at.clone()).max();
+        let last_user_message_at = members()
+            .filter_map(|agent| agent.last_user_message_at.clone())
+            .max();
+        let created_at = workspace.created_at.clone().or_else(|| {
+            (members().chain(self.archived.values()))
+                .filter(|agent| agent.workspace_id.as_deref() == Some(&workspace.workspace_id))
+                .map(|agent| agent.created_at.clone())
+                .min()
+        });
         WorkspaceDescriptor {
             id: workspace.workspace_id.clone(),
             project_id: workspace.project_id.clone(),
@@ -535,6 +552,9 @@ impl Store {
             status,
             status_entered_at: None,
             activity_at,
+            created_at,
+            last_user_message_at,
+            setup_status: workspace.setup_status.clone(),
             diff_stat: None,
             scripts: Vec::new(),
             git_runtime: workspace.git.as_ref().map(|git| {
@@ -963,6 +983,8 @@ mod tests {
             background: false,
             base_branch: None,
             archived_at: None,
+            created_at: None,
+            setup_status: None,
         }
     }
 

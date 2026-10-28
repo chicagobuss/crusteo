@@ -26,7 +26,11 @@ const EVENT_BACKLOG: usize = 4096;
 
 #[derive(Debug, Clone)]
 pub struct Config {
+    /// Bound at start; the daemon does not start without it.
     pub listen: SocketAddr,
+    /// More addresses, each bound once it can be: one on an interface not
+    /// up yet (a VPN's, just after boot) is tried again until it is.
+    pub also_listen: Vec<SocketAddr>,
     /// Where persistent state lives. Phase 0 keeps only `server-id` there.
     pub home: Option<PathBuf>,
     /// Stable daemon identity (`srv_…`). Clients key hosts by it.
@@ -51,6 +55,9 @@ pub struct Timing {
     pub hello_timeout: Duration,
     pub lease: Duration,
     pub lease_check: Duration,
+    /// How often an address in [`Config::also_listen`] that could not be
+    /// bound is tried again.
+    pub listen_retry: Duration,
 }
 
 impl Default for Timing {
@@ -59,6 +66,7 @@ impl Default for Timing {
             hello_timeout: codes::HELLO_TIMEOUT,
             lease: codes::SOCKET_LEASE,
             lease_check: codes::LEASE_CHECK_EVERY,
+            listen_retry: Duration::from_secs(5),
         }
     }
 }
@@ -68,6 +76,7 @@ impl Config {
     pub fn ephemeral() -> Self {
         Self {
             listen: "127.0.0.1:0".parse().expect("literal address"),
+            also_listen: Vec::new(),
             home: None,
             server_id: crate::ids::server_id(),
             hostname: Some("example-host".into()),

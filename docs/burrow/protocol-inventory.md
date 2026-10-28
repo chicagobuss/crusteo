@@ -74,24 +74,24 @@ outbound messages are `{type, payload}`. Both travel inside `{"type":"session","
 | `agent.timeline.replacement` | D→C | Timeline rebuilt (new epoch); refetch the tail | yes | P1 | |
 | `agent.create.request` | C→D | Create (modern, with receipts); `agent.create.update`* when subscribed | yes | P1 | done |
 | `create_agent_request` | C→D | Legacy create; reply `status{agent_created\|agent_create_failed}` | | P1 | done |
-| `send_agent_message_request` | C→D | Prompt: `text`, `messageId`, `images?`, `attachments?`, `activeTurnBehavior?` | yes | P1 | done |
+| `send_agent_message_request` | C→D | Prompt: `text`, `messageId`, `images?`, `attachments?`, `activeTurnBehavior?`, `sourceAgentId?` (Paseo 0.12, behind `agentMessageProvenance`: the sending agent; delivered in a `<paseo-system kind="agent-message">` envelope and recorded as an `agent_message` call), `sessionMode?` (Paseo 0.13: the mode set before the prompt; one the agent cannot take refuses the send) | yes | P1 | done |
 | `cancel_agent_request` | C→D | Interrupt the turn | yes | P1 | done |
 | `archive_agent_request` | C→D | Archive; reply `agent_archived` | yes | P1 | done |
 | `refresh_agent_request` | C→D | Reload / unarchive; reply `status{agent_refreshed}` | yes | P1 | done |
 | `update_agent_request` | C→D | Rename and merge labels (also client tab labels) | yes | P1 | done |
 | `clear_agent_attention` | C→D | Clear the unread flag; reply `clear_agent_attention_response` | yes | P1 | done |
 | `agent_attention_required` | D→C | Finished / error / permission, with `shouldNotify` and a notification | yes | P1 | done |
-| `fetch_agent_history_request` | C→D | Archived / history search (not conversation history) | yes | P1 | |
+| `fetch_agent_history_request` | C→D | Archived / history search (not conversation history); `paseo delete --all/--cwd` reads it | yes | P1 | done: every agent, archived and background ones too, newest first, paged; no search |
 | `agent.timeline.list_prompts.request` | C→D | Prompt index for jump-to-prompt | yes | P1 | |
 | `list_commands_request` | C→D | Slash commands and skills for an agent or draft | yes | P1 | |
-| `agent.detach.request` | C→D | Detach a child agent | yes | P1 | |
+| `agent.detach.request` | C→D | Detach a child agent (`paseo detach`) | yes | P1 | done: drops `paseo.parent-agent-id` |
 | `agent.provider_subagents.list.request` | C→D | Provider sub-agents of an agent (feature `providerSubagents`) | yes | P1 | |
 | `agent.provider_subagents.timeline.get.request` | C→D | A sub-agent's timeline | yes | P1 | |
 | `agent.provider_subagents.update` | D→C | Sub-agent upsert / timeline / remove | yes | P1 | |
 | `agent_deleted`, `agent_archived` | D→C | Replies to delete / archive | yes | P1 | done |
 | `delete_agent_request` | C→D | Hard delete; reply `agent_deleted` | yes | P1 | done |
 | `close_items_request` | C→D | Archive agents and kill terminals together | | P2 | |
-| `wait_for_finish_request` | C→D | Block until the turn ends (CLI) | | P2 | |
+| `wait_for_finish_request` | C→D | Block until the turn ends: `paseo send` (unless `--no-wait`), `paseo run`, `paseo wait` | | P1 | done: `idle`/`error`/`permission`/`timeout`, as Paseo answers |
 | `resume_agent_request` | C→D | Resume a provider handle; reply `status{agent_resumed}` | | P2 | |
 | `import_agent_request` | C→D | Import a provider session | | P2 | |
 | `fetch_recent_provider_sessions_request` | C→D | Importable provider sessions | | P2 | |
@@ -135,6 +135,7 @@ the agent snapshot (`pendingPermissions`, authoritative) and on `agent_stream`.
 | `workspace.recovery.inspect.request` / `.restore.request` | Recreate a deleted worktree | | P2 |
 | `workspace.github.search_repositories.request` | Repository search | | P2 |
 | `workspace_setup_status_request` | The last setup snapshot. Served | | P2 |
+| `workspace.setup.subscribe.request` | C→D | Paseo 0.13 setup panel: snapshot, then that workspace's `workspace_setup_progress` (behind `workspaceSetupObservation`); workspaces carry `setupStatus`, and `createdAt` / `lastUserMessageAt` (behind `workspaceSortTimes`) | yes | P1 | done |
 | `workspace.setup.run.request` | Rerun setup scripts | | P2 |
 | `paseo_worktree_list_request` | Paseo-owned worktrees of a repository. Served | | P2 |
 | `paseo_worktree_archive_request`, `create_paseo_worktree_request` | Archive by path; the older create | | P2 |

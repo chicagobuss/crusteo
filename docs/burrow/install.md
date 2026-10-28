@@ -66,7 +66,13 @@ or the binaries `--claude-bin`, `--codex-bin`, `--pi-bin`, `--agy-bin` and `--cu
 ```sh
 ~/burrow/burrow                      # ws://127.0.0.1:6797/ws, state in ~/.burrow
 ~/burrow/burrow --listen 0.0.0.0:6797
+~/burrow/burrow --listen 127.0.0.1:6797 --listen 10.0.0.5:6797   # loopback and a VPN only
 ```
+
+`--listen` can be given more than once. The first address must be free when Burrow starts; each
+other one is tried again every few seconds until it binds. So a VPN's address, which appears only
+once the VPN is up (after a reboot, say), is picked up on its own. On a laptop that joins other
+networks, list loopback and the VPN rather than `0.0.0.0`: Burrow has no password support yet.
 
 Then add the host in crusteo (`127.0.0.1:6797`, or `192.0.2.10:6797` from elsewhere) or in
 Reef's `hosts.json`. It reports its version to clients as `<version>-burrow`. Every flag is in
@@ -111,7 +117,8 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/dev.crusteo.burrow.plist
 launchctl bootout gui/$(id -u)/dev.crusteo.burrow      # to stop it
 ```
 
-This is how Burrow runs on the Mac it replaced Paseo on (with `--listen 127.0.0.1:6767`).
+This is how Burrow runs on the Mac it replaced Paseo on (with `--listen 127.0.0.1:6767` and a
+second `--listen` for its VPN address, so other machines reach it without a proxy).
 
 ## Run it next to Paseo
 
@@ -122,7 +129,8 @@ twice in clients, once per daemon; agents started on one are not on the other.
 ## Replace Paseo on a host
 
 Burrow takes over Paseo's port and identity, so every client sees the same host as before, and
-`import-paseo` brings over its Claude agents, projects, workspaces and labels. Other providers'
+`import-paseo` brings over its agents (Claude, Codex, Cursor, pi and Antigravity), projects,
+workspaces and labels; each agent's next prompt resumes its session. OpenCode and custom ACP
 agents are not imported (see [README.md](README.md#move-a-host-over-from-paseo) for exactly
 what comes over).
 

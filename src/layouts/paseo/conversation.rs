@@ -34,7 +34,7 @@ use super::attachments;
 use super::composer::Composer;
 use super::question_form::QuestionForm;
 use crate::app::images::Shown;
-use crate::app::store::{now_millis, parse_iso};
+use crate::app::store::{FleetStore, now_millis, parse_iso};
 use crate::app::{AgentSession, Core};
 use crate::layouts::columns::edges;
 use crate::theme::{palette, size, with_alpha};
@@ -1408,7 +1408,7 @@ fn prompt_images(
             thumbnail(
                 format!("prompt-image-{item_id}-{i}"),
                 shown.clone(),
-                move |cx| open_kept_image(&core, &host, &file, cx),
+                move |cx| open_kept_image(&core.store, &host, &file, cx),
             )
         })
         .collect()
@@ -1418,11 +1418,12 @@ fn prompt_images(
 /// that size while it loads or when its host cannot send it.
 fn thumbnail(id: String, shown: Shown, open: impl Fn(&mut App) + 'static) -> AnyElement {
     let p = palette();
+    let (width, height) = (px(180.), px(140.));
     let frame = div()
         .id(SharedString::from(id))
         .flex_shrink_0()
-        .w(px(180.))
-        .h(px(140.));
+        .w(width)
+        .h(height);
     let placeholder = |frame: gpui_kit::gpui::Stateful<gpui_kit::gpui::Div>, label| {
         frame
             .rounded(px(6.))
@@ -1441,7 +1442,7 @@ fn thumbnail(id: String, shown: Shown, open: impl Fn(&mut App) + 'static) -> Any
             .cursor_pointer()
             .tooltip(|window, cx| Tooltip::new("Open image").build(window, cx))
             .on_click(move |_, _, cx| open(cx))
-            .child(gpui_kit::gpui::img(image).size_full())
+            .child(fitted(gpui_kit::gpui::img(image), width, height))
             .into_any_element(),
         Shown::Loading => placeholder(frame, "Loading image…"),
         Shown::Unavailable => placeholder(
@@ -1453,10 +1454,22 @@ fn thumbnail(id: String, shown: Shown, open: impl Fn(&mut App) + 'static) -> Any
     }
 }
 
+/// An image drawn whole inside a `width` by `height` box. The box's own
+/// aspect ratio is given: GPUI otherwise takes the image's, and Taffy's
+/// final layout then makes the box at least as tall as the width over it,
+/// whatever its height, so a tall image drew down over the rows below.
+pub(crate) fn fitted(
+    image: gpui_kit::gpui::Img,
+    width: gpui_kit::gpui::Pixels,
+    height: gpui_kit::gpui::Pixels,
+) -> gpui_kit::gpui::Img {
+    image.w(width).h(height).aspect_ratio(width / height)
+}
+
 /// Opens an image a daemon keeps at full size. It is read again: what the
 /// cache holds may be scaled down.
-fn open_kept_image(core: &Core, host: &HostId, file: &ImageFile, cx: &mut App) {
-    let read = core.store.read(cx).read_image(host, file, cx);
+fn open_kept_image(store: &Entity<FleetStore>, host: &HostId, file: &ImageFile, cx: &mut App) {
+    let read = store.read(cx).read_image(host, file, cx);
     let name = file.file_name().to_string();
     cx.spawn(async move |cx| {
         if let Ok(image) = read.await {
@@ -1728,6 +1741,7 @@ fn copy_button(id: String, text: String) -> impl IntoElement {
 /// text view does by itself.
 fn reply_links(
     view: WeakEntity<Conversation>,
+    kept: Option<(Entity<FleetStore>, HostId, HashMap<String, ImageFile>)>,
 ) -> impl Fn(&SharedString, &ClickEvent, &mut Window, &mut App) + Send + Sync + 'static {
     move |url, event, window, cx| {
         let (menu, open) = match event {
@@ -1744,8 +1758,30 @@ fn reply_links(
                 view.open_copy_menu(position, Some(url.clone()), window, cx)
             });
         } else if open {
-            cx.open_url(url);
+            open_reply_link(url, kept.as_ref(), cx);
         }
+    }
+}
+
+/// Opens a reply's link or image (an image without a link passes its own
+/// address): a file its daemon keeps is read from there at full size, a
+/// `data:` image is opened as a copy, anything else as a URL.
+fn open_reply_link(
+    url: &SharedString,
+    kept: Option<&(Entity<FleetStore>, HostId, HashMap<String, ImageFile>)>,
+    cx: &mut App,
+) {
+    if let Some((store, host, files)) = kept
+        && let Some(file) = files.get(url.as_ref())
+    {
+        return open_kept_image(store, host, file, cx);
+    }
+    let embedded = (url.strip_prefix("data:"))
+        .and_then(|rest| rest.split_once(";base64,"))
+        .map(|(mime, data)| ImageAttachment::new(data, mime));
+    match embedded {
+        Some(image) => crate::app::images::open_read("reply-image", &image, cx),
+        None => cx.open_url(url),
     }
 }
 
@@ -1950,10 +1986,19 @@ fn render_row(
                     // Owned, so the session is no longer borrowed when the
                     // reply's state is brought up to date.
                     let (id, text) = (item.id.clone(), text.clone());
+                    let host = session_ref.host.clone();
                     let state = reply_state(replies, &id, &text, cx);
                     // Images saved on the daemon's host are read from there,
                     // through Base's view: the component's has no resolver.
-                    let links = reply_links(view.downgrade());
+                    let kept = remote.as_ref().map(|(images, _)| {
+                        (images.sources.iter())
+                            .map(|(source, file)| (source.clone(), images.files[*file].clone()))
+                            .collect()
+                    });
+                    let links = reply_links(
+                        view.downgrade(),
+                        kept.map(|kept| (core.store.clone(), host.clone(), kept)),
+                    );
                     let view = match remote {
                         Some((images, shown)) => gpui_kit::base::TextView::new(&state)
                             .selectable(true)

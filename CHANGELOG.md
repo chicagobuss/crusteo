@@ -7,6 +7,61 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.0-beta.2] - 2026-10-27
+
+### Added
+
+- Burrow's `--listen` can be given more than once (or `BURROW_LISTEN` comma-separated), so it can
+  serve loopback and a VPN's address and nothing else. An address that cannot be bound yet, such
+  as a VPN's just after boot, is tried again every few seconds until it can.
+- Images in a reply open full size on a click in crusteo, as a prompt's do, read from the host
+  when it keeps the file.
+- Skiff shows the images in an agent's replies, and a prompt's images sent from another client
+  or loaded from history: Reef reads the files a Burrow keeps a prompt's images in, and the files
+  a reply's images name, from the host. A tap opens one full size. Only files a conversation
+  names are read, never a path a phone gives.
+
+### Changed
+
+- An image pasted into crusteo's composer is sent at most 2000 px on its longest side, as Skiff
+  sends them, and as a JPEG when a PNG would be over 8 MB, so other clients can read it back
+  from the daemon's copy.
+- `burrow import-paseo` brings over the agents of every provider Burrow runs, not just Claude's:
+  Codex, Cursor, pi and Antigravity agents keep their sessions, which their next prompt resumes,
+  and Codex and pi agents their conversations too (Codex's read through `codex app-server`).
+  Only OpenCode and custom ACP agents are left in `~/.paseo`. Run it again on a host that has
+  switched to bring the rest over; what is already in Burrow stays as it is.
+
+### Fixed
+
+- An agent can message another agent on a Burrow host with Paseo 0.12's CLI (`paseo send` from
+  inside an agent), which refused with "Update the Paseo host to send messages with agent
+  provenance". Burrow takes the sender (`sourceAgentId`) as Paseo does: the agent gets the
+  message in Paseo's envelope naming the sender, and the conversation shows it as from that
+  agent. A child agent's first prompt from `paseo run` is shown the same way.
+- Paseo's CLI commands that wait work against Burrow: `paseo send` (unless `--no-wait`),
+  `paseo run` and `paseo wait` asked for `wait_for_finish_request`, which Burrow did not answer,
+  so they failed right after sending. Burrow answers as Paseo does: when the turn ends, the agent
+  asks for a permission, or the wait times out. `paseo delete --all` / `--cwd` (the agent
+  history), `paseo detach`, and a send's `sessionMode` (Paseo 0.13) work too.
+- Paseo's 0.13 app against a Burrow host: its sidebar's created and last-prompt sorts work (the
+  app turned them off for every host when one lacked them), and its workspace setup panel shows
+  a setup's progress instead of "Update the host to view workspace setup details". Workspaces
+  carry when they were made (an older one takes its first agent's time), their agents' latest
+  prompt, and their setup's status.
+- Paseo's app could not start an agent on a Burrow host: its tool and model pickers stayed on
+  "Loading..." because Burrow did not advertise `providersSnapshot`, which it already served.
+- `paseo ls -a` (and any read asking for archived agents) now lists a Burrow's archived agents.
+- `docs/burrow/compatibility.md` sets out how Burrow and Paseo work together in each direction,
+  which versions were checked and how; `scripts/paseo-cli-compat.sh` runs Paseo's own CLI against
+  a Burrow and reports each command.
+- The open card's bar in Lanes, and a popped-out window's, always show the host: a long
+  workspace name is cut short instead of pushing the host out of sight.
+- Skiff: a thought's details wrap as prose instead of running off to the right.
+- A tall image in a prompt, such as a phone screenshot, no longer draws down over the messages
+  below it; it fits its thumbnail, and clicking anywhere on it opens it full size. The same goes
+  for the composer's thumbnails.
+
 ## [0.1.0-beta.1] - 2026-10-26
 
 ### Added
@@ -425,7 +480,8 @@ First alpha, for a few early testers. Early software: expect rough edges.
 - Patched GPUI (`vendor/gpui-pre`) that skips redraws on window moves and lets cached views be
   reused after they move.
 
-[Unreleased]: https://github.com/chicagobuss/crusteo/compare/v0.1.0-beta.1...HEAD
+[Unreleased]: https://github.com/chicagobuss/crusteo/compare/v0.1.0-beta.2...HEAD
+[0.1.0-beta.2]: https://github.com/chicagobuss/crusteo/releases/tag/v0.1.0-beta.2
 [0.1.0-beta.1]: https://github.com/chicagobuss/crusteo/releases/tag/v0.1.0-beta.1
 [0.1.0-alpha.6]: https://github.com/chicagobuss/crusteo/releases/tag/v0.1.0-alpha.6
 [0.1.0-alpha.5]: https://github.com/chicagobuss/crusteo/releases/tag/v0.1.0-alpha.5

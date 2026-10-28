@@ -319,6 +319,90 @@ async fn a_conversations_images_are_fetched_by_key_with_a_device_token() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn images_a_daemon_keeps_in_files_are_read_from_it_by_key() {
+    use base64::Engine;
+    let encode = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
+    let (daemon, mut phone, addr) = fleet_at().await;
+    let (shot, chart) = (
+        b"\x89PNG a prompt's".to_vec(),
+        b"\x89PNG a reply's".to_vec(),
+    );
+    let kept = "/home/dev/.burrow/attachments/ab12.png";
+    daemon.add_file(kept, "image/png", &encode(&shot));
+    daemon.add_file(
+        "/tmp/paseo-attachments-x/chart.png",
+        "image/png",
+        &encode(&chart),
+    );
+    // History from another client: a Burrow lists a prompt's images by
+    // path, and a reply names the file an image was saved to.
+    daemon.seed_row(
+        "agt_a_orch",
+        "turn-pic",
+        "2026-10-26T10:00:00.000Z",
+        json!({"type": "user_message", "text": "", "messageId": "msg-kept",
+               "images": [{"path": kept, "mimeType": "image/png"}]}),
+    );
+    daemon.seed_row(
+        "agt_a_orch",
+        "turn-pic",
+        "2026-10-26T10:00:05.000Z",
+        json!({"type": "assistant_message", "messageId": "msg-kept-reply",
+               "text": "Here:\n\n![Image](file:///tmp/paseo-attachments-x/chart.png)\n"}),
+    );
+    open(&mut phone, "agt_a_orch").await;
+    let items = |phone: &Phone| -> Vec<Value> {
+        (phone.view("c").parts.iter())
+            .flat_map(|t| t["items"].as_array().cloned().unwrap_or_default())
+            .collect()
+    };
+    phone
+        .until("both images' keys", |p| {
+            let items = items(p);
+            items
+                .iter()
+                .any(|i| i["id"] == "msg-kept" && i["image_keys"].is_array())
+                && items.iter().any(|i| i["image_sources"].is_object())
+        })
+        .await;
+    let items = items(&phone);
+    let prompt = items.iter().find(|i| i["id"] == "msg-kept").unwrap();
+    assert_eq!(prompt["images"], 1);
+    let reply = items
+        .iter()
+        .find(|i| i["image_sources"].is_object())
+        .unwrap();
+    let sources = reply["image_sources"].as_object().unwrap();
+    assert_eq!(
+        sources.keys().collect::<Vec<_>>(),
+        ["file:///tmp/paseo-attachments-x/chart.png"]
+    );
+
+    let keys = [
+        (prompt["image_keys"][0].as_str().unwrap(), shot),
+        (sources.values().next().unwrap().as_str().unwrap(), chart),
+    ];
+    for (key, bytes) in keys {
+        let (head, body) = get(addr, &format!("/image/{key}?t={TOKEN}")).await;
+        assert!(head.starts_with("HTTP/1.1 200"), "{head}");
+        assert!(head.contains("Content-Type: image/png"), "{head}");
+        // Named by where it is, so kept for a day rather than for good.
+        assert!(
+            head.contains("max-age=86400") && !head.contains("immutable"),
+            "{head}"
+        );
+        assert_eq!(body, bytes);
+    }
+    // Only the files the conversation names are read.
+    let reads = || (daemon.requests().into_iter()).filter(|r| r == "file_explorer_request");
+    assert_eq!(reads().count(), 2);
+    let (head, _) = get(addr, &format!("/image/0123456789abcdef?t={TOKEN}")).await;
+    assert!(head.starts_with("HTTP/1.1 404"), "{head}");
+    assert_eq!(reads().count(), 2);
+    assert!(daemon.refused().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_message_to_a_busy_agent_waits_for_its_turn_to_end() {
     let (daemon, mut phone) = fleet().await;
     open(&mut phone, "agt_a_run").await;

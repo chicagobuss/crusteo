@@ -127,18 +127,36 @@ fn normalize(bytes: &[u8]) -> Result<Attachment, String> {
     let decoded = reader
         .decode()
         .map_err(|e| format!("Could not read clipboard image: {e}"))?;
-    let mut png = Cursor::new(Vec::new());
-    decoded
-        .write_to(&mut png, image::ImageFormat::Png)
-        .map_err(|e| e.to_string())?;
-    let png = png.into_inner();
-    if png.len() > MAX_BYTES {
-        return Err("This clipboard image is too large after conversion (20 MB limit).".into());
-    }
+    let decoded = if decoded.width().max(decoded.height()) > MAX_SIDE {
+        decoded.thumbnail(MAX_SIDE, MAX_SIDE)
+    } else {
+        decoded
+    };
+    let (bytes, format) = encode(&decoded)?;
     Ok(Attachment {
-        wire: ImageAttachment::new(STANDARD.encode(&png), "image/png"),
-        image: Arc::new(Image::from_bytes(ImageFormat::Png, png)),
+        wire: ImageAttachment::new(STANDARD.encode(&bytes), format.mime_type()),
+        image: Arc::new(Image::from_bytes(format, bytes)),
     })
+}
+
+/// The longest side sent, as Skiff sends: sharp on any screen, and small
+/// enough for other clients to read back from the daemon's copy.
+const MAX_SIDE: u32 = 2000;
+
+/// A PNG, or a JPEG when the PNG is more than another client may read back
+/// (a photo, say): what a daemon keeps is read with a size limit.
+fn encode(image: &image::DynamicImage) -> Result<(Vec<u8>, ImageFormat), String> {
+    let mut png = Cursor::new(Vec::new());
+    (image.write_to(&mut png, image::ImageFormat::Png)).map_err(|e| e.to_string())?;
+    let png = png.into_inner();
+    if png.len() as u64 <= fleet::images::MAX_IMAGE_BYTES {
+        return Ok((png, ImageFormat::Png));
+    }
+    let mut jpeg = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 85)
+        .encode_image(&image.to_rgb8())
+        .map_err(|e| e.to_string())?;
+    Ok((jpeg, ImageFormat::Jpeg))
 }
 
 /// `None` leaves ordinary text paste to the textarea. Images take precedence
@@ -183,9 +201,7 @@ pub fn strip<T: HasAttachments>(images: &[Attachment], this: WeakEntity<T>) -> A
             div()
                 .relative()
                 .child(
-                    img(image.image.clone())
-                        .w(px(72.))
-                        .h(px(64.))
+                    super::conversation::fitted(img(image.image.clone()), px(72.), px(64.))
                         .rounded(px(6.)),
                 )
                 .child(
@@ -267,5 +283,34 @@ mod tests {
         let mut full = vec![attachments[0].clone(); MAX_IMAGES];
         assert!(append(&mut full, attachments).is_err());
         assert_eq!(full.len(), MAX_IMAGES);
+    }
+
+    #[test]
+    fn large_pastes_are_scaled_down_and_a_photo_goes_as_jpeg() {
+        let sent = |image: image::DynamicImage| {
+            let mut png = Cursor::new(Vec::new());
+            image.write_to(&mut png, image::ImageFormat::Png).unwrap();
+            let wire = normalize(png.get_ref()).unwrap().wire;
+            let bytes = STANDARD.decode(wire.data.as_bytes()).unwrap();
+            (
+                wire.mime_type,
+                image::load_from_memory(&bytes).unwrap(),
+                bytes.len(),
+            )
+        };
+        // A wide screenshot: flat colour, so still a small PNG.
+        let (mime, image, _) = sent(image::DynamicImage::new_rgb8(4000, 1000));
+        assert_eq!(mime, "image/png");
+        assert_eq!((image.width(), image.height()), (MAX_SIDE, MAX_SIDE / 4));
+        // Noise, as a photo is to PNG: too big for other clients as a PNG.
+        let mut seed = 1u32;
+        let noise = image::RgbImage::from_fn(MAX_SIDE, MAX_SIDE, |_, _| {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            image::Rgb(seed.to_le_bytes()[..3].try_into().unwrap())
+        });
+        let (mime, image, len) = sent(image::DynamicImage::ImageRgb8(noise));
+        assert_eq!(mime, "image/jpeg");
+        assert_eq!((image.width(), image.height()), (MAX_SIDE, MAX_SIDE));
+        assert!(len as u64 <= fleet::images::MAX_IMAGE_BYTES, "{len}");
     }
 }

@@ -235,6 +235,17 @@ pub struct WorkspaceDescriptor {
     pub status: StateBucket,
     pub status_entered_at: Option<String>,
     pub activity_at: Option<String>,
+    /// Paseo 0.13's `workspaceSortTimes`: when it was made, and its agents'
+    /// latest prompt, for the app's created and last-prompt sorts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<String>,
+    #[serde(default)]
+    pub last_user_message_at: Option<String>,
+    /// Paseo 0.12's `workspaceSetupObservation`: the setup's status
+    /// (`running`, `completed`, `failed`, `blocked`), absent when it has
+    /// none; Paseo's app offers a setup tab only for one that has.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub setup_status: Option<String>,
     pub diff_stat: Option<Value>,
     pub scripts: Vec<Value>,
     pub git_runtime: Option<Value>,

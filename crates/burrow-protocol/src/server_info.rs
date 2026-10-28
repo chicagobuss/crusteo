@@ -47,6 +47,18 @@ pub mod feature {
     /// Workspaces are identified by id, several to a directory:
     /// `workspace.create.request` always makes a new one.
     pub const WORKSPACE_MULTIPLICITY: &str = "workspaceMultiplicity";
+    /// Paseo 0.12: `send_agent_message_request` takes `sourceAgentId`, the
+    /// agent sending it. Paseo's CLI refuses to send from inside an agent
+    /// without it ("Update the Paseo host to send messages with agent
+    /// provenance").
+    pub const AGENT_MESSAGE_PROVENANCE: &str = "agentMessageProvenance";
+    /// Paseo 0.13: workspaces carry `createdAt` and `lastUserMessageAt`.
+    /// The app sorts by them only when every host advertises this.
+    pub const WORKSPACE_SORT_TIMES: &str = "workspaceSortTimes";
+    /// `workspace.setup.subscribe.request` and workspaces' `setupStatus`:
+    /// Paseo 0.13's setup panel needs it ("Update the host to view
+    /// workspace setup details").
+    pub const WORKSPACE_SETUP_OBSERVATION: &str = "workspaceSetupObservation";
     // P1
     pub const PROVIDERS_SNAPSHOT: &str = "providersSnapshot";
     pub const CREATION_LIFECYCLE: &str = "creationLifecycle";
@@ -70,6 +82,12 @@ pub const P0_FEATURES: &[&str] = &[
     feature::PROJECT_CREATE_DIRECTORY,
     feature::PROJECT_REMOVE,
     feature::WORKSPACE_MULTIPLICITY,
+    feature::AGENT_MESSAGE_PROVENANCE,
+    feature::WORKSPACE_SORT_TIMES,
+    feature::WORKSPACE_SETUP_OBSERVATION,
+    // Paseo's app reads tools and models only from a host that says so: its
+    // pickers stayed on "Loading..." without it.
+    feature::PROVIDERS_SNAPSHOT,
 ];
 
 /// `ServerInfoStatusPayloadSchema`.
@@ -126,6 +144,7 @@ mod tests {
         assert_eq!(payload["features"]["projectAdd"], true);
         assert_eq!(payload["features"]["stableProjectIdentity"], true);
         assert_eq!(payload["features"]["projectRemove"], true);
+        assert_eq!(payload["features"]["agentMessageProvenance"], true);
         assert_eq!(payload["permissions"].as_array().unwrap().len(), 9);
     }
 }

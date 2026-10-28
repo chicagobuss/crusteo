@@ -13,7 +13,7 @@ It runs next to Paseo's daemon until it has proved as good or better. It uses it
 |---|---|
 | [install.md](install.md) | Download, run as a service, upgrade, roll back; replacing Paseo on a host |
 | [design.md](design.md) | Architecture, reasons, provider adapters, testing, roadmap, risks, open questions |
-| [compatibility.md](compatibility.md) | Which Paseo versions it serves, 0.12 changes, differential test results, open incompatibilities |
+| [compatibility.md](compatibility.md) | Burrow and Paseo in each direction (Paseo's CLI and app on Burrow, crusteo on Paseo, moving state over), the versions checked and how; 0.12 and 0.13 changes; open incompatibilities |
 | [protocol-inventory.md](protocol-inventory.md) | Every protocol v1 message with Crusteo usage, priority tier and status; Paseo's on-disk state |
 
 ## Status: runs Claude, Codex, pi, Antigravity and Cursor agents
@@ -130,7 +130,7 @@ Reef.
 
 | Flag | Default | |
 |---|---|---|
-| `--listen` | `127.0.0.1:6797` (`BURROW_LISTEN`) | There is no password support. Bind it wider only on a locked-down network. |
+| `--listen` | `127.0.0.1:6797` (`BURROW_LISTEN`, comma-separated) | Repeatable. The first must bind at start; the others are retried until they bind (a VPN that comes up later). There is no password support. Bind it wider only on a locked-down network. |
 | `--home` | `$BURROW_HOME`, else `~/.burrow` | Records, timelines and `server-id`, the identity clients key the host by. |
 | `--worktrees-root` | `<home>/worktrees` (`BURROW_WORKTREES_ROOT`) | Where new git worktrees go, as `<project hash>/<slug>`. |
 | `--claude-bin`, `--no-claude` | `claude` on PATH | Claude is offered when found. |
@@ -159,8 +159,9 @@ Other settings:
 
 ## Move a host over from Paseo
 
-`burrow import-paseo` copies a Paseo home's Claude agents into Burrow's state folder once,
-so they keep showing in every client after the host switches. The whole switch, the server id and
+`burrow import-paseo` copies a Paseo home's agents into Burrow's state folder once, for every
+provider both run (Claude, Codex, Cursor, pi and Antigravity), so they keep showing in every
+client after the host switches and pick up where Paseo left off. The whole switch, the server id and
 the way back included, is in [install.md](install.md#replace-paseo-on-a-host).
 
 ```sh
@@ -178,15 +179,16 @@ What comes over, from Paseo 0.11's records (`agents/<cwd slug>/<id>.json`,
 
 | Paseo | Burrow |
 |---|---|
-| A Claude agent | The same id, title, labels, cwd, workspace, timestamps (`updatedAt` is the later of `updatedAt` and `lastActivityAt`), attention, `archivedAt`, mode (`lastModeId`, else `config.modeId`), model, thinking level, system prompt, `runtimeInfo` and `persistence`. It comes back `closed`, and its next prompt resumes the Claude session with `--resume`. |
-| Its conversation | Read once from `$CLAUDE_CONFIG_DIR` (else `~/.claude`)`/projects/<encoded cwd>/<session>.jsonl` into Burrow's timeline, under a new epoch. Without a transcript the agent still comes over, with an empty timeline and a warning. |
+| An agent of Claude, Codex, Cursor, pi or Antigravity | The same provider, id, title, labels, cwd, workspace, timestamps (`updatedAt` is the later of `updatedAt` and `lastActivityAt`), attention, `archivedAt`, mode (`lastModeId`, else `config.modeId`), model, thinking level, system prompt, `runtimeInfo` and `persistence`. Paseo's resume handle is Burrow's: the Claude session (`--resume`), the Codex thread (`thread/resume`), the ACP session (`session/load`), pi's session (`--session`), Antigravity's `plugin:` conversation handle. It comes back `closed`, and its next prompt resumes that session. |
+| Its conversation | Read once into Burrow's timeline, under a new epoch, from the provider's own records: Claude's transcript (`$CLAUDE_CONFIG_DIR`, else `~/.claude`, `/projects/<encoded cwd>/<session>.jsonl`), the Codex thread through `codex app-server` (`thread/read`; `--codex-bin` as for the daemon), pi's session file (`$PI_CODING_AGENT_SESSION_DIR`, else `~/.pi/agent/sessions`). Cursor and Antigravity replay nothing ahead of a session, so theirs start empty; the session itself resumes. Without its records the agent still comes over, with an empty timeline and a warning; a Codex thread that could not be read is read at the agent's first prompt. |
 | A project | The same id, root, kind, names and `projectKey`. A project whose root Burrow already has is not added; its workspaces join Burrow's project. |
 | A workspace | The same id, project, cwd, kind, names, title, pin and label assignments. Git facts come from `git` if the checkout is there, else from Paseo's branch and worktree root. |
 | A label | The same name and colour, in Paseo's order. A label Burrow already has by that name keeps Burrow's colour. |
 | An active agent with no workspace in the registry | Placed by its cwd, as a new agent would be. |
 
 What is skipped, with one line each:
-- agents of other providers (`pi`, `codex`, ...) and internal agents;
+- agents of providers Burrow does not have (OpenCode, custom ACP agents such as a
+  `cursor-yolo`) and internal agents;
 - files and registry entries that do not parse, such as a label with a colour outside Paseo's
   ten;
 - archived projects and workspaces, unless an imported active agent sits in one: Burrow

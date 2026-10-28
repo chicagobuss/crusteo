@@ -381,8 +381,6 @@ fn known(devices: &[Device], token: &str) -> bool {
     !token.is_empty() && devices.iter().any(|d| same(&d.token, token))
 }
 
-/// Sends one image from a conversation. Its key is its content, so it can
-/// be kept for good: a phone fetches each image once.
 /// A request body of `length` bytes as JSON, from what was read with the
 /// head (`read`) and the rest of the stream.
 async fn read_body(
@@ -442,6 +440,9 @@ async fn hosts(
     }
 }
 
+/// Sends one image from a conversation: one sent inline, kept for good
+/// since its key is its contents, or one a daemon keeps in a file, read
+/// from the daemon.
 async fn image(
     stream: &mut TcpStream,
     key: &str,
@@ -456,11 +457,11 @@ async fn image(
         return respond(stream, "503 Service Unavailable", "text/plain", "Stopping").await;
     }
     let found = found.await.ok().flatten();
-    let decoded = found.as_ref().and_then(|image| {
+    let decoded = found.as_ref().and_then(|served| {
         base64::engine::general_purpose::STANDARD
-            .decode(image.data.trim())
+            .decode(served.image.data.trim())
             .ok()
-            .map(|bytes| (image.mime_type.as_str(), bytes))
+            .map(|bytes| (served.image.mime_type.as_str(), bytes))
     });
     let Some((mime, bytes)) = decoded else {
         return respond(stream, "404 Not Found", "text/plain", "Not found").await;
@@ -480,9 +481,14 @@ async fn image(
     } else {
         "application/octet-stream"
     };
+    // A file's key names where it is, not what is in it: kept for a day.
+    let cache = match found.as_ref().is_some_and(|served| served.by_content) {
+        true => "private, max-age=31536000, immutable",
+        false => "private, max-age=86400",
+    };
     let head = format!(
         "HTTP/1.1 200 OK\r\nContent-Type: {mime}\r\nContent-Length: {}\r\n\
-         Cache-Control: private, max-age=31536000, immutable\r\n\
+         Cache-Control: {cache}\r\n\
          X-Content-Type-Options: nosniff\r\nContent-Security-Policy: default-src 'none'; sandbox\r\n\
          Referrer-Policy: no-referrer\r\nConnection: close\r\n\r\n",
         bytes.len()

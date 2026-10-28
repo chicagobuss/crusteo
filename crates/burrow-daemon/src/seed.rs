@@ -85,6 +85,8 @@ pub fn demo(daemon: &Daemon) -> String {
             background: false,
             base_branch: None,
             archived_at: None,
+            created_at: None,
+            setup_status: None,
         }));
         let mut snapshot = agent(&agent_id, DEMO_ROOT, Some(&workspace_id), "Demo agent");
         snapshot.last_user_message_at = Some(snapshot.created_at.clone());

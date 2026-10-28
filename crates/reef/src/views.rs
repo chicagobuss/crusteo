@@ -9,6 +9,7 @@
 use std::collections::{HashMap, HashSet};
 
 use fleet::display::{ToolIcon, hidden_in_stream, tool_display};
+use fleet::images::ImageFile;
 use fleet::timeline::{ItemKind, TaskActivity, Timeline, Turn, finished_turns, turn_footer};
 use serde_json::{Map, Value, json};
 
@@ -166,6 +167,7 @@ pub fn older_index(timeline: &Timeline, index: usize, turns: usize, limits: &Lim
 /// The conversation from item `from` on, grouped by turn.
 pub fn conversation(
     timeline: &Timeline,
+    host: &str,
     cwd: &str,
     from: usize,
     limits: &Limits,
@@ -213,7 +215,7 @@ pub fn conversation(
         if let Some(turn) = turns.last_mut() {
             turn.items.push((
                 item.id.clone(),
-                item_json(item, cwd, limits.text_max, titles),
+                item_json(item, host, cwd, limits.text_max, titles),
             ));
         }
     }
@@ -276,6 +278,25 @@ pub fn image_key(content_key: u64) -> String {
     format!("{content_key:016x}")
 }
 
+/// The key of an image a daemon keeps as a file, for `/image/<key>`: its
+/// host and path, so one path on two hosts is two images.
+pub fn file_key(host: &str, file: &ImageFile) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    ("kept file", host, &file.cwd, &file.path).hash(&mut hash);
+    hash.finish()
+}
+
+/// The files a reply's Markdown images name, each destination with its
+/// file.
+pub fn reply_files(text: &str, cwd: &str) -> Vec<(String, ImageFile)> {
+    let cwd = Some(cwd).filter(|cwd| !cwd.is_empty());
+    let (files, sources) = fleet::images::markdown_files(text, cwd);
+    (sources.into_iter())
+        .map(|(source, file)| (source, files[file].clone()))
+        .collect()
+}
+
 /// The title of an agent on the conversation's host, when it knows it.
 pub type Titles<'a> = &'a dyn Fn(&str) -> Option<String>;
 
@@ -283,25 +304,46 @@ pub type Titles<'a> = &'a dyn Fn(&str) -> Option<String>;
 /// one-line form; `detail` fetches the rest.
 pub fn item_json(
     item: &fleet::timeline::Item,
+    host: &str,
     cwd: &str,
     text_max: usize,
     titles: Titles,
 ) -> Value {
     let mut out = json!({ "id": item.id, "at": item.timestamp });
     match &item.kind {
-        ItemKind::User { text, images, .. } => {
+        ItemKind::User {
+            text,
+            images,
+            image_files,
+            ..
+        } => {
             out["kind"] = json!("user");
             put_text(&mut out, text, text_max);
-            if !images.is_empty() {
-                out["images"] = json!(images.len());
-                // Each image is fetched on its own, from `/image/<key>`.
-                let keys: Vec<String> = images.iter().map(|i| image_key(i.content_key())).collect();
+            // Each image is fetched on its own, from `/image/<key>`: those
+            // sent from here while Reef holds them, else the files the
+            // daemon keeps them in, as crusteo shows a prompt's images.
+            let keys: Vec<String> = if images.is_empty() {
+                (image_files.iter())
+                    .map(|file| image_key(file_key(host, file)))
+                    .collect()
+            } else {
+                images.iter().map(|i| image_key(i.content_key())).collect()
+            };
+            if !keys.is_empty() {
+                out["images"] = json!(keys.len());
                 out["image_keys"] = json!(keys);
             }
         }
         ItemKind::Assistant { text, .. } => {
             out["kind"] = json!("assistant");
             put_text(&mut out, text, text_max);
+            // The key for each Markdown image a file on the host holds.
+            let sources: Map<String, Value> = (reply_files(text, cwd).into_iter())
+                .map(|(source, file)| (source, json!(image_key(file_key(host, &file)))))
+                .collect();
+            if !sources.is_empty() {
+                out["image_sources"] = Value::Object(sources);
+            }
         }
         ItemKind::Thought { text, loading } => {
             out["kind"] = json!("thought");
@@ -636,7 +678,7 @@ mod tests {
                 "detail": {"type": "unknown", "input": {"agentId": "p1", "prompt": "Thanks"}, "output": null}})),
         ]}));
         let titles = |id: &str| (id == "p1").then(|| "planner".to_string());
-        let view = conversation(&timeline, "", 0, &Limits::default(), &titles);
+        let view = conversation(&timeline, "example-a", "", 0, &Limits::default(), &titles);
         let items: Vec<&Value> = view
             .turns
             .iter()

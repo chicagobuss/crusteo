@@ -179,6 +179,38 @@ async fn hello_must_arrive_in_time() {
 }
 
 #[tokio::test]
+async fn a_further_address_is_served_once_it_can_be_bound() {
+    // Held by something else, as a VPN's address is missing before it is up.
+    let held = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let further = held.local_addr().unwrap();
+    let mut config = Config::ephemeral();
+    config.also_listen = vec![further];
+    config.timing.listen_retry = Duration::from_millis(50);
+    let running = start(Daemon::new(config)).await.expect("start");
+    // The first address serves meanwhile.
+    let (_ws, info) = admitted(&running).await;
+    assert_eq!(info["message"]["payload"]["status"], "server_info");
+
+    drop(held);
+    let url = format!("ws://{further}/ws");
+    let deadline = Instant::now() + WAIT;
+    let mut ws = loop {
+        match connect_async(url.as_str()).await {
+            Ok((ws, _)) => break ws,
+            Err(_) if Instant::now() < deadline => sleep(Duration::from_millis(50)).await,
+            Err(err) => panic!("connect to {url}: {err}"),
+        }
+    };
+    send(&mut ws, hello_frame(1)).await;
+    let info = next_json(&mut ws).await;
+    assert_eq!(
+        info["message"]["payload"]["serverId"],
+        running.daemon.config.server_id.as_str()
+    );
+    running.shutdown().await;
+}
+
+#[tokio::test]
 async fn the_path_must_be_ws() {
     let (running, _) = daemon().await;
     let url = format!("ws://{}/other", running.local_addr);

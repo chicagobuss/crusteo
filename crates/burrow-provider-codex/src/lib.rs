@@ -106,6 +106,21 @@ impl CodexProvider {
 }
 
 /// `model/list` and the user's config from a short-lived app-server.
+/// A thread's conversation as Codex keeps it, read through `binary`'s
+/// app-server (`thread/read`), for a thread Burrow did not record.
+pub fn read_thread(binary: &Path, cwd: &str, thread: &str) -> Result<Vec<HistoryItem>, String> {
+    let mut client = blocking::Client::start(binary, Some(Path::new(cwd)), PROBE_TIMEOUT)?;
+    let read = client.call(
+        "thread/read",
+        json!({"threadId": thread, "includeTurns": true}),
+        PROBE_TIMEOUT,
+    )?;
+    Ok(history::from_thread(
+        &read,
+        Some(cwd).filter(|c| !c.is_empty()),
+    ))
+}
+
 fn probe(binary: &Path) -> Result<Catalog, String> {
     let mut client = blocking::Client::start(binary, None, PROBE_TIMEOUT)?;
     let models = client.call("model/list", json!({}), PROBE_TIMEOUT)?;
@@ -184,22 +199,10 @@ impl Provider for CodexProvider {
     }
 
     fn history(&self, cwd: &str, session_id: &str) -> Vec<HistoryItem> {
-        let read = || -> Result<Value, String> {
-            let mut client =
-                blocking::Client::start(&self.binary, Some(Path::new(cwd)), PROBE_TIMEOUT)?;
-            client.call(
-                "thread/read",
-                json!({"threadId": session_id, "includeTurns": true}),
-                PROBE_TIMEOUT,
-            )
-        };
-        match read() {
-            Ok(thread) => history::from_thread(&thread, Some(cwd).filter(|c| !c.is_empty())),
-            Err(err) => {
-                tracing::warn!(%err, session_id, "could not read the Codex thread");
-                Vec::new()
-            }
-        }
+        read_thread(&self.binary, cwd, session_id).unwrap_or_else(|err| {
+            tracing::warn!(%err, session_id, "could not read the Codex thread");
+            Vec::new()
+        })
     }
 
     /// Paseo's Codex numbers its own turns.

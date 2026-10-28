@@ -1,14 +1,123 @@
-# Compatibility with Paseo daemons
+# Compatibility between Burrow and Paseo
 
-Burrow serves clients written for Paseo **0.10.3 through 0.12.0**: Crusteo, `reef` and
-the Paseo apps. All of these speak protocol version 1. Every wire change in that range is
-additive, so one daemon can serve all of them. It advertises only the feature flags it
-implements (`server_info.features`), and clients then hide or refuse the rest.
+Burrow and Paseo's daemon both speak Paseo's WebSocket protocol, version 1, so each side's
+clients can talk to the other side's daemon. This page says how far that goes in each direction,
+for which versions, and how each claim was checked. "Checked" here means one of three things:
+run against the real thing, covered by automated tests, or read from Paseo's source. The tables
+say which. The sections after them go into detail, area by area.
+
+Every wire change from Paseo 0.10.3 to 0.13.2 is additive, so one Burrow serves clients of all
+those versions. It advertises only the feature flags it implements (`server_info.features`), and
+clients hide or refuse the rest.
+
+## At a glance
+
+| Direction | Versions | State | How it was checked |
+|---|---|---|---|
+| Paseo's CLI → Burrow | 0.12.0, 0.13.2 | Every agent command works. `paseo host …` (connected hosts) does not | [`scripts/paseo-cli-compat.sh`](../../scripts/paseo-cli-compat.sh) against a Burrow with the echo provider: 19 of 19 as expected on both versions (2026-10-27) |
+| Paseo's app → Burrow | 0.13.2 (its web build) | The core flows work ([below](#paseos-app-against-burrow)). Terminals, diffs, file editing, schedules, voice, connected hosts and relay pairing do not | Walked through by hand against a throwaway Burrow (2026-10-27). Older app versions were not checked again |
+| crusteo and Reef → Paseo's daemon | 0.11.0, 0.12.0, 0.13.2 in daily use | Everything crusteo and Reef use | Daily use on a mixed fleet; `fleet` and `reef` tests against fake daemons in Paseo's shapes |
+| crusteo and Reef → Burrow | Burrow | Everything, and what Burrow adds (prompt images kept for every client, the label catalog in reef mode) | `burrow-daemon` tests drive Burrow with crusteo's own `paseo-client` and `fleet`; `reef` tests run a real Burrow; daily use |
+| Paseo's state (`~/.paseo`) → Burrow | 0.11.4, 0.13.0, and a desktop-app install | `burrow import-paseo` brings Claude, Codex, Cursor, pi and Antigravity agents (sessions resume), projects, workspaces and labels | Hosts moved over, one with 83 agents from 0.13.0; `burrow-daemon/tests/import_paseo.rs` |
+| Burrow → Paseo (going back) | Any | Paseo starts as it was, since its state was never written. What was done in Burrow since stays in `~/.burrow` | [install.md](install.md#going-back-to-paseo); not needed on any host so far |
+| Daemon ↔ daemon (Paseo's connected hosts) | 0.13 | Not supported. A Paseo daemon refuses Burrow as a connected host | Read from Paseo's source |
+
+## Paseo's CLI against Burrow
+
+`scripts/paseo-cli-compat.sh <paseo> <host:port> <repo>` runs each command below with Paseo's own
+CLI and says whether it did what it should. Its header shows how to install a CLI version on its
+own and start a Burrow that runs no model.
+
+| Command | 0.12.0 | 0.13.2 |
+|---|---|---|
+| `ls -g`, `ls -a -g` (archived agents too) | works | works |
+| `run` (waits for the reply), `run --no-wait` | works | works |
+| `run --new-workspace worktree` (a worktree, its `paseo.json` setup) | works | works |
+| `send` (waits for the reply), `send --no-wait` then `wait` | works | works |
+| `send` from inside an agent (`PASEO_AGENT_ID`: shown as from that agent) | works | works |
+| `run` from inside an agent (a child), `agent detach` | works | works |
+| `logs`, `inspect`, `stop`, `archive` | works | works |
+| `delete <id>`, `delete --all` | works | works |
+| `host ls` | no such command | refused: "Update the managing daemon to use connected hosts" |
+
+Before 2026-10-27 the waits, sends from an agent, `delete --all`, `detach` and `ls -a` failed:
+Burrow did not answer `wait_for_finish_request`, `fetch_agent_history_request` or
+`agent.detach.request`, did not advertise `agentMessageProvenance`, and left archived agents out
+of `includeArchived` reads.
+
+## Paseo's app against Burrow
+
+Paseo 0.13.2's web build (in its server package, `dist/server/web-ui`), served from a local
+folder and connected to a throwaway Burrow by **Direct connection**. Burrow was started with
+`--allow-origin` naming the page's origin, since a page's WebSocket sends one.
+
+| What | Works | Note |
+|---|---|---|
+| Direct connection: host and port, no password | yes | |
+| Sidebar: projects and workspaces | yes | |
+| Sort by **Created** and **Last prompt** | yes | Needs `workspaceSortTimes`, which every host must have, or the app turns these sorts off everywhere |
+| History, Search | yes | |
+| An agent's conversation, live replies | yes | |
+| Send a message | yes | |
+| **New workspace** with a first message; the tool, model, thinking and mode pickers | yes | Needs `providersSnapshot`. Without it the pickers stayed on "Loading..." |
+| A permission prompt, **Accept** | yes | |
+| A workspace's **Setup** panel | yes | Needs `workspaceSetupObservation` |
+| Terminals | no | Burrow has no terminals; the app logs the refused subscription |
+| Changes (diffs) and review, file editing | no | Not served |
+| Schedules | no | Shows an empty page |
+| Voice | no | |
+| Hosts management, connected hosts | no | |
+| Pairing link, relay | no | Direct connection only: Burrow has neither a relay nor passwords |
+| Import a session | not tried | |
+
+This walkthrough found and fixed `providersSnapshot`. Burrow answered the request, but did not
+advertise the flag the app waits for.
+
+## What changed in Paseo 0.12.0 → 0.13.2, and 0.14.0-beta.1
+
+Read from `git diff v0.12.0 v0.13.2` of Paseo's `packages/protocol`, `client`, `cli`, `app` and
+`server`. `protocolVersion` is still 1.
+
+| Change | Who needs it | Burrow |
+|---|---|---|
+| `send_agent_message_request.sessionMode` | CLI, app | Done: the mode is set before the prompt |
+| `workspaceSortTimes`: `createdAt`, `lastUserMessageAt` on workspaces | App sidebar | Done |
+| `workspaceSetupObservation`: `workspace.setup.subscribe.request`, `setupStatus` on workspaces | App setup panel | Done |
+| `connectedHosts`, `hostMultiplexing`: `hosts.*` requests, host routing | CLI `host`, app, daemon-to-daemon | Not done |
+| `agentMessageBatching`, `sourceAgentServerId` | Daemon-to-daemon only | Not done; the CLI never sets them |
+| `deliveryStatus: "queued"` on a send's reply | CLI prints "queued" | Not sent; the CLI prints "sent" |
+| `checkoutDiffAll` ("All changes" in review) | App | Not done; Burrow serves no diffs |
+| `fileByteWrites` | App file editor | Not done; Burrow edits no files |
+| Hello `sessionPermissions`, `routed`, `producer` | Connected hosts | Ignored |
+| 0.14 beta: `wholeTurnTimeline` | App | Not advertised; the app falls back |
+| 0.14 beta: `speechSettings`, `idleRuntimeCleanupSetting` | App settings cards | Not done |
+
+No timeline item types or agent snapshot fields changed in that range.
+
+## crusteo and Reef against Paseo's daemon
+
+crusteo's desktop and Reef read Paseo daemons of 0.11.0, 0.12.0 and 0.13.2 every day, alongside
+Burrows. They use the feature flags each host advertises (`directorySync`,
+`backgroundWorkspaces`, `providersSnapshot`, `workspaceLabels`, ...) and send nothing a host
+does not advertise. Nothing in 0.13 breaks them. Two small gaps:
+- a prompt carrying several agent messages batched in one envelope shows as raw text, where it
+  reaches crusteo unprojected;
+- an agent message's `sender.serverId` (a sender on another host) is ignored, so the sender's
+  title is looked up on the wrong host.
+
+## Checking a new Paseo release
+
+1. Read the diff of `packages/protocol/src/messages.ts` and of the `features` that
+   `websocket-server.ts` advertises, and search `packages/client` and `packages/app` for new
+   `features?.` gates and "Update the host" messages.
+2. Run `scripts/paseo-cli-compat.sh` with the new CLI.
+3. Serve the new web build against a throwaway Burrow and walk through the table above.
+4. Update this page: the tables above, and the sections below where behaviour changed.
 
 ## Which version's behaviour it follows
 
-Where versions differ, Burrow follows the newest, 0.12.0, unless the change would break an
-older client.
+Where versions differ, Burrow follows the newest, unless the change would break an older
+client.
 
 | Behaviour | 0.11 | 0.12 | Burrow |
 |---|---|---|---|
@@ -18,7 +127,7 @@ older client.
 | `background` on create together with `workspaceId` | Accepted | Refused | 0.12 |
 | Claude's `--version` probe | Any output | Only `x.y.z (Claude Code)` | 0.12 |
 | Background workspaces (`features.backgroundWorkspaces`) | Absent | Present | 0.12 ([below](#background-workspaces)) |
-| Agent-message provenance (`features.agentMessageProvenance`) | Absent | Present | Not advertised yet |
+| Agent-message provenance (`features.agentMessageProvenance`) | Absent | Present | 0.12: the prompt reaches the provider in Paseo's `<paseo-system kind="agent-message">` envelope and is recorded as an `agent_message` call from the sender |
 
 ## What changed from 0.11.2 to 0.12.0
 
@@ -576,8 +685,9 @@ them, on purpose:
 - **Notifications.** `shouldNotify` is always false, because `client_heartbeat` presence is not
   tracked yet.
 - **Not offered yet:** ACP agents other than Cursor, terminals, checking out change requests and
-  forge search ([above](#projects-and-workspaces)), `list_commands` content, the agent history
-  list, rewind and fork.
+  forge search ([above](#projects-and-workspaces)), `list_commands` content, search in the agent
+  history list (it lists every agent, unfiltered), rewind and fork, schedules, diffs and file
+  editing, voice, connected hosts, relay pairing and passwords.
 - **Antigravity:** the differences in [the table above](#antigravity): no `usage_updated`,
   Burrow turn ids, and no `isUnattended` on its mode. Antigravity's child conversations show only
   as `sub_agent` tool calls, as in Paseo.

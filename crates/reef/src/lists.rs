@@ -120,6 +120,11 @@ pub fn agent_row(host: &Host, agent: &Agent, cx: &Context) -> Value {
     put("notify", json!(cx.settings.notify_for(&key)));
     put("provider", json!(agent.provider_id()));
     put("model", json!(agent.model_label()));
+    // The effort chosen, else the one the provider resolved its default to.
+    let thinking = ["thinkingOptionId", "effectiveThinkingOptionId"]
+        .iter()
+        .find_map(|key| agent.raw[*key].as_str());
+    put("thinking", json!(thinking));
     if let Some(workspace) = workspace {
         put("workspace", json!(workspace_name(workspace)));
         let project = directory
@@ -830,6 +835,46 @@ mod tests {
             .into_iter()
             .map(|(k, _)| k)
             .collect()
+    }
+
+    #[test]
+    fn rows_say_the_model_and_the_effort_it_runs_at() {
+        let host = host(
+            "example-a",
+            vec![
+                agent(
+                    "chosen",
+                    "w1",
+                    "2026-10-17T08:00:00Z",
+                    json!({"model": "opus", "thinkingOptionId": "low", "effectiveThinkingOptionId": "low"}),
+                ),
+                agent(
+                    "default",
+                    "w1",
+                    "2026-10-17T08:00:00Z",
+                    json!({"thinkingOptionId": null, "effectiveThinkingOptionId": "high"}),
+                ),
+                agent("unknown", "w1", "2026-10-17T08:00:00Z", json!({})),
+            ],
+        );
+        let (settings, replies) = (Settings::default(), HashMap::new());
+        let cx = Context {
+            settings: &settings,
+            replies: &replies,
+            labels: None,
+        };
+        let row = |id: &str| agent_row(&host, host.directory.agents.get(id).unwrap(), &cx);
+        let chosen = row("chosen");
+        assert_eq!(
+            (&chosen["provider"], &chosen["model"], &chosen["thinking"]),
+            (&json!("claude"), &json!("opus"), &json!("low"))
+        );
+        assert_eq!(
+            row("default")["thinking"],
+            "high",
+            "the provider's resolved default"
+        );
+        assert!(row("unknown").get("thinking").is_none());
     }
 
     #[test]

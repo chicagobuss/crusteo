@@ -491,6 +491,22 @@ pub struct ImageNode {
     pub(super) embedded: OnceLock<Option<Arc<Image>>>,
 }
 
+/// crusteo: what a click on `image` opens: the link around it, else, when
+/// the view handles link clicks itself, the image's own address, so an
+/// unlinked image can be opened full size. Without a handler an unlinked
+/// image is not clickable, as upstream.
+pub(crate) fn image_link(
+    image: &ImageNode,
+    handler: &Option<Arc<super::text_view::LinkClickHandlerFn>>,
+) -> Option<LinkMark> {
+    image.link.clone().or_else(|| {
+        handler.as_ref().map(|_| LinkMark {
+            url: SharedString::from(image.url.to_string()),
+            ..LinkMark::default()
+        })
+    })
+}
+
 impl ImageNode {
     pub fn title(&self) -> String {
         self.title
@@ -2212,7 +2228,8 @@ impl Paragraph {
                         .object_fit(ObjectFit::Contain)
                         .max_w(relative(1.))
                         .when_some(image.width, |this, width| this.w(width))
-                        .when_some(image.link.clone(), |this, link| {
+                        // crusteo: an unlinked image opens too; see `image_link`.
+                        .when_some(image_link(image, &link_click_handler), |this, link| {
                             let link_click_handler = link_click_handler.clone();
                             let aux_link = link.clone();
                             let aux_link_click_handler = link_click_handler.clone();
@@ -2425,7 +2442,8 @@ impl Paragraph {
 
                 items.push(InlineFlowItem::Image {
                     source: node_cx.image_source(image),
-                    link: image.link.clone(),
+                    // crusteo: an unlinked image opens too; see `image_link`.
+                    link: image_link(image, &node_cx.link_click_handler),
                     title: image.title(),
                     width: image.width,
                     height: image.height,

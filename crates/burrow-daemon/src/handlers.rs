@@ -83,6 +83,7 @@ pub fn handle(
         "ping" => ping(&message),
         "fetch_agents_request" => parse(&message).and_then(|r| fetch_agents(daemon, subs, r)),
         "fetch_agent_request" => parse(&message).map(|r| fetch_agent(daemon, r)),
+        "fetch_agent_history_request" => parse(&message).and_then(|r| agent_history(daemon, r)),
         "fetch_workspaces_request" => {
             parse(&message).and_then(|r| fetch_workspaces(daemon, subs, r))
         }
@@ -106,6 +107,9 @@ pub fn handle(
             parse(&message).and_then(|r| events_subscription(subs, r))
         }
         "subscription.release.request" => parse(&message).map(|r| release(subs, r)),
+        "workspace.setup.subscribe.request" => {
+            parse(&message).map(|r| setup_subscription(daemon, subs, r))
+        }
         "file_explorer_request" => parse(&message).map(|r| read_file(daemon, r)),
         other if agent_requests::KINDS.contains(&other) => {
             agent_requests::handle(daemon, other, &message, shape, late).ok_or(Failure::Schema)
@@ -286,6 +290,26 @@ fn fetch_agents(daemon: &Daemon, subs: &mut Subscriptions, request: FetchAgentsR
                 })
             })
             .collect();
+        // `includeArchived` (`paseo ls -a`): archived agents too, which a
+        // sequenced read never asks for.
+        let archived = (request.filter.as_ref()).is_some_and(|f| f.include_archived == Some(true));
+        if archived && plan.is_none() {
+            matching.extend(
+                (store.archived.values())
+                    .filter(|agent| background || !store.in_background(agent))
+                    .filter_map(|agent| {
+                        let project = store.agent_placement(agent);
+                        view.matches(agent, &project).then(|| {
+                            let entry = AgentEntry {
+                                agent: agent.clone(),
+                                project,
+                                sync_seq: None,
+                            };
+                            (entry, 0)
+                        })
+                    }),
+            );
+        }
         let members = matching.iter().map(|(e, _)| e.agent.id.clone()).collect();
         matching.sort_by(|(a, _), (b, _)| {
             compare_by(&sort, &a.agent, &b.agent, agent_order).then(a.agent.id.cmp(&b.agent.id))
@@ -327,6 +351,65 @@ fn fetch_agents(daemon: &Daemon, subs: &mut Subscriptions, request: FetchAgentsR
         payload["subscriptionId"] = id.into();
     }
     Ok(vec![session("fetch_agents_response", payload)])
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SetupSubscribeRequest {
+    request_id: String,
+    workspace_id: String,
+}
+
+/// `workspace.setup.subscribe.request` (Paseo 0.13's setup panel): the
+/// setup's latest snapshot, then its `workspace_setup_progress` until the
+/// subscription is released. Opened before the snapshot is read, so no
+/// update between the two is lost.
+fn setup_subscription(
+    daemon: &Daemon,
+    subs: &mut Subscriptions,
+    request: SetupSubscribeRequest,
+) -> Vec<Value> {
+    let id = subs.open(Subscription::WorkspaceSetup {
+        workspace_id: request.workspace_id.clone(),
+    });
+    let snapshot = (daemon.setups.lock().unwrap_or_else(|p| p.into_inner()))
+        .get(&request.workspace_id)
+        .cloned();
+    vec![session(
+        "workspace.setup.subscribe.response",
+        json!({"requestId": request.request_id, "subscriptionId": id,
+               "workspaceId": request.workspace_id, "snapshot": snapshot}),
+    )]
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AgentHistoryRequest {
+    request_id: String,
+    #[serde(default)]
+    page: Option<PageRequest>,
+}
+
+/// `fetch_agent_history_request`: every agent, archived ones and those of
+/// background workspaces too, newest first, a page at a time. `paseo
+/// delete --all` and `--cwd` read it.
+fn agent_history(daemon: &Daemon, request: AgentHistoryRequest) -> Outcome {
+    let mut payload = daemon.read(|store| -> Result<Value, Failure> {
+        let mut agents: Vec<&AgentSnapshot> = (store.agents.iter())
+            .map(|(agent, _)| agent)
+            .chain(store.archived.values())
+            .collect();
+        agents.sort_by(|a, b| b.updated_at.cmp(&a.updated_at).then(a.id.cmp(&b.id)));
+        let total = agents.len();
+        let (start, limit) = page_window(request.page.as_ref(), total)?;
+        let entries: Vec<Value> = (agents.into_iter().skip(start).take(limit))
+            .map(|agent| json!({"agent": agent, "project": store.agent_placement(agent)}))
+            .collect();
+        let info = page_info(start, entries.len(), total);
+        Ok(json!({"entries": entries, "pageInfo": info}))
+    })?;
+    payload["requestId"] = request.request_id.into();
+    Ok(vec![session("fetch_agent_history_response", payload)])
 }
 
 fn fetch_agent(daemon: &Daemon, request: FetchAgentRequest) -> Vec<Value> {

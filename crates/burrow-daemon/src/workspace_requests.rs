@@ -854,14 +854,22 @@ pub(crate) fn start_workspace_setup(daemon: &Arc<Daemon>, made: &MadeWorktree) {
                     .insert(workspace_id.clone(), snapshot.clone());
                 let mut payload = snapshot;
                 payload["workspaceId"] = workspace_id.clone().into();
-                progress_daemon.apply(|_| {
-                    (
-                        (),
-                        vec![StoreEvent::Session {
-                            kind: "workspace_setup_progress",
-                            payload,
-                        }],
-                    )
+                progress_daemon.apply(|store| {
+                    // The workspace says how its setup stands, so Paseo's app
+                    // knows to offer it a setup tab.
+                    let mut events = match store.workspaces.get(&workspace_id) {
+                        Some(record) if record.setup_status.as_deref() != Some(status) => {
+                            let mut record = record.clone();
+                            record.setup_status = Some(status.to_string());
+                            store.upsert_workspace(record)
+                        }
+                        _ => Vec::new(),
+                    };
+                    events.push(StoreEvent::Session {
+                        kind: "workspace_setup_progress",
+                        payload,
+                    });
+                    ((), events)
                 });
             };
         let worktree = made.clone();

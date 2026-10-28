@@ -526,6 +526,8 @@ pub(crate) fn new_workspace(
         background: workspace.background,
         base_branch: workspace.base_branch,
         archived_at: None,
+        created_at: Some(clock::now_iso()),
+        setup_status: None,
     }));
     Ok((workspace_id, events))
 }
@@ -646,6 +648,8 @@ pub async fn create(daemon: &Arc<Daemon>, request: CreateAgent) -> Result<AgentS
             request.client_message_id.clone(),
             request.images.clone(),
             None,
+            // An agent another made hears its first prompt from it.
+            request.caller_agent_id.as_deref(),
         )
         .await
         {
@@ -1272,6 +1276,7 @@ pub async fn send(
     message_id: Option<String>,
     images: Vec<Image>,
     behavior: Option<&str>,
+    source_agent: Option<&str>,
 ) -> Result<String, String> {
     let agent_id = resolve(daemon, key)?;
     unarchive(daemon, &agent_id);
@@ -1290,10 +1295,16 @@ pub async fn send(
     }
     let client_message_id = message_id.unwrap_or_else(ids::agent_id);
     let text = text.trim().to_string();
-    let mut user_message = json!({"type": "user_message", "text": text,
-                              "messageId": client_message_id, "clientMessageId": client_message_id});
+    let (prompt, mut user_message) = match source_agent.filter(|s| !s.trim().is_empty()) {
+        Some(sender) => from_agent(daemon, sender, &client_message_id, &text),
+        None => (
+            text.clone(),
+            json!({"type": "user_message", "text": text,
+                   "messageId": client_message_id, "clientMessageId": client_message_id}),
+        ),
+    };
     // Kept, unlike Paseo, so other clients can show them too.
-    if !images.is_empty() {
+    if !images.is_empty() && source_agent.is_none() {
         let (keeper, kept) = (daemon.clone(), images.clone());
         let kept = tokio::task::spawn_blocking(move || keeper.attachments.keep(&kept))
             .await
@@ -1307,7 +1318,7 @@ pub async fn send(
         if behavior == Some("steer") && live.info.capabilities.steer {
             let _ = live.commands.send(Command::Steer {
                 message_id: client_message_id.clone(),
-                text: text.clone(),
+                text: prompt,
                 images,
             });
             record(daemon, &agent_id, Some(turn), user_message);
@@ -1362,10 +1373,130 @@ pub async fn send(
         .send(Command::Prompt {
             turn_id,
             message_id: client_message_id,
-            text,
+            text: prompt,
             images,
         })
         .map_err(|_| format!("Agent {agent_id} is not running"))?;
+    Ok(agent_id)
+}
+
+/// A prompt another agent sent, as Paseo 0.12 delivers one: the provider
+/// gets it in a `<paseo-system>` envelope naming the sender, so the agent
+/// knows it is not from its user, and the timeline has it as an
+/// `agent_message` call from the sender, which clients show as "From ...".
+/// Returns the provider's text and the timeline item.
+fn from_agent(daemon: &Daemon, sender: &str, message_id: &str, text: &str) -> (String, Value) {
+    let title = daemon
+        .read(|store| store.agent(sender).and_then(|agent| agent.title.clone()))
+        .map(|title| title.trim().to_string())
+        .filter(|title| !title.is_empty());
+    let named = match &title {
+        Some(title) => format!(" source-agent-title=\"{}\"", escape_xml(title)),
+        None => String::new(),
+    };
+    let envelope = format!(
+        "<paseo-system version=\"1\" kind=\"agent-message\" source-agent-id=\"{}\" message-id=\"{}\"{named}>\n{}\n</paseo-system>",
+        escape_xml(sender),
+        escape_xml(message_id),
+        escape_xml(text),
+    );
+    let mut from = json!({ "id": sender });
+    if let Some(title) = title {
+        from["title"] = title.into();
+    }
+    let item = json!({
+        "type": "tool_call",
+        "callId": format!("paseo-agent-message:{message_id}"),
+        "agentMessage": { "event": "message", "sender": from, "text": text },
+        "name": "agent_message",
+        "status": "completed",
+        "error": null,
+        "detail": { "type": "plain_text", "text": text, "icon": "bot" },
+    });
+    (envelope, item)
+}
+
+/// As Paseo escapes an envelope's attributes and body.
+fn escape_xml(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
+}
+
+/// `wait_for_finish_request`, answered as Paseo answers it: at once when the
+/// agent waits for a permission or is not working, else as soon as it asks
+/// for one or its turn ends; `timeout` after `timeout_ms`. The payload's
+/// `status` is `idle`, `error`, `permission` or `timeout`, with the agent as
+/// `final`, its last error, and its last reply as `lastMessage`.
+pub async fn wait_for_finish(daemon: &Arc<Daemon>, key: &str, timeout_ms: Option<u64>) -> Value {
+    let answer = |status: &str, agent: Option<&AgentSnapshot>, error: Option<String>| {
+        let last = agent
+            .map(|agent| daemon.read(|store| last_assistant_text(store, &agent.id)))
+            .filter(|text| !text.is_empty());
+        json!({"status": status, "final": agent, "error": error, "lastMessage": last})
+    };
+    // Watched before the first look, so a change between the two is seen.
+    let mut changes = daemon.changes();
+    let agent_id = match resolve(daemon, key) {
+        Ok(id) => id,
+        Err(error) => return answer("error", None, Some(error)),
+    };
+    let deadline = (timeout_ms.filter(|ms| *ms > 0))
+        .map(|ms| tokio::time::Instant::now() + Duration::from_millis(ms));
+    loop {
+        let Some(agent) = daemon.read(|store| store.agent(&agent_id).cloned()) else {
+            return answer("error", None, Some(format!("Agent not found: {agent_id}")));
+        };
+        let busy = matches!(
+            agent.status,
+            AgentStatus::Running | AgentStatus::Initializing
+        ) || agent.active_turn.is_some();
+        if !agent.pending_permissions.is_empty() {
+            return answer("permission", Some(&agent), None);
+        }
+        if !busy && agent.status == AgentStatus::Error {
+            let error = (agent.last_error.clone())
+                .filter(|error| !error.trim().is_empty())
+                .unwrap_or_else(|| "Agent failed".into());
+            return answer("error", Some(&agent), Some(error));
+        }
+        if !busy {
+            return answer("idle", Some(&agent), None);
+        }
+        // Until the agents change (or the stream skipped some, so look again).
+        let changed = async {
+            loop {
+                match changes.recv().await {
+                    Ok(event) if matches!(*event, StoreEvent::Agent { .. }) => return true,
+                    Ok(_) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => return true,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => return false,
+                }
+            }
+        };
+        let changed = match deadline {
+            Some(deadline) => match tokio::time::timeout_at(deadline, changed).await {
+                Ok(changed) => changed,
+                Err(_) => return answer("timeout", Some(&agent), None),
+            },
+            None => changed.await,
+        };
+        if !changed {
+            return answer("error", Some(&agent), Some("Burrow is stopping".into()));
+        }
+    }
+}
+
+/// `agent.detach.request` (`paseo detach`): the agent no longer belongs to
+/// the agent that made it, so it stands on its own in clients.
+pub fn detach(daemon: &Arc<Daemon>, key: &str) -> Result<String, String> {
+    let agent_id = resolve(daemon, key)?;
+    update(daemon, &agent_id, |agent| {
+        agent.labels.remove(PARENT_AGENT_LABEL);
+        agent.labels.remove("paseo.parent-server-id");
+    });
     Ok(agent_id)
 }
 

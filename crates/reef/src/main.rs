@@ -205,6 +205,7 @@ async fn demo_fleet() -> Result<Vec<HostConfig>, String> {
             daemon.set_background_workspaces(true);
             fake::seed(&daemon, prefix);
             fake::seed_agent_messages(&daemon, prefix);
+            fake::seed_images(&daemon, "agt_a_orch");
             fake::seed_background(&daemon, prefix);
         }
         fake::seed_many(&daemon, prefix, many);

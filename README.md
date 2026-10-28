@@ -321,8 +321,8 @@ Open Settings with Cmd/Ctrl+, to enable **Colored lanes**, then group by label a
 Paseo's daemon, so Crusteo, `reef` and the Paseo apps can all connect to it. By default it
 runs next to Paseo's daemon: its own port (`127.0.0.1:6797`; Paseo uses 6767) and its own state
 folder (`~/.burrow`, or `BURROW_HOME`). It can also replace Paseo on a host, keeping the
-host's identity, and `burrow import-paseo` brings over its Claude agents; it only ever reads
-`~/.paseo`.
+host's identity, and `burrow import-paseo` brings over its agents of every provider Burrow runs,
+which carry on their sessions; it only ever reads `~/.paseo`.
 
 **Status: early.** It runs Claude Code, Codex, Antigravity, pi and Cursor agents with your own
 installs of each. Requests it doesn't support yet get the same answer Paseo's daemon gives a

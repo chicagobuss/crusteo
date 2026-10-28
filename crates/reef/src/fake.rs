@@ -80,6 +80,9 @@ struct State {
     background_workspaces: bool,
     /// The directory reads received, whole.
     directory_reads: Vec<Value>,
+    /// Image files on the host by path, mime type and base64, as
+    /// `file_explorer_request` reads them.
+    files: HashMap<String, (String, String)>,
 }
 
 /// A running fake daemon. Dropping it does not stop it; tests end with
@@ -213,6 +216,12 @@ impl FakeDaemon {
                     "payload": {"entries": entries}})));
             }
         }
+    }
+
+    /// Puts an image file on the host, `data` in base64, for
+    /// `file_explorer_request` to read.
+    pub fn add_file(&self, path: &str, mime_type: &str, data: &str) {
+        (self.lock().files).insert(path.to_string(), (mime_type.into(), data.into()));
     }
 
     /// The workspace as the daemon has it now.
@@ -783,6 +792,16 @@ fn handle(state: &mut State, socket: u64, message: &Value) -> Value {
             }
             reply("fetch_workspaces_response", payload)
         }
+        // As Paseo answers a read of an image file: base64, or why not.
+        "file_explorer_request" => {
+            let path = message["path"].as_str().unwrap_or_default();
+            let payload = match state.files.get(path) {
+                Some((mime, data)) => json!({ "error": null, "file": {
+                    "kind": "image", "encoding": "base64", "content": data, "mimeType": mime } }),
+                None => json!({ "error": "File not found", "file": null }),
+            };
+            reply("file_explorer_response", payload)
+        }
         "get_providers_snapshot_request" => {
             let entries = state.providers.clone();
             reply(
@@ -940,6 +959,7 @@ pub fn workspace(id: &str, project: &str, name: &str, labels: &[&str]) -> Value 
 pub fn agent(id: &str, workspace: &str, title: &str, updated_at: &str, extra: Value) -> Value {
     let mut agent = json!({
         "id": id, "provider": "claude", "model": "claude-opus-5-5", "cwd": "/home/dev/code/shop",
+        "thinkingOptionId": null, "effectiveThinkingOptionId": "medium",
         "workspaceId": workspace, "title": title, "status": "idle",
         "createdAt": "2026-10-17T08:00:00.000Z", "updatedAt": updated_at,
         "labels": {}, "pendingPermissions": [], "requiresAttention": false, "archivedAt": null,
@@ -1360,6 +1380,38 @@ pub fn seed(daemon: &FakeDaemon, prefix: &str) {
             "text": ask, "messageId": format!("{id}-m"), "clientMessageId": format!("{id}-m")}),
         );
     }
+}
+
+/// A conversation with images kept as files, as a Burrow keeps a prompt's
+/// (a phone screenshot sent from another client) and Paseo saves an
+/// agent's image output and names it in the reply.
+pub fn seed_images(daemon: &FakeDaemon, agent: &str) {
+    use base64::Engine;
+    let encode = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
+    let shot = "/home/dev/.burrow/attachments/demo-shot.png";
+    let chart = "/tmp/paseo-attachments-demo/chart.png";
+    daemon.add_file(shot, "image/png", &encode(include_bytes!("fake/shot.png")));
+    daemon.add_file(
+        chart,
+        "image/png",
+        &encode(include_bytes!("fake/chart.png")),
+    );
+    let at = |at: &str| format!("2026-10-17T{at}.000Z");
+    daemon.seed_row(
+        agent,
+        "turn-images",
+        &at("09:40:00"),
+        json!({"type": "user_message", "text": "This screen looks off on my phone. Can you chart the load times?",
+               "messageId": "demo-images-ask", "images": [{"path": shot, "mimeType": "image/png"}]}),
+    );
+    daemon.seed_row(
+        agent,
+        "turn-images",
+        &at("09:41:30"),
+        json!({"type": "assistant_message", "messageId": "demo-images-reply",
+               "text": format!("The list's padding doubles on narrow screens. Load times by step:\n\n\
+                   ![Image](file://{chart})\n\nThe fourth step is the slow one.")}),
+    );
 }
 
 /// Agents of [`seed`]'s fleet messaging each other, as Paseo 0.12 shows it:

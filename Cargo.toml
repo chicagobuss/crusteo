@@ -7,7 +7,7 @@ exclude = ["vendor"]
 [workspace.package]
 # The release version, which a release tag must match. crusteo, reef and
 # burrow all report it.
-version = "0.1.0-beta.1"
+version = "0.1.0-beta.2"
 edition = "2024"
 license = "Apache-2.0"
 repository = "https://github.com/chicagobuss/crusteo"

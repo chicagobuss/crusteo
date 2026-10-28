@@ -12,18 +12,23 @@
 //!
 //! They go into Burrow's home through the store, as if Burrow had
 //! made them:
-//! - **Claude agents** keep their id, title, labels, timestamps, attention,
-//!   archive state, mode, model and thinking level, and their Claude
-//!   session, which their next prompt resumes. Their timeline is read once
-//!   from Claude's transcript (a new epoch). They come back `closed`.
+//! - **Agents of every provider both run** (Claude, Codex, Cursor, pi and
+//!   Antigravity) keep their id, title, labels, timestamps, attention,
+//!   archive state, mode, model and thinking level, and their provider
+//!   session, which their next prompt resumes: Paseo's resume handle is
+//!   Burrow's. They come back `closed`. Their timeline is read once from
+//!   the provider's own records where it keeps them readable (Claude's
+//!   transcripts, Codex's threads through its app-server, pi's session
+//!   files), as a new epoch. Cursor and Antigravity replay nothing ahead of
+//!   a session, so theirs start empty; the session itself carries on.
 //! - **Projects and workspaces** keep their ids. A project whose root the
 //!   Burrow already has maps to that one. Burrow cannot archive either,
 //!   so archived ones are left out unless an imported active agent sits in
 //!   one. Their label assignments come with them.
 //! - **Labels** keep their names and colours; a label Burrow already has
 //!   by that name keeps Burrow's colour.
-//! - **Skipped:** other providers, internal agents, and records that do not
-//!   parse.
+//! - **Skipped:** providers Burrow does not have (OpenCode, custom ACP
+//!   agents), internal agents, and records that do not parse.
 //!
 //! What Burrow's home already has wins: an id it knows is left alone,
 //! so a second run adds nothing. Burrow's daemon must not be running on
@@ -51,8 +56,6 @@ use crate::git::{self, GitFacts};
 use crate::persist::{self, Persist};
 use crate::store::{ProjectRecord, Store, WorkspaceRecord};
 
-const CLAUDE: &str = "claude";
-
 /// What to import, from where, into where.
 #[derive(Debug, Clone)]
 pub struct Options {
@@ -62,6 +65,11 @@ pub struct Options {
     pub home: PathBuf,
     /// Claude Code's config directory, which holds the transcripts.
     pub claude_dir: PathBuf,
+    /// pi's sessions directory.
+    pub pi_sessions: PathBuf,
+    /// Codex's CLI, whose app-server reads its threads back; `None` leaves
+    /// an imported Codex agent's timeline to be read at its first prompt.
+    pub codex: Option<PathBuf>,
     /// Report what would happen; write nothing.
     pub dry_run: bool,
 }
@@ -214,6 +222,8 @@ struct PaseoWorkspace {
     /// Paseo 0.12's background workspaces.
     #[serde(default)]
     background: bool,
+    #[serde(default)]
+    created_at: Option<String>,
 }
 
 struct Paseo {
@@ -251,13 +261,13 @@ pub fn run(options: &Options) -> io::Result<Report> {
     if options.dry_run {
         let mut store = Store::restore(persist::read(&options.home)?);
         store.server_id = server_id;
-        import(&mut store, paseo, &options.claude_dir, &mut report);
+        import(&mut store, paseo, options, &mut report);
         return Ok(report);
     }
     let (persist, writer, loaded) = Persist::open(&options.home)?;
     let mut store = Store::open(persist.clone(), loaded);
     store.server_id = server_id;
-    let imported = import(&mut store, paseo, &options.claude_dir, &mut report);
+    let imported = import(&mut store, paseo, options, &mut report);
     persist.flush();
     drop(store);
     drop(writer);
@@ -417,12 +427,12 @@ fn updated_at(agent: &PaseoAgent) -> &str {
 // --- writing Burrow's store ---------------------------------------------
 
 /// Applies the import to `store`. Returns the ids of the agents it added.
-fn import(store: &mut Store, paseo: Paseo, claude_dir: &Path, report: &mut Report) -> Vec<String> {
+fn import(store: &mut Store, paseo: Paseo, options: &Options, report: &mut Report) -> Vec<String> {
     let mut agents = Vec::new();
     for agent in paseo.agents {
-        if agent.provider != CLAUDE {
+        if provider_info(&agent.provider).is_none() {
             report.skip(format!(
-                "agent {}: provider \"{}\" (only Claude agents are imported)",
+                "agent {}: provider \"{}\" (Burrow has no such provider)",
                 agent.id, agent.provider
             ));
         } else if agent.internal == Some(true) {
@@ -521,6 +531,8 @@ fn import(store: &mut Store, paseo: Paseo, claude_dir: &Path, report: &mut Repor
             background: workspace.background,
             base_branch: None,
             archived_at: None,
+            created_at: workspace.created_at.clone(),
+            setup_status: None,
         });
         report.workspaces += 1;
         report.note(format!("workspace {id} {}", workspace.cwd));
@@ -540,11 +552,90 @@ fn import(store: &mut Store, paseo: Paseo, claude_dir: &Path, report: &mut Repor
         }
     }
 
-    let info = burrow_provider_claude::info(None);
     agents
         .into_iter()
-        .map(|agent| import_agent(store, agent, &info, claude_dir, report))
+        .map(|agent| import_agent(store, agent, options, report))
         .collect()
+}
+
+/// What Burrow offers for one of Paseo's provider ids, before its CLI is
+/// probed (the session reports its own models and modes); `None` for one
+/// Burrow does not have.
+fn provider_info(provider: &str) -> Option<ProviderInfo> {
+    match provider {
+        "claude" => Some(burrow_provider_claude::info(None)),
+        "codex" => Some(burrow_provider_codex::info(None, &Default::default())),
+        "pi" => Some(burrow_provider_pi::info(Vec::new())),
+        burrow_provider_antigravity::catalog::PROVIDER_ID => {
+            Some(burrow_provider_antigravity::info(Vec::new()))
+        }
+        "cursor" => Some(burrow_provider_acp::info(
+            &burrow_provider_acp::cursor(None),
+            &Default::default(),
+        )),
+        _ => None,
+    }
+}
+
+/// The conversation behind an imported session, from the provider's own
+/// records. `Err` says why there is none, and what becomes of the timeline.
+fn history(
+    agent: &PaseoAgent,
+    label: &str,
+    session: &str,
+    options: &Options,
+) -> Result<Vec<burrow_provider::HistoryItem>, String> {
+    match agent.provider.as_str() {
+        "claude" => {
+            let path =
+                history::locate(&options.claude_dir, &agent.cwd, session).ok_or_else(|| {
+                    format!(
+                        "no transcript for Claude session {session} under {}; its timeline starts \
+                     empty",
+                        options.claude_dir.join("projects").display()
+                    )
+                })?;
+            let text = fs::read_to_string(&path).map_err(|err| {
+                format!(
+                    "cannot read {} ({err}); its timeline starts empty",
+                    path.display()
+                )
+            })?;
+            Ok(history::parse(&text))
+        }
+        "codex" => {
+            let Some(binary) = &options.codex else {
+                return Err(format!(
+                    "Codex is not here to read thread {session}; its timeline is read at the \
+                     agent's first prompt"
+                ));
+            };
+            burrow_provider_codex::read_thread(binary, &agent.cwd, session).map_err(|err| {
+                format!(
+                    "cannot read Codex thread {session} ({err}); its timeline is read at the \
+                     agent's first prompt"
+                )
+            })
+        }
+        "pi" => {
+            burrow_provider_pi::history::locate(&options.pi_sessions, &agent.cwd, session)
+                .ok_or_else(|| {
+                    format!(
+                        "no pi session {session} under {}; its timeline starts empty",
+                        options.pi_sessions.display()
+                    )
+                })?;
+            Ok(burrow_provider_pi::history::read(
+                &options.pi_sessions,
+                &agent.cwd,
+                session,
+            ))
+        }
+        _ => Err(format!(
+            "{label} replays nothing ahead of a session, so its timeline starts empty; the \
+             session itself resumes"
+        )),
+    }
 }
 
 /// The checkout as git reports it now, else as Paseo recorded it (the
@@ -564,8 +655,8 @@ fn checkout(workspace: &PaseoWorkspace) -> Option<GitFacts> {
     })
 }
 
-/// The Claude session to resume: the persistence handle, else the runtime
-/// info's session id.
+/// The provider session to resume: the persistence handle, else the
+/// runtime info's session id.
 fn session_id(agent: &PaseoAgent) -> Option<String> {
     let handle = agent.persistence.as_ref().map(|p| &p["sessionId"]);
     let runtime = agent.runtime_info.as_ref().map(|r| &r["sessionId"]);
@@ -579,17 +670,18 @@ fn session_id(agent: &PaseoAgent) -> Option<String> {
 fn import_agent(
     store: &mut Store,
     agent: PaseoAgent,
-    info: &ProviderInfo,
-    claude_dir: &Path,
+    options: &Options,
     report: &mut Report,
 ) -> String {
     let id = agent.id.clone();
+    let info = provider_info(&agent.provider).expect("only known providers are imported");
+    let info = &info;
     let config = agent.config.as_ref();
     let session = session_id(&agent);
     let persistence = session.as_ref().map(|session| match &agent.persistence {
         // Paseo's handle has Burrow's shape already; keep its metadata.
         Some(handle) if handle["sessionId"] == session.as_str() => handle.clone(),
-        _ => json!({"provider": CLAUDE, "sessionId": session, "nativeHandle": session}),
+        _ => json!({"provider": agent.provider, "sessionId": session, "nativeHandle": session}),
     });
     // Paseo only shows attention that has a reason and a time.
     let attention = agent.requires_attention == Some(true)
@@ -623,7 +715,7 @@ fn import_agent(
     };
     let snapshot = AgentSnapshot {
         id: id.clone(),
-        provider: CLAUDE.into(),
+        provider: agent.provider.clone(),
         cwd: agent.cwd.clone(),
         workspace_id,
         model: config.and_then(|c| c.model.clone()),
@@ -666,29 +758,20 @@ fn import_agent(
     let mut rows = 0;
     match &session {
         None => warnings.push(format!(
-            "agent {id}: no Claude session id; its timeline starts empty and its next prompt \
-             starts a new session"
+            "agent {id}: no {} session id; its timeline starts empty and its next prompt \
+             starts a new session",
+            info.label
         )),
-        Some(session) => match history::locate(claude_dir, &agent.cwd, session) {
-            None => warnings.push(format!(
-                "agent {id}: no transcript for Claude session {session} under {}; its \
-                 timeline starts empty",
-                claude_dir.join("projects").display()
-            )),
-            Some(path) => match fs::read_to_string(&path) {
-                Err(err) => warnings.push(format!(
-                    "agent {id}: cannot read {} ({err}); its timeline starts empty",
-                    path.display()
-                )),
-                Ok(text) => {
-                    for entry in history::parse(&text) {
-                        let at = entry.timestamp.unwrap_or_else(clock::now_iso);
-                        if store.append_timeline(&id, entry.item, None, at).is_some() {
-                            rows += 1;
-                        }
+        Some(session) => match history(&agent, &info.label, session, options) {
+            Err(why) => warnings.push(format!("agent {id}: {why}")),
+            Ok(entries) => {
+                for entry in entries {
+                    let at = entry.timestamp.unwrap_or_else(clock::now_iso);
+                    if store.append_timeline(&id, entry.item, None, at).is_some() {
+                        rows += 1;
                     }
                 }
-            },
+            }
         },
     }
     if !archived && !Path::new(&agent.cwd).is_dir() {
@@ -705,9 +788,10 @@ fn import_agent(
             .as_deref()
             .map_or_else(|| "(untitled)".to_string(), |t| format!("\"{t}\"")),
         if archived { ", archived" } else { "" },
-        session
-            .as_deref()
-            .map_or_else(String::new, |s| format!(", resumes Claude session {s}")),
+        session.as_deref().map_or_else(String::new, |s| format!(
+            ", resumes {} session {s}",
+            info.label
+        )),
     ));
     notes.into_iter().for_each(|note| report.note(note));
     warnings

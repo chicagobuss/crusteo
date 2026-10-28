@@ -218,6 +218,60 @@ async fn prompt_images_are_kept_for_every_client() {
     std::fs::remove_dir_all(home).unwrap();
 }
 
+/// Paseo 0.12's provenance: a message one agent sends another reaches the
+/// provider in an envelope naming the sender, and the timeline has it as an
+/// `agent_message` call from the sender, not as the user's prompt.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_message_from_another_agent_says_who_sent_it() {
+    let h = harness().await;
+    let sender = h
+        .request(json!({"type": "agent.create.request", "labels": {},
+            "config": {"provider": "echo", "cwd": h.cwd.to_string_lossy(), "title": "Plan & ship"}}))
+        .await["agent"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let agent = h.create().await;
+    let reply = h
+        .request(
+            json!({"type": "send_agent_message_request", "agentId": agent,
+            "text": "Check the <ledger>", "messageId": "m-from", "sourceAgentId": sender}),
+        )
+        .await;
+    assert_eq!(reply["accepted"], true, "{reply}");
+    h.until("turn_completed", |m| stream_event(m, "turn_completed"))
+        .await;
+
+    let page = h.tail(&agent).await;
+    let items: Vec<&Value> = (page["entries"].as_array().unwrap().iter())
+        .map(|entry| &entry["item"])
+        .collect();
+    assert_eq!(items[0]["type"], "tool_call");
+    assert_eq!(items[0]["name"], "agent_message");
+    assert_eq!(items[0]["callId"], "paseo-agent-message:m-from");
+    assert_eq!(
+        items[0]["agentMessage"],
+        json!({"event": "message", "sender": {"id": sender, "title": "Plan & ship"},
+               "text": "Check the <ledger>"})
+    );
+    // The conversation model shows who it came from, not a prompt of the
+    // user's; the agent was handed the envelope, escaped as Paseo escapes it.
+    let mut history = Timeline::default();
+    history.apply_page(&page);
+    assert_eq!(
+        summary(&history),
+        [
+            "tool:agent_message:completed".to_string(),
+            format!(
+                "assistant:echo: <paseo-system version=\"1\" kind=\"agent-message\" \
+                 source-agent-id=\"{sender}\" message-id=\"m-from\" \
+                 source-agent-title=\"Plan &amp; ship\">\nCheck the &lt;ledger&gt;\n</paseo-system>"
+            )
+        ]
+    );
+    h.stop().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_turn_reads_the_same_live_and_from_history() {
     let h = harness().await;
@@ -371,6 +425,152 @@ async fn a_question_takes_answers_by_header_and_refuses_empty_ones() {
         summary(&history).last().unwrap(),
         r#"assistant:answered: {"Answer":"Yes"}"#
     );
+    h.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn waiting_for_an_agent_answers_as_paseo_does() {
+    let h = harness().await;
+    let agent = h.create().await;
+    let wait = |timeout_ms: Option<u64>| {
+        let mut request = json!({"type": "wait_for_finish_request", "agentId": agent});
+        if let Some(ms) = timeout_ms {
+            request["timeoutMs"] = ms.into();
+        }
+        h.request(request)
+    };
+    // `paseo send` waits right after the send: it answers once the turn ends.
+    h.send(&agent, "hi", "m-1", None).await;
+    let done = wait(None).await;
+    assert_eq!(done["status"], "idle", "{done}");
+    assert_eq!(done["lastMessage"], "echo: hi");
+    assert_eq!(done["final"]["id"], agent.as_str());
+    assert!(done["error"].is_null());
+    // Its workspace now has a last prompt, for Paseo 0.13's sort.
+    let workspaces = h.request(json!({"type": "fetch_workspaces_request"})).await;
+    let workspace = (workspaces["entries"].as_array().unwrap().iter())
+        .find(|w| w["id"] == done["final"]["workspaceId"])
+        .unwrap();
+    assert_eq!(
+        workspace["lastUserMessageAt"], done["final"]["lastUserMessageAt"],
+        "{workspace}"
+    );
+    assert!(workspace["lastUserMessageAt"].is_string());
+
+    // A turn still going when the time is up.
+    h.send(&agent, "slow x", "m-2", None).await;
+    let late = wait(Some(200)).await;
+    assert_eq!(late["status"], "timeout", "{late}");
+    assert_eq!(late["final"]["status"], "running");
+    h.request(json!({"type": "cancel_agent_request", "agentId": agent}))
+        .await;
+
+    // A permission ends the wait, as it does in Paseo.
+    h.send(&agent, "tool ls", "m-3", None).await;
+    let asked = wait(Some(5000)).await;
+    assert_eq!(asked["status"], "permission", "{asked}");
+
+    let unknown = h
+        .request(json!({"type": "wait_for_finish_request", "agentId": "no-such-agent"}))
+        .await;
+    assert_eq!(unknown["status"], "error", "{unknown}");
+    assert!(unknown["final"].is_null());
+
+    // Paseo 0.13's `sessionMode`: the mode changes before the prompt, and
+    // one the agent cannot take refuses the send.
+    h.request(
+        json!({"type": "agent_permission_response", "agentId": agent,
+        "requestId": asked["final"]["pendingPermissions"][0]["id"],
+        "response": {"behavior": "deny", "message": "no"}}),
+    )
+    .await;
+    wait(Some(5000)).await;
+    let switched = h
+        .request(
+            json!({"type": "send_agent_message_request", "agentId": agent,
+            "text": "hi", "messageId": "m-4", "sessionMode": "bypassPermissions"}),
+        )
+        .await;
+    assert_eq!(switched["accepted"], true, "{switched}");
+    let agent_now = h
+        .request(json!({"type": "fetch_agent_request", "agentId": agent}))
+        .await;
+    assert_eq!(agent_now["agent"]["currentModeId"], "bypassPermissions");
+    let refused = h
+        .request(
+            json!({"type": "send_agent_message_request", "agentId": agent,
+            "text": "hi", "messageId": "m-5", "sessionMode": "no-such-mode"}),
+        )
+        .await;
+    assert_eq!(refused["accepted"], false, "{refused}");
+    h.stop().await;
+}
+
+/// What `paseo delete --all` and `paseo detach` send.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn history_lists_archived_agents_and_detach_drops_the_parent() {
+    let h = harness().await;
+    let parent = h.create().await;
+    let child = h
+        .request(
+            json!({"type": "agent.create.request", "labels": {}, "callerAgentId": parent,
+            "config": {"provider": "echo", "cwd": h.cwd.to_string_lossy()}}),
+        )
+        .await["agent"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let archived = h.create().await;
+    h.request(json!({"type": "archive_agent_request", "agentId": archived}))
+        .await;
+
+    let page = |cursor: Option<&str>| {
+        let mut page = json!({"limit": 2});
+        if let Some(cursor) = cursor {
+            page["cursor"] = cursor.into();
+        }
+        h.request(json!({"type": "fetch_agent_history_request", "page": page}))
+    };
+    let first = page(None).await;
+    let cursor = first["pageInfo"]["nextCursor"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let second = page(Some(&cursor)).await;
+    assert!(second["pageInfo"]["nextCursor"].is_null(), "{second}");
+    let mut ids: Vec<String> = (first["entries"].as_array().unwrap().iter())
+        .chain(second["entries"].as_array().unwrap())
+        .map(|entry| entry["agent"]["id"].as_str().unwrap().to_string())
+        .collect();
+    ids.sort();
+    let mut all = vec![parent.clone(), child.clone(), archived.clone()];
+    all.sort();
+    assert_eq!(ids, all, "archived agents are in the history too");
+    // `paseo ls -a` asks the directory for them instead.
+    let listed =
+        |filter: Value| h.request(json!({"type": "fetch_agents_request", "filter": filter}));
+    let has = |page: &Value, id: &str| {
+        (page["entries"].as_array().unwrap().iter()).any(|e| e["agent"]["id"] == id)
+    };
+    assert!(has(
+        &listed(json!({"includeArchived": true})).await,
+        &archived
+    ));
+    assert!(!has(&listed(json!({})).await, &archived));
+
+    let parent_of = |agent: &Value| agent["labels"]["paseo.parent-agent-id"].clone();
+    let before = h
+        .request(json!({"type": "fetch_agent_request", "agentId": child}))
+        .await;
+    assert_eq!(parent_of(&before["agent"]), parent.as_str());
+    let detached = h
+        .request(json!({"type": "agent.detach.request", "agentId": child}))
+        .await;
+    assert_eq!(detached["accepted"], true, "{detached}");
+    let after = h
+        .request(json!({"type": "fetch_agent_request", "agentId": child}))
+        .await;
+    assert!(parent_of(&after["agent"]).is_null(), "{after}");
     h.stop().await;
 }
 

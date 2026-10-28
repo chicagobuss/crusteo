@@ -31,9 +31,11 @@ struct Args {
     #[command(subcommand)]
     command: Option<Subcommand>,
     /// Address to listen on. Serves `ws://<listen>/ws`. Defaults to
-    /// 127.0.0.1:6797.
-    #[arg(long, env = "BURROW_LISTEN")]
-    listen: Option<SocketAddr>,
+    /// 127.0.0.1:6797. Given more than once (or comma-separated), the
+    /// first must bind at start and the others are bound once they can be,
+    /// such as a VPN's address that comes up after Burrow.
+    #[arg(long, env = "BURROW_LISTEN", value_delimiter = ',')]
+    listen: Vec<SocketAddr>,
     /// State directory, used as given. Defaults to $BURROW_HOME, then
     /// ~/.burrow (moved from ~/.carapace on first start).
     #[arg(long)]
@@ -98,8 +100,9 @@ struct Args {
 
 #[derive(Debug, clap::Subcommand)]
 enum Subcommand {
-    /// Copy a Paseo home's Claude agents, projects and workspaces into the
-    /// state directory, once. Stop burrow on that directory first.
+    /// Copy a Paseo home's agents (of every provider burrow runs), projects,
+    /// workspaces and labels into the state directory, once. Stop burrow on
+    /// that directory first.
     ImportPaseo {
         /// Paseo's home, which is only read.
         #[arg(long, default_value_os_t = user_home().join(".paseo"))]
@@ -121,7 +124,12 @@ fn user_home() -> PathBuf {
         .unwrap_or_default()
 }
 
-fn import_paseo(from: PathBuf, home: Option<PathBuf>, dry_run: bool) -> anyhow::Result<()> {
+fn import_paseo(
+    from: PathBuf,
+    home: Option<PathBuf>,
+    codex: Option<PathBuf>,
+    dry_run: bool,
+) -> anyhow::Result<()> {
     let home = home
         .or_else(home::default_home)
         .context("no state directory; pass --home")?;
@@ -129,6 +137,8 @@ fn import_paseo(from: PathBuf, home: Option<PathBuf>, dry_run: bool) -> anyhow::
         from,
         home,
         claude_dir: burrow_provider_claude::history::config_dir(),
+        pi_sessions: burrow_provider_pi::history::sessions_dir(&[]),
+        codex,
         dry_run,
     };
     let report = paseo_import::run(&options).with_context(|| {
@@ -166,7 +176,10 @@ async fn main() -> anyhow::Result<()> {
         dry_run,
     }) = args.command
     {
-        return import_paseo(from, home.or(args.home), dry_run);
+        // Codex reads its threads back for the timelines.
+        let codex = (!args.no_codex)
+            .then(|| (args.codex_bin.clone()).unwrap_or_else(|| PathBuf::from("codex")));
+        return import_paseo(from, home.or(args.home), codex, dry_run);
     }
     tracing::info!(
         version = env!("CARGO_PKG_VERSION"),
@@ -174,16 +187,18 @@ async fn main() -> anyhow::Result<()> {
         "burrow starting"
     );
     // Clap reads the BURROW_ names; the CARAPACE_ ones still work for now.
-    let listen = match args.listen {
-        Some(listen) => listen,
-        None => match env::var_os("BURROW_LISTEN") {
+    let mut listen = match args.listen {
+        listen if !listen.is_empty() => listen,
+        _ => match env::var_os("BURROW_LISTEN") {
             Some(value) => value
                 .to_str()
-                .and_then(|value| value.parse().ok())
+                .and_then(|value| (value.split(',').map(|one| one.trim().parse().ok())).collect())
                 .with_context(|| format!("CARAPACE_LISTEN is not an address: {value:?}"))?,
-            None => DEFAULT_LISTEN.parse().context("the default address")?,
+            None => vec![DEFAULT_LISTEN.parse().context("the default address")?],
         },
     };
+    let also_listen = listen.split_off(1);
+    let listen = listen[0];
     let worktrees_root = args
         .worktrees_root
         .or_else(|| env::var_os("BURROW_WORKTREES_ROOT").map(PathBuf::from));
@@ -199,6 +214,7 @@ async fn main() -> anyhow::Result<()> {
         .or_else(|| gethostname::gethostname().into_string().ok());
     let config = Config {
         listen,
+        also_listen,
         home,
         server_id,
         hostname,

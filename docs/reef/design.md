@@ -55,8 +55,9 @@ does not depend on `gpui` or on the `crusteo` crate.
   history.
 - **A fixed list of requests, enforced.** Every request goes through `upstream::guarded`, which
   refuses any type outside `READ_REQUESTS` (the subscription and fetch reads,
-  `subscription.release.request`, `usage.list_reports.request` for the `usage` view, and
-  `get_providers_snapshot_request` for the new-agent form) and `WRITE_REQUESTS`, which holds
+  `subscription.release.request`, `usage.list_reports.request` for the `usage` view,
+  `get_providers_snapshot_request` for the new-agent form, and `file_explorer_request` for an image
+  file a conversation names) and `WRITE_REQUESTS`, which holds
   exactly what the phone's actions send: `agent_permission_response`, `cancel_agent_request`,
   `send_agent_message_request`, `archive_agent_request`, `agent.create.request`,
   `delete_agent_request` and `workspace.label.assignment.set.request`. Reef cannot open a
@@ -230,7 +231,7 @@ Both list views send rows of this shape. Empty fields are left out.
 ```json
 {"key": "example-host/1f2e...", "host": "example-host", "id": "1f2e...",
  "title": "Fix the flaky retry test", "state": "needs_input", "notify": true,
- "provider": "claude", "model": "claude-opus-5-5",
+ "provider": "claude", "model": "claude-opus-5-5", "thinking": "high",
  "workspace": "shop-checkout", "project": "shop", "labels": ["billing"], "background": true,
  "at": "2026-10-17T09:50:00.000Z", "parent": "<parent agent id>",
  "reply": "Done: the tests pass and the change is on the branch.",
@@ -242,6 +243,9 @@ Both list views send rows of this shape. Empty fields are left out.
 - `state` is Paseo's bucket, without "ready to review" (2.1): `needs_input`, `failed`, `running` or
   `done`.
 - `notify` says whether a finished turn of this agent raises a notification (3.10).
+- `thinking` is the agent's effort: the one chosen, else the one its provider resolved its
+  default to. The conversation's header shows provider, model and effort before the labels, by
+  the names the host's new-agent choices give them (3.9.1), or by id until those are in.
 - `background` is there, `true`, when the agent's workspace is one of Paseo 0.12's background
   workspaces (2.1). The page tags such a row "background", muted, on its existing line, except in
   the Background group, which says so already.
@@ -403,7 +407,7 @@ orchestrator's own turns stand apart:
 | `kind` | Fields |
 |---|---|
 | `user` | `text`, `images` (a count) and `image_keys` (one per image) |
-| `assistant` | `text` (Markdown) |
+| `assistant` | `text` (Markdown), and `image_sources` when its Markdown images name files on the host: each image's destination, as written, to its key |
 | `thought` | `chars`, `loading`, `detail` |
 | `tool` | `name` ("Shell", "Read", ...), `summary` (the command or path), `status`, `icon`, `detail`, and `agent` when the row names an agent: `{id, title, lead, known}` for the sender of a message from another agent ("From" planner), a notice about one (planner "finished"; `lead` puts the agent before `name`), or the agent a Paseo tool call acts on ("To" worker). `known` says whether the host knows the agent, so a tap can open it |
 | `todo` | `label` ("Created 3 tasks", "Completed Write the tests"), `done`, `total` |
@@ -414,9 +418,20 @@ Every item has `id` and `at`. A `text` longer than 16 KiB is cut on a character 
 `clipped: true`.
 
 Images are never inside a frame. A phone fetches each one over plain HTTP, as
-`GET /image/<key>?t=<device token>` (the token percent-encoded; no `t` with `--open`). The key is
-the image's content hash, so the answer never changes and a phone can keep it; Reef serves only
-images of conversations it holds.
+`GET /image/<key>?t=<device token>` (the token percent-encoded; no `t` with `--open`). Reef serves
+only images of conversations it holds, of two kinds:
+
+- **Sent inline**, while Reef still holds the prompt that carried them: the key is the image's
+  content hash, so the answer never changes and a phone keeps it for good.
+- **Kept in a file on the host**: a prompt's images as a Burrow lists them (`{path, mimeType}`, as
+  for a prompt sent from another client or loaded from history), and the files a reply's Markdown
+  images name (Paseo saves an agent's image output and names it so). The key hashes the host and
+  the path. Reef reads the file with `file_explorer_request`, as crusteo does, only for a file such
+  a conversation names, never a path a phone gives, and a phone keeps it for a day.
+
+A user item shows its inline images while Reef has them, else its files. Paseo's own
+`user_message` carries no images, so a prompt's images sent to a Paseo host from another client
+cannot be shown.
 
 **Deltas** follow 3.4 at two levels. A turn patch carries `key`, the turn fields that changed, the
 items new or changed in `items`, and `order` (item ids) when the items' order or membership changed.

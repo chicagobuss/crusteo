@@ -34,10 +34,10 @@ pub(crate) enum FromServer {
     Closed {
         conn: u64,
     },
-    /// An image by its content key, for `/image/<key>`.
+    /// An image by its key, for `/image/<key>`.
     Image {
         key: u64,
-        reply: tokio::sync::oneshot::Sender<Option<fleet::prompt::ImageAttachment>>,
+        reply: tokio::sync::oneshot::Sender<Option<Served>>,
     },
     /// The hosts, for `/api/hosts`: what a desktop in reef mode connects to.
     Hosts {
@@ -263,6 +263,14 @@ const DAEMON_PORT: u16 = 6767;
 /// Most images one message carries.
 const MAX_IMAGES: usize = 8;
 
+/// An image for `/image/<key>`.
+pub struct Served {
+    pub image: fleet::prompt::ImageAttachment,
+    /// Its key is its contents (an image sent inline), so a phone may keep
+    /// it for good. Otherwise it names a file, which may change.
+    pub by_content: bool,
+}
+
 /// A send's images: `[{data: <base64>, mime_type}]`, as the daemon takes them.
 fn images(value: &Value) -> Result<Vec<fleet::prompt::ImageAttachment>, &'static str> {
     let Some(list) = value.as_array() else {
@@ -422,7 +430,24 @@ impl State {
             FromServer::Message { conn, message } => self.on_message(conn, message),
             FromServer::Closed { conn } => self.drop_phone(conn),
             FromServer::Image { key, reply } => {
-                let _ = reply.send(self.image(key));
+                if let Some(image) = self.image(key) {
+                    let _ = reply.send(Some(Served {
+                        image,
+                        by_content: true,
+                    }));
+                } else if let Some(read) =
+                    (self.kept_file(key)).and_then(|(host, file)| self.up.read_image(&host, &file))
+                {
+                    tokio::spawn(async move {
+                        let image = read.await.ok().map(|image| Served {
+                            image,
+                            by_content: false,
+                        });
+                        let _ = reply.send(image);
+                    });
+                } else {
+                    let _ = reply.send(None);
+                }
             }
             FromServer::Hosts { reply } => {
                 let _ = reply.send(desktop_hosts(&self.up.fleet));
@@ -444,6 +469,33 @@ impl State {
                 _ => None,
             })
         })
+    }
+
+    /// The file a key names in a conversation Reef holds: one a prompt's
+    /// images are kept in, or one a reply's Markdown image names. Only
+    /// these are ever read for a phone.
+    fn kept_file(&self, key: u64) -> Option<(String, fleet::images::ImageFile)> {
+        self.up
+            .sessions
+            .iter()
+            .find_map(|((host, agent), session)| {
+                let is_it = |file: &fleet::images::ImageFile| views::file_key(host, file) == key;
+                let file = session.timeline.items().find_map(|item| match &item.kind {
+                    fleet::timeline::ItemKind::User { image_files, .. } => {
+                        image_files.iter().find(|file| is_it(file)).cloned()
+                    }
+                    fleet::timeline::ItemKind::Assistant { text, .. } => {
+                        let cwd = (self.up.fleet.agent(&host_id(host), agent))
+                            .map(|agent| agent.cwd.clone())
+                            .unwrap_or_default();
+                        (views::reply_files(text, &cwd).into_iter())
+                            .map(|(_, file)| file)
+                            .find(is_it)
+                    }
+                    _ => None,
+                })?;
+                Some((host.clone(), file))
+            })
     }
 
     fn release(&mut self, spec: &ViewSpec) {
@@ -1378,7 +1430,7 @@ fn conversation_messages(
         let agent = directory?.agents.get(id)?;
         Some(agent.display_title())
     };
-    let view = views::conversation(timeline, &cwd, from, limits, &titles);
+    let view = views::conversation(timeline, host, &cwd, from, limits, &titles);
 
     let mut fields = Map::new();
     fields.insert("agent".into(), row.unwrap_or(Value::Null));

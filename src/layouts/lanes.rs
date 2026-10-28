@@ -6668,11 +6668,7 @@ impl Lanes {
             let name = (workspace.as_deref())
                 .and_then(|w| store.fleet.workspace(host, w))
                 .map(|w| w.title.clone().unwrap_or_else(|| w.name.clone()));
-            let host = store.fleet.host_name(host).to_string();
-            match name {
-                Some(name) => format!("{name} · {host}"),
-                None => host,
-            }
+            (name, store.fleet.host_name(host).to_string())
         });
         let pinned = self.core.nav.read(cx).agent_color(host, agent);
         let measured_picker = picker.clone();
@@ -7522,13 +7518,14 @@ fn tilde(path: &str) -> String {
     home.unwrap_or_else(|| path.to_string())
 }
 
-/// `place` (workspace · host), muted and at most `max` wide. Hovering shows
-/// the agent's folder and branch; a click copies the folder.
+/// Where an agent runs, "workspace · host", muted and at most `max` wide. A
+/// long workspace name is cut short, never the host. Hovering shows the
+/// agent's folder and branch; a click copies the folder.
 pub fn place_label(
     core: &Core,
     host: &HostId,
     agent: &str,
-    place: String,
+    (workspace, host_name): (Option<String>, String),
     max: Pixels,
     cx: &App,
 ) -> AnyElement {
@@ -7540,14 +7537,23 @@ pub fn place_label(
             tilde(folder)
         ),
         Some((folder, None)) => format!("{}\nClick to copy the folder", tilde(folder)),
-        None => place.clone(),
+        None => match &workspace {
+            Some(workspace) => format!("{workspace} · {host_name}"),
+            None => host_name.clone(),
+        },
     };
     let store = core.store.clone();
+    let host_part = match workspace {
+        Some(_) => format!("\u{a0}· {host_name}"),
+        None => host_name,
+    };
     div()
         .id(SharedString::from(format!("place-{host}-{agent}")))
         .min_w(px(0.))
         .max_w(max)
-        .truncate()
+        .flex()
+        .overflow_hidden()
+        .whitespace_nowrap()
         .text_size(size::sm())
         .text_color(p.muted)
         .when(folder.is_some(), |label| {
@@ -7555,7 +7561,8 @@ pub fn place_label(
                 .cursor_pointer()
                 .hover(move |style| style.text_color(p.foreground))
         })
-        .child(place)
+        .children(workspace.map(|workspace| div().min_w(px(0.)).truncate().child(workspace)))
+        .child(div().flex_shrink_0().child(host_part))
         .tooltip(move |window, cx| Tooltip::new(hint.clone()).build(window, cx))
         .on_click(move |_: &ClickEvent, _, cx| {
             cx.stop_propagation();

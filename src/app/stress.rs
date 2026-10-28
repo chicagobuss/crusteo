@@ -873,10 +873,11 @@ pub fn read_image(
             rng.below(200) as u8,
             rng.below(200) as u8,
         );
+        // The prompt's is a phone screenshot: tall, as phones send them.
         let (width, height) = if path.contains("chart") {
             (720, 360)
         } else {
-            (640, 400)
+            (390, 844)
         };
         let picture = image::RgbImage::from_fn(width, height, |x, y| {
             let shade = |c: u8, t: u32, span: u32| c.saturating_add((t * 55 / span) as u8);

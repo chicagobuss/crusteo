@@ -98,6 +98,8 @@ fn the_carapace_home_moves_with_its_worktrees_and_identity() {
         background: false,
         base_branch: Some("main".into()),
         archived_at: None,
+        created_at: None,
+        setup_status: None,
     };
     std::fs::write(
         old.join("projects.json"),

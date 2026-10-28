@@ -363,10 +363,13 @@ impl Render for Popout {
             window.set_window_title(&title);
             self.title = title.clone();
         }
-        let place = match &chrome.workspace {
-            Some((_, workspace)) => format!("{workspace} · {}", chrome.host),
-            None => chrome.host.clone(),
-        };
+        let place = (
+            chrome
+                .workspace
+                .as_ref()
+                .map(|(_, workspace)| workspace.clone()),
+            chrome.host.clone(),
+        );
         let swatch = chrome.swatch;
         let pinned = chrome.pinned;
         let bar_bg = swatch.map_or(p.sidebar, |index| swatch_tint(p.sidebar, index));

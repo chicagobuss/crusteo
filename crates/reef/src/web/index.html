@@ -169,6 +169,9 @@ select, input, textarea { font: inherit; color: inherit; background: var(--surfa
 .shots:last-child { margin-bottom: 2px; }
 .shots img { width: 72px; height: 72px; object-fit: cover; border-radius: 8px; border: 1px solid var(--border);
   background: var(--bg); cursor: zoom-in; }
+/* An image in a reply: as wide as it is, at most the column. */
+.rimg { display: block; max-width: 100%; max-height: 60vh; margin: 6px 0; border-radius: 8px;
+  border: 1px solid var(--border); background: var(--bg); cursor: zoom-in; }
 .lightbox { position: fixed; inset: 0; z-index: 20; background: rgba(0,0,0,.9); display: grid; place-items: center;
   padding: calc(env(safe-area-inset-top) + 8px) 8px calc(env(safe-area-inset-bottom) + 8px); cursor: zoom-out; }
 .lightbox img { max-width: 100%; max-height: 100%; object-fit: contain; }
@@ -226,6 +229,8 @@ select, input, textarea { font: inherit; color: inherit; background: var(--surfa
 .assistant th { background: var(--surface2); font-weight: 600; white-space: nowrap; }
 .assistant pre, .detail pre { background: var(--surface2); border-radius: 8px; padding: 8px; overflow-x: auto;
   font: 12.5px/1.4 var(--mono); white-space: pre; max-width: 100%; }
+/* A thought is prose, not code: wrap it instead of scrolling sideways. */
+.detail.prose pre { white-space: pre-wrap; overflow-wrap: anywhere; }
 .assistant code { font: 13px var(--mono); background: var(--surface2); padding: 0 3px; border-radius: 4px; }
 .tool { display: flex; gap: 6px; align-items: baseline; color: var(--muted); font-size: 13px; width: 100%;
   text-align: left; background: none; border: none; padding: 2px 0; }
@@ -335,6 +340,12 @@ select, input, textarea { font: inherit; color: inherit; background: var(--surfa
 .newlabel { display: flex; gap: 6px; margin-top: 8px; }
 .newlabel input { flex: 1; }
 .convhead .chips { cursor: pointer; margin-top: 2px; }
+.convsub { display: flex; align-items: center; gap: 6px; margin-top: 2px; min-width: 0; }
+.convsub .spec { flex: 0 0 auto; max-width: 100%; font-size: 11px; line-height: 16px; color: var(--muted);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.convsub .spec:empty { display: none; }
+/* The labels give way first; they are a tap away in the labels panel. */
+.convsub .chips { flex: 0 1 auto; min-width: 0; margin-top: 0; }
 button.icon.accent { color: var(--accent); }
 button.primary.danger { background: var(--bad); border-color: var(--bad); color: #fff; }
 .status { position: fixed; bottom: calc(env(safe-area-inset-bottom) + 80px); left: 50%; transform: translateX(-50%); z-index: 8;
@@ -377,7 +388,8 @@ button.primary.danger { background: var(--bad); border-color: var(--bad); color:
     <div class="convhead">
       <button class="plain" id="back" aria-label="Back"></button>
       <div style="flex:1;min-width:0"><h2 id="title"></h2><div class="meta" id="convmeta"></div>
-        <div class="chips" id="convlabels" title="Edit labels" hidden></div></div>
+        <div class="convsub" id="convsub" hidden><span class="spec" id="convspec"></span>
+          <div class="chips" id="convlabels" title="Edit labels"></div></div></div>
       <button class="icon" id="bell" aria-label="Notifications for this agent"></button>
       <button class="icon" id="labels" aria-label="Labels" title="Labels"></button>
       <button class="icon" id="archive" aria-label="Archive" title="Archive"></button>
@@ -972,17 +984,38 @@ function drawList() {
 // Markdown, small: code blocks, inline code, bold, paragraphs. Text is
 // escaped first, so nothing from an agent becomes markup.
 // The markdown agents write: code blocks, tables, lists, headings, and
-// inline code, bold, italics and links. Everything is escaped first.
-function markdown(text) {
+// inline code, bold, italics, links and images. Everything is escaped
+// first. `sources` maps an image's destination to the key Reef serves the
+// file it names under, for images a daemon keeps.
+function markdown(text, sources) {
   const esc = (s) => s.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  // A destination as written, from its escaped form: entities and
+  // backslash escapes undone, as Reef found it.
+  const unesc = (s) => s.replace(/&(amp|lt|gt|quot|#39);/g, (_, e) => ({ amp: "&", lt: "<", gt: ">", quot: '"', "#39": "'" }[e]))
+    .replace(/\\([!-/:-@[-`{-~])/g, "$1");
+  // A daemon's file through Reef, a web image, or one a data: URL carries.
+  const imageSrc = (dest) => {
+    const key = sources && Object.prototype.hasOwnProperty.call(sources, dest) ? sources[dest] : null;
+    if (key) return imageUrl(key);
+    if (/^https:\/\//i.test(dest) || /^data:image\/(png|jpe?g|gif|webp);base64,/i.test(dest)) return dest;
+    return null;
+  };
   const inline = (s) => {
-    const codes = [];
+    const codes = [], images = [];
     s = s.replace(/`([^`]+)`/g, (_, c) => { codes.push(c); return "\u0000" + (codes.length - 1) + "\u0000"; });
+    // Images before anything else, so a path's _ or * is left alone.
+    s = s.replace(/!\[([^\]]*)\]\(((?:\\.|[^\s)\\])+)(?:\s+&quot;.*?&quot;)?\)/g, (all, alt, dest) => {
+      const src = imageSrc(unesc(dest));
+      if (!src) return all;
+      images.push('<img class="rimg" loading="lazy" decoding="async" alt="' + (alt || "Image") + '" src="' + esc(src) + '">');
+      return "\u0001" + (images.length - 1) + "\u0001";
+    });
     s = s.replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>")
       .replace(/(^|[^*\w])\*([^*\s][^*]*?)\*(?![*\w])/g, "$1<i>$2</i>")
       .replace(/(^|[^\w])_([^_\s][^_]*?)_(?!\w)/g, "$1<i>$2</i>")
       .replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
-    return s.replace(/\u0000(\d+)\u0000/g, (_, i) => "<code>" + codes[i] + "</code>");
+    return s.replace(/\u0000(\d+)\u0000/g, (_, i) => "<code>" + codes[i] + "</code>")
+      .replace(/\u0001(\d+)\u0001/g, (_, i) => images[i]);
   };
   const cells = (line) => line.trim().replace(/^\|/, "").replace(/\|$/, "").split("|").map((c) => c.trim());
   const isRule = (line) => /^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$/.test(line || "");
@@ -1033,6 +1066,24 @@ function markdown(text) {
   }).join("");
 }
 
+// The open agent's provider, model and effort (the defaults when it names
+// none), by the names its host gives them once the host's choices are in
+// (fetched once), by id until then.
+function drawSpec() {
+  if (!open) return;
+  const agent = (views.conv && views.conv.fields.agent) || open;
+  const host = agent.host || open.host;
+  if (agent.provider && !createOptions[host]) loadOptions(host);
+  const data = (createOptions[host] || {}).data;
+  const provider = data && (data.providers || []).find((p) => p.id === agent.provider);
+  const models = (provider && provider.models) || [];
+  const model = models.find((m) => m.id === agent.model) || (!agent.model && models.find((m) => m.default));
+  const thinking = model && (model.thinking || []).find((t) => t.id === agent.thinking);
+  $("convspec").textContent = [provider ? provider.label : agent.provider, model ? model.label : agent.model,
+    thinking ? thinking.label : agent.thinking].filter(Boolean).join(" · ");
+  $("convsub").hidden = !$("convspec").textContent && $("convlabels").hidden;
+}
+
 let firstDraw = true;
 function drawConv() {
   if (!open) {
@@ -1052,6 +1103,7 @@ function drawConv() {
   labelBox.hidden = !(agent.labels && agent.labels.length);
   labelBox.innerHTML = "";
   labelBox.append(...chips(agent.labels).children);
+  drawSpec();
   drawComposer();
   const scroller = $("convscroll");
   const body = $("convbody");
@@ -1312,7 +1364,12 @@ function renderItem(item) {
       } else if (item.images) d.append(" [" + item.images + " image(s)]");
       return d;
     }
-    case "assistant": { const d = el("div", "item assistant"); d.innerHTML = markdown(item.text); return d; }
+    case "assistant": {
+      const d = el("div", "item assistant");
+      d.innerHTML = markdown(item.text, item.image_sources);
+      for (const img of d.querySelectorAll("img.rimg")) img.onclick = () => showImage(img.src);
+      return d;
+    }
     case "tool": case "thought": {
       const wrap = el("div", "item");
       const b = el("button", "tool " + (item.status || ""));
@@ -1328,7 +1385,7 @@ function renderItem(item) {
       wrap.append(b);
       const shown = details[item.id];
       if (shown) {
-        const d = el("div", "detail");
+        const d = el("div", "detail" + (item.kind === "thought" ? " prose" : ""));
         for (const s of shown.sections) { if (s.title) d.append(el("h4", "", s.title)); d.append(el("pre", "", s.text)); }
         wrap.append(d);
       }
@@ -1725,6 +1782,7 @@ function loadOptions(host) {
   ask({ type: "create_options", host }, (r) => {
     createOptions[host] = r.ok ? { data: r } : { error: (r.error && r.error.message) || "Could not load the choices", data: known.data };
     if (panel && panel.kind === "create") drawPanel();
+    if (open && open.host === host) drawSpec();
   });
 }
 

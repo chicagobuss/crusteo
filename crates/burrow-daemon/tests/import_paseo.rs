@@ -18,7 +18,14 @@ const CWD: &str = "/home/user/code";
 const ACTIVE: &str = "0b6e5d1c-2f4a-4c1e-9a43-6d0f1c2b3a41";
 const ARCHIVED: &str = "5c7d9e2f-8a1b-4d3c-b6e5-7f0a1b2c3d42";
 const PI: &str = "9e8d7c6b-5a49-4382-a1b0-c9d8e7f6a543";
+const CODEX: &str = "1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c51";
+const CURSOR: &str = "2b3c4d5e-6f7a-4b8c-9d0e-1f2a3b4c5d62";
+const AGY: &str = "3c4d5e6f-7a8b-4c9d-8e1f-2a3b4c5d6e73";
+const OPENCODE: &str = "4d5e6f7a-8b9c-4d0e-9f2a-3b4c5d6e7f84";
 const SESSION: &str = "8b32c0de-0000-4000-8000-000000000001";
+const PI_SESSION: &str = "8b32c0de-0000-4000-8000-000000000002";
+const THREAD: &str = "01a087d8-e44f-7c50-aa9b-4fe2043b7641";
+const AGY_HANDLE: &str = r#"plugin:{"version":1,"data":{"conversationId":"9194a736"}}"#;
 
 fn scratch() -> PathBuf {
     let dir =
@@ -52,9 +59,20 @@ fn agent(id: &str, provider: &str, title: &str) -> Value {
     })
 }
 
+/// `record` resuming `session` instead, as its provider names it.
+fn resuming(mut record: Value, session: &str, mode: &str) -> Value {
+    record["persistence"]["sessionId"] = session.into();
+    record["persistence"]["nativeHandle"] = session.into();
+    record["runtimeInfo"]["sessionId"] = session.into();
+    record["lastModeId"] = mode.into();
+    record
+}
+
 /// A Paseo home with an active Claude agent (with a transcript), an archived
-/// Claude agent (without one), a pi agent and a corrupt record; and a Claude
-/// config directory with the transcript.
+/// Claude agent (without one), pi (with its session file), Codex, Cursor and
+/// Antigravity agents, an OpenCode agent Burrow has no provider for, and a
+/// corrupt record; a Claude config directory with the transcript, and pi's
+/// sessions directory beside it (`pi`).
 fn paseo_home(root: &Path) -> (PathBuf, PathBuf) {
     let paseo = root.join("paseo");
     let claude = root.join("claude");
@@ -102,7 +120,41 @@ fn paseo_home(root: &Path) -> (PathBuf, PathBuf) {
     write(&dir.join(format!("{ARCHIVED}.json")), &archived.to_string());
     write(
         &dir.join(format!("{PI}.json")),
-        &agent(PI, "pi", "Pi agent").to_string(),
+        &resuming(agent(PI, "pi", "Pi agent"), PI_SESSION, "default").to_string(),
+    );
+    write(
+        &dir.join(format!("{CODEX}.json")),
+        &resuming(agent(CODEX, "codex", "Codex agent"), THREAD, "full-access").to_string(),
+    );
+    write(
+        &dir.join(format!("{CURSOR}.json")),
+        &resuming(agent(CURSOR, "cursor", "Cursor agent"), SESSION, "agent").to_string(),
+    );
+    let mut agy = resuming(
+        agent(AGY, "antigravity", "Agy agent"),
+        AGY_HANDLE,
+        "default",
+    );
+    agy["persistence"]
+        .as_object_mut()
+        .unwrap()
+        .remove("nativeHandle");
+    write(&dir.join(format!("{AGY}.json")), &agy.to_string());
+    write(
+        &dir.join(format!("{OPENCODE}.json")),
+        &agent(OPENCODE, "opencode", "OpenCode agent").to_string(),
+    );
+    let pi_session = [
+        r#"{"type":"session","version":3,"id":"s1","timestamp":"2026-09-03T09:00:00.000Z","cwd":"/home/user/code"}"#,
+        r#"{"type":"message","id":"b","parentId":null,"timestamp":"2026-09-03T09:00:01.000Z","message":{"role":"user","content":[{"type":"text","text":"Count the files"}]}}"#,
+        r#"{"type":"message","id":"c","parentId":"b","timestamp":"2026-09-03T09:00:02.000Z","message":{"role":"assistant","content":[{"type":"text","text":"Three."}]}}"#,
+    ]
+    .join("\n");
+    write(
+        &root.join(format!(
+            "pi/--home-user-code--/2026-09-03T09-00-00-000Z_{PI_SESSION}.jsonl"
+        )),
+        &pi_session,
     );
     write(&dir.join("broken.json"), "{\"id\": \"half a rec");
 
@@ -135,14 +187,20 @@ fn contents(dir: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
     files
 }
 
-fn import(paseo: &Path, home: &Path, claude: &Path, dry_run: bool) -> Report {
-    paseo_import::run(&Options {
+fn options(paseo: &Path, home: &Path, claude: &Path, dry_run: bool) -> Options {
+    Options {
         from: paseo.into(),
         home: home.into(),
         claude_dir: claude.into(),
+        pi_sessions: claude.parent().unwrap().join("pi"),
+        // No Codex here: its threads are read at the agent's first prompt.
+        codex: None,
         dry_run,
-    })
-    .expect("import")
+    }
+}
+
+fn import(paseo: &Path, home: &Path, claude: &Path, dry_run: bool) -> Report {
+    paseo_import::run(&options(paseo, home, claude, dry_run)).expect("import")
 }
 
 async fn connected(events: &EventReceiver) {
@@ -158,28 +216,46 @@ async fn connected(events: &EventReceiver) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn imports_claude_agents_once() {
+async fn imports_every_shared_providers_agents_once() {
     let root = scratch();
     let (paseo, claude) = paseo_home(&root);
     let home = root.join("burrow");
     let before = contents(&paseo);
 
     let dry = import(&paseo, &home, &claude, true);
-    assert_eq!((dry.agents, dry.projects, dry.workspaces), (2, 1, 1));
+    assert_eq!((dry.agents, dry.projects, dry.workspaces), (6, 1, 1));
     assert!(!home.exists(), "a dry run writes nothing");
 
     let report = import(&paseo, &home, &claude, false);
     let text = report.lines.join("\n");
     assert_eq!(
         (report.agents, report.projects, report.workspaces),
-        (2, 1, 1)
+        (6, 1, 1)
     );
     assert_eq!(
         report.lines, dry.lines,
         "the dry run said what would happen"
     );
     assert!(
-        text.contains(&format!("skip: agent {PI}: provider \"pi\"")),
+        text.contains(&format!(
+            "skip: agent {OPENCODE}: provider \"opencode\" (Burrow has no such provider)"
+        )),
+        "{text}"
+    );
+    assert!(
+        text.contains(&format!(
+            "agent {PI} \"Pi agent\": 2 timeline items, resumes Pi session {PI_SESSION}"
+        )),
+        "{text}"
+    );
+    assert!(
+        text.contains(&format!(
+            "warning: agent {CODEX}: Codex is not here to read thread {THREAD}"
+        )),
+        "{text}"
+    );
+    assert!(
+        text.contains(&format!("warning: agent {CURSOR}: Cursor replays nothing")),
         "{text}"
     );
     assert!(
@@ -219,8 +295,14 @@ async fn imports_claude_agents_once() {
         .await
         .expect("agents");
     let entries = agents["entries"].as_array().unwrap();
-    assert_eq!(entries.len(), 1, "only the active Claude agent: {agents}");
-    let agent = &entries[0]["agent"];
+    assert_eq!(entries.len(), 5, "every active agent: {agents}");
+    let entry = |id: &str| {
+        entries
+            .iter()
+            .find(|e| e["agent"]["id"] == id)
+            .unwrap_or_else(|| panic!("{id} in {agents}"))
+    };
+    let agent = &entry(ACTIVE)["agent"];
     assert_eq!(agent["id"], ACTIVE);
     assert_eq!(agent["title"], "Fix the build");
     assert_eq!(agent["labels"], json!({"team": "core"}));
@@ -234,7 +316,20 @@ async fn imports_claude_agents_once() {
     assert_eq!(agent["updatedAt"], "2026-09-03T10:00:00.000Z");
     assert_eq!(agent["requiresAttention"], true);
     assert_eq!(agent["attentionReason"], "finished");
-    assert_eq!(entries[0]["project"]["projectName"], "Code");
+    assert_eq!(entry(ACTIVE)["project"]["projectName"], "Code");
+    // The others resume their own provider's session, from Paseo's handle.
+    for (id, provider, session, mode) in [
+        (PI, "pi", PI_SESSION, "default"),
+        (CODEX, "codex", THREAD, "full-access"),
+        (CURSOR, "cursor", SESSION, "agent"),
+        (AGY, "antigravity", AGY_HANDLE, "default"),
+    ] {
+        let agent = &entry(id)["agent"];
+        assert_eq!(agent["provider"], provider, "{agent}");
+        assert_eq!(agent["persistence"]["sessionId"], session, "{agent}");
+        assert_eq!(agent["currentModeId"], mode, "{agent}");
+        assert_eq!(agent["status"], "closed");
+    }
 
     let page = client
         .request(
@@ -261,10 +356,24 @@ async fn imports_claude_agents_once() {
     assert_eq!(archived["agent"]["archivedAt"], "2026-09-04T10:00:00.000Z");
     assert_eq!(archived["agent"]["title"], "Old work");
     let pi = client
-        .request(json!({"type": "fetch_agent_request", "agentId": PI}))
+        .request(
+            json!({"type": "fetch_agent_timeline_request", "agentId": PI,
+                        "direction": "tail", "limit": 40}),
+        )
         .await
-        .expect("pi agent");
-    assert!(pi["agent"].is_null());
+        .expect("pi timeline");
+    let texts: Vec<&Value> = pi["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| &e["item"]["text"])
+        .collect();
+    assert_eq!(texts, [&json!("Count the files"), &json!("Three.")], "{pi}");
+    let opencode = client
+        .request(json!({"type": "fetch_agent_request", "agentId": OPENCODE}))
+        .await
+        .expect("opencode agent");
+    assert!(opencode["agent"].is_null());
 
     let workspaces = client
         .request(json!({"type": "fetch_workspaces_request"}))
@@ -313,7 +422,7 @@ async fn imports_claude_agents_once() {
         again.lines
     );
     assert_eq!(again.labels, 0);
-    assert_eq!(again.present, 6, "{:?}", again.lines);
+    assert_eq!(again.present, 10, "{:?}", again.lines);
     let catalog = burrow_daemon::persist::read(&home).unwrap().labels;
     assert_eq!(
         serde_json::to_value(&catalog).unwrap(),
@@ -339,12 +448,7 @@ async fn imports_claude_agents_once() {
 fn refuses_a_home_inside_the_paseo_home() {
     let root = scratch();
     let (paseo, claude) = paseo_home(&root);
-    let result = paseo_import::run(&Options {
-        from: paseo.clone(),
-        home: paseo.join("burrow"),
-        claude_dir: claude,
-        dry_run: false,
-    });
+    let result = paseo_import::run(&options(&paseo, &paseo.join("burrow"), &claude, false));
     assert!(result.is_err());
     assert!(!paseo.join("burrow").exists());
     fs::remove_dir_all(&root).unwrap();

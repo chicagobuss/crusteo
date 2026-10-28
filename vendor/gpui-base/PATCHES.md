@@ -64,3 +64,11 @@ across other cards.
 there was no row above or below. It now goes to the start of the text on the
 first row and the end on the last, as text boxes do and as extending a
 selection with Shift already did (`vertical_selection_target`).
+
+## An image with no link opens through the view's link handler
+
+A Markdown image was clickable only inside a link. When the view sets
+`on_link_click`, an image with no link of its own now passes its own address
+to that handler on a click (`image_link` in text/node.rs, used by both the
+block and the inline-flow image), so the app can open it full size. A view
+without a handler leaves unlinked images unclickable, as upstream.

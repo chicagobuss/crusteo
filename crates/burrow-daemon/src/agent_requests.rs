@@ -38,6 +38,8 @@ pub const KINDS: &[&str] = &[
     "agent.create.request",
     "create_agent_request",
     "send_agent_message_request",
+    "wait_for_finish_request",
+    "agent.detach.request",
     "cancel_agent_request",
     "archive_agent_request",
     "delete_agent_request",
@@ -281,6 +283,21 @@ struct SendRequest {
     images: Option<Vec<ImagePayload>>,
     #[serde(default)]
     active_turn_behavior: Option<String>,
+    /// The agent sending it, when one is (Paseo 0.12's provenance).
+    #[serde(default)]
+    source_agent_id: Option<String>,
+    /// Paseo 0.13: the mode to switch the agent to before the prompt.
+    #[serde(default)]
+    session_mode: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WaitRequest {
+    request_id: String,
+    agent_id: String,
+    #[serde(default)]
+    timeout_ms: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -401,6 +418,22 @@ pub fn handle(
         "send_agent_message_request" => {
             let request: SendRequest = parse(message)?;
             spawn(Box::pin(async move {
+                // As Paseo: the mode changes first, and a mode the agent
+                // cannot take fails the send.
+                let switched = match request.session_mode.as_deref().filter(|m| !m.is_empty()) {
+                    Some(mode) => {
+                        agents::configure(&daemon, &request.agent_id, Setting::Mode(mode.into()))
+                            .map(drop)
+                    }
+                    None => Ok(()),
+                };
+                if let Err(error) = switched {
+                    return vec![session(
+                        "send_agent_message_response",
+                        json!({"requestId": request.request_id, "agentId": request.agent_id,
+                               "accepted": false, "error": error}),
+                    )];
+                }
                 let result = agents::send(
                     &daemon,
                     &request.agent_id,
@@ -408,6 +441,7 @@ pub fn handle(
                     request.message_id,
                     images(request.images),
                     request.active_turn_behavior.as_deref(),
+                    request.source_agent_id.as_deref(),
                 )
                 .await;
                 let (agent_id, error) = match result {
@@ -420,6 +454,28 @@ pub fn handle(
                            "accepted": error.is_null(), "error": error}),
                 )]
             }))
+        }
+        // `paseo send`, `paseo run` and `paseo wait` wait with it.
+        "wait_for_finish_request" => {
+            let request: WaitRequest = parse(message)?;
+            spawn(Box::pin(async move {
+                let mut payload =
+                    agents::wait_for_finish(&daemon, &request.agent_id, request.timeout_ms).await;
+                payload["requestId"] = request.request_id.into();
+                vec![session("wait_for_finish_response", payload)]
+            }))
+        }
+        "agent.detach.request" => {
+            let request: AgentRequest = parse(message)?;
+            let (agent_id, error) = match agents::detach(&daemon, &request.agent_id) {
+                Ok(id) => (id, Value::Null),
+                Err(error) => (request.agent_id, error.into()),
+            };
+            Some(vec![session(
+                "agent.detach.response",
+                json!({"requestId": request.request_id, "agentId": agent_id,
+                       "accepted": error.is_null(), "error": error}),
+            )])
         }
         "cancel_agent_request" => {
             let request: AgentRequest = parse(message)?;

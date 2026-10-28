@@ -46,6 +46,10 @@ pub const READ_REQUESTS: &[&str] = &[
     // Providers, models and modes, for a phone's new-agent form; asked
     // only when a phone opens one.
     "get_providers_snapshot_request",
+    // An image a conversation Reef holds keeps in a file: one a prompt
+    // lists or a reply's Markdown names, never a path a phone gives
+    // (`Upstream::read_image`).
+    "file_explorer_request",
 ];
 
 /// Work to do on the upstream state, sent back by request tasks.
@@ -1095,6 +1099,23 @@ impl Upstream {
             "cursor": { "epoch": epoch, "seq": seq }, "limit": PAGE, "projection": "projected",
         });
         self.fetch_page(host, agent, false, message);
+    }
+
+    /// Reads an image `host` keeps in `file`, as crusteo does; `None` when
+    /// the host is offline. The caller finds `file` in a conversation, so
+    /// only files a prompt lists or a reply names are ever read.
+    pub fn read_image(
+        &self,
+        host: &str,
+        file: &fleet::images::ImageFile,
+    ) -> Option<
+        impl std::future::Future<Output = Result<fleet::prompt::ImageAttachment, String>> + Send + use<>,
+    > {
+        let link = self.links.get(host).filter(|link| link.online)?;
+        // Boxed: `guarded`'s future is 'static, but its type names the link.
+        let reply: std::pin::Pin<Box<dyn std::future::Future<Output = _> + Send>> =
+            Box::pin(guarded(&link.client, file.request()));
+        Some(async move { fleet::images::image_from_reply(&reply.await?) })
     }
 
     /// One timeline fetch per conversation at a time. A reload asked for

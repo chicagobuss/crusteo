@@ -109,6 +109,11 @@ pub enum Subscription {
     Timelines {
         agent_ids: BTreeSet<String>,
     },
+    /// `workspace.setup.subscribe.request` (Paseo 0.13): one workspace's
+    /// `workspace_setup_progress`.
+    WorkspaceSetup {
+        workspace_id: String,
+    },
 }
 
 #[derive(Debug, Default)]
@@ -371,6 +376,13 @@ fn route_one(
         )),
         (Subscription::Events { events }, StoreEvent::Session { kind, payload })
             if events.contains(*kind) =>
+        {
+            let mut payload = object(payload.clone());
+            payload.insert("subscriptionId".into(), id.into());
+            Some(session(kind, Value::Object(payload)))
+        }
+        (Subscription::WorkspaceSetup { workspace_id }, StoreEvent::Session { kind, payload })
+            if *kind == "workspace_setup_progress" && payload["workspaceId"] == *workspace_id =>
         {
             let mut payload = object(payload.clone());
             payload.insert("subscriptionId".into(), id.into());

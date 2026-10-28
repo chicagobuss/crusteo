@@ -430,6 +430,26 @@ async fn workspaces_are_made_for_folders_and_for_new_worktrees() {
             .unwrap()
             .starts_with("==> [1/1] Running: git branch --show-current")
     );
+    // Paseo 0.13's setup panel subscribes instead, and reads the status
+    // off the workspace to know there is a setup to show.
+    let watched = h
+        .request(json!({"type": "workspace.setup.subscribe.request",
+            "workspaceId": branched["workspace"]["id"]}))
+        .await;
+    assert!(watched["subscriptionId"].is_string(), "{watched}");
+    assert_eq!(watched["snapshot"]["status"], "completed");
+    let listed = h.request(json!({"type": "fetch_workspaces_request"})).await;
+    let entry = |id: &Value| {
+        (listed["entries"].as_array().unwrap().iter())
+            .find(|w| w["id"] == *id)
+            .cloned()
+            .unwrap()
+    };
+    let with_setup = entry(&branched["workspace"]["id"]);
+    assert_eq!(with_setup["setupStatus"], "completed", "{with_setup}");
+    // Paseo 0.13's sort times: made now, and no prompt yet.
+    assert!(with_setup["createdAt"].is_string(), "{with_setup}");
+    assert!(with_setup["lastUserMessageAt"].is_null());
 
     // Burrow's worktrees of this repository.
     let listed = h

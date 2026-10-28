@@ -21,7 +21,9 @@
   <array>
     <!-- Through a login shell, so agents get the PATH and API keys your
          ~/.zprofile and ~/.zshrc set. 127.0.0.1: Burrow has no password
-         support yet, so bind wider only on a locked-down network. -->
+         support yet, so bind wider only on a locked-down network. To be
+         reached over a VPN as well, give the listen flag a second time
+         with the VPN's address; it is bound once the VPN is up. -->
     <string>/bin/zsh</string>
     <string>-lic</string>
     <string>exec /Users/user/burrow/burrow --listen 127.0.0.1:6797</string>
