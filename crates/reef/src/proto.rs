@@ -102,6 +102,8 @@ pub enum Grouping {
     None,
     Host,
     Label,
+    /// One group per agent, its labels together: "Billing + infra".
+    Combination,
     State,
     Workspace,
 }
@@ -111,6 +113,7 @@ impl Grouping {
         match text {
             "host" => Grouping::Host,
             "label" => Grouping::Label,
+            "combination" => Grouping::Combination,
             "state" => Grouping::State,
             "workspace" => Grouping::Workspace,
             _ => Grouping::None,

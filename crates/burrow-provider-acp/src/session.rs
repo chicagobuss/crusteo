@@ -210,6 +210,8 @@ pub struct Session<L: Launcher> {
     tool_order: Vec<String>,
     permissions: HashMap<String, Permission>,
     terminals: Terminals,
+    /// What [`Self::report_terminals`] last said.
+    terminals_running: bool,
     modes: Vec<Mode>,
     current_mode: Option<String>,
     available_models: Option<Vec<String>>,
@@ -255,6 +257,7 @@ impl<L: Launcher> Session<L> {
             tool_order: Vec::new(),
             permissions: HashMap::new(),
             terminals: Terminals::default(),
+            terminals_running: false,
             modes: Vec::new(),
             available_models: None,
             config_options: Vec::new(),
@@ -267,6 +270,16 @@ impl<L: Launcher> Session<L> {
 
     fn emit(&self, event: ProviderEvent) {
         let _ = self.events.send(event);
+    }
+
+    /// Says when the agent's terminals start or all stop running: Paseo's
+    /// ACP agent will not let its runtime go while one runs, nor does Burrow.
+    fn report_terminals(&mut self) {
+        let running = self.terminals.running();
+        if running != self.terminals_running {
+            self.terminals_running = running;
+            self.emit(ProviderEvent::BackgroundWork { running });
+        }
     }
 
     /// Emits an event of the conversation, unless it is being replayed.
@@ -392,6 +405,7 @@ impl<L: Launcher> Session<L> {
                     for (request, answer) in self.terminals.on_event(event) {
                         self.reply(&request, answer);
                     }
+                    self.report_terminals();
                 }
                 command = commands.recv() => match command {
                     None | Some(Command::Shutdown) => {
@@ -1220,6 +1234,7 @@ impl<L: Launcher> Session<L> {
                     Ok(terminal) => self.reply(&id, json!({"terminalId": terminal})),
                     Err(err) => self.internal_error(&id, &err.to_string()),
                 }
+                self.report_terminals();
             }
             "terminal/output" => match self.terminals.output(terminal_id(params)) {
                 Some(output) => self.reply(&id, output),

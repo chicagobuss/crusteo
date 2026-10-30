@@ -38,6 +38,18 @@ pub fn now_ms() -> i64 {
     (OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000) as i64
 }
 
+/// Seconds since the Unix epoch.
+pub fn now_unix() -> i64 {
+    OffsetDateTime::now_utc().unix_timestamp()
+}
+
+/// An ISO 8601 timestamp as seconds since the Unix epoch.
+pub fn parse_iso(stamp: &str) -> Option<i64> {
+    OffsetDateTime::parse(stamp, &time::format_description::well_known::Rfc3339)
+        .ok()
+        .map(OffsetDateTime::unix_timestamp)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

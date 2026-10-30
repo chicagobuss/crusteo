@@ -272,11 +272,14 @@ Reef:
   not filtered: an agent waiting on a person shows there wherever it lives.
 - `sort` is `recent` (the default: the agent that last did something first, as Paseo's history
   view has it), `needs` (needs input, failed, running, done; newest first in each) or `name`.
-- `group` is `none` (the default), `host`, `label`, `state` or `workspace`. Grouped, the snapshot
-  has `groups`, every group in order with its `key`, `label` and `total`, and the rows carry their
-  `group`. An agent with two labels is in both label groups, so a grouped row's `key` is
-  `<group key>|<host>/<agent id>`. By label, a background workspace's agent is in the Background
-  group (`background`) and only there, as in crusteo's Background lane, whatever its labels.
+- `group` is `none` (the default), `host`, `label`, `combination`, `state` or `workspace`.
+  Grouped, the snapshot has `groups`, every group in order with its `key`, `label` and `total`,
+  and the rows carry their `group`. An agent with two labels is in both label groups, so a grouped
+  row's `key` is `<group key>|<host>/<agent id>`. By combination it is in one, as in crusteo's
+  Combinations lanes: an agent with several labels is in `combo:<label key>+<label key>…`,
+  labelled "Billing + infra" and placed just after its first label's group. By label or
+  combination, a background workspace's agent is in the Background group (`background`) and only
+  there, as in crusteo's Background lane, whatever its labels.
   Groups come in the hosts' order, the labels' order (no label, then Background, last), the
   states' order, or, for workspaces, newest activity first. A change in the groups comes as a
   `groups` field in a delta.

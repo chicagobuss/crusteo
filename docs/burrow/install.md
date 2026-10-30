@@ -120,11 +120,41 @@ launchctl bootout gui/$(id -u)/dev.crusteo.burrow      # to stop it
 This is how Burrow runs on the Mac it replaced Paseo on (with `--listen 127.0.0.1:6767` and a
 second `--listen` for its VPN address, so other machines reach it without a proxy).
 
+**Local Network access.** macOS asks once whether Burrow may reach devices on the local
+network, and the agents Burrow runs, with every tool they start, share its answer: without it,
+they get "No route to host" for LAN and VPN addresses (Apple's own tools such as `curl` and
+`ssh` are exempt, which hides it). macOS ties the answer to the program's signature, and an
+ad-hoc signature, which the release archive and `cargo build` give, is a new program with every
+build. Sign Burrow with a code signing certificate, the same one and the same identifier every
+time, and the answer carries over upgrades. A self-signed certificate does: Keychain Access >
+Certificate Assistant > Create a Certificate, type Code Signing. Then:
+
+```sh
+codesign --force --sign "<certificate name or SHA-1>" --identifier dev.crusteo.burrow ~/burrow/burrow
+```
+
+or upgrade with `examples/upgrade-macos.sh`, which signs for you (below).
+
 ## Run it next to Paseo
 
 Burrow's defaults are made for this: port 6797 (Paseo has 6767) and its own state folder,
-`~/.burrow` (or `$BURROW_HOME`, or `--home`). It never writes `~/.paseo`. The host then shows
-twice in clients, once per daemon; agents started on one are not on the other.
+`~/.burrow` (or `$BURROW_HOME`, or `--home`). Off Paseo's port it never writes `~/.paseo`. The
+host then shows twice in clients, once per daemon; agents started on one are not on the other.
+Paseo's CLI without `--host` reaches Paseo.
+
+## Paseo's daemon lock
+
+Paseo's CLI (0.13 on) finds the daemon on its host through `$PASEO_HOME/paseo.pid` (default
+`~/.paseo/paseo.pid`): any command without `--host` reads its address there, and with no lock says
+"Daemon is not running". A Burrow that has replaced Paseo, listening on Paseo's port (its
+`config.json`'s `daemon.listen`, else 6767), holds that lock while it runs, in Paseo's format, so
+`paseo ls` in a shell, a cron job's `paseo inspect` and `paseo daemon start` find Burrow. It is
+removed when Burrow stops. Burrow never takes a lock a running Paseo daemon holds, and says so in
+its log. `--no-paseo-lock` (or `BURROW_NO_PASEO_LOCK=1`) turns it off.
+
+With the lock, `paseo daemon stop` stops Burrow, as it would stop Paseo.
+
+Burrow's agents get `PASEO_HOST` with its address, so their `paseo` commands reach it either way.
 
 ## Replace Paseo on a host
 
@@ -136,15 +166,15 @@ what comes over).
 
 1. **Stop Burrow** if it already runs on this host (`systemctl --user stop burrow`): the
    import needs its state folder to itself.
-2. **Keep the host's identity.** Clients know a host by its server id. Copy Paseo's:
+2. **Keep the host's identity.** Clients know a host by its server id. A Burrow that has never
+   run here has none, and the import gives it Paseo's (it says `server id …, Paseo's`). If
+   Burrow ran next to Paseo before, it has its own: copy Paseo's over it first,
 
    ```sh
-   mkdir -p ~/.burrow
    cp ~/.paseo/server-id ~/.burrow/server-id
    ```
 
-   If Burrow ran next to Paseo before, this replaces the id it had, and clients that added it
-   on 6797 see that entry as a new host; remove the 6797 entry from them.
+   and remove the entry clients made for it on 6797, which they now see as a new host.
 3. **Stop Paseo's daemon:** `paseo daemon stop`. If something else starts it again, such as
    Paseo's desktop app or a service of its own, stop that too, or it takes 6767 back. On macOS
    the desktop app runs the daemon and restarts it: quit the app
@@ -158,7 +188,9 @@ what comes over).
    ~/burrow/burrow import-paseo
    ```
 
-   It only reads `~/.paseo`. A second run adds nothing.
+   It only reads `~/.paseo`. A second run adds nothing. Run it from a login shell (over SSH,
+   `bash -lc '~/burrow/burrow import-paseo'`): it reads Codex threads through `codex`, and
+   without the profile's PATH every Codex agent's history waits for its first prompt.
 5. **Start Burrow on 6767.** In the unit, change `--listen 0.0.0.0:6797` to
    `--listen 0.0.0.0:6767`, then:
 
@@ -169,6 +201,12 @@ what comes over).
 
    On macOS, change `127.0.0.1:6797` to `127.0.0.1:6767` in the launchd agent and load it as in
    [macOS (launchd)](#macos-launchd).
+
+   On a host booted without systemd (SysV `init`), use an `/etc/init.d/burrow` script that
+   starts it with `start-stop-daemon --start --background --make-pidfile --chuid <user>`
+   through `bash -lc 'exec ~/burrow/burrow --listen … >>~/.burrow/burrow.log 2>&1'`, enable it
+   with `update-rc.d burrow defaults`, and turn off Paseo's own script, if it has one, with
+   `update-rc.d paseo disable`.
 
 Clients reconnect to the same address and identity and find the imported agents, which resume
 their Claude sessions on their next prompt.
@@ -206,6 +244,25 @@ install -m 0755 "burrow-$version-$target/burrow" ~/burrow/
 systemctl --user start burrow
 ~/burrow/burrow --version
 ```
+
+### Upgrade on macOS
+
+`examples/upgrade-macos.sh` does the upgrade from anywhere, an SSH session or an agent that
+Burrow itself runs included, whose turn a direct restart would end halfway:
+
+```sh
+mkdir -p ~/.config/burrow
+echo "<certificate name or SHA-1>" > ~/.config/burrow/sign-identity    # once
+bash examples/upgrade-macos.sh "burrow-$version-macos-universal/burrow"
+tail -f ~/burrow/upgrade.log
+```
+
+It hands the work to a one-off launchd job in your login session and returns. The job waits until
+no agent is mid-turn (up to 30 minutes), stops Burrow, keeps the old binary as `burrow.prev`,
+installs and signs the new one, starts Burrow and checks it listens, or puts `burrow.prev` back if
+it does not. It signs from the login session because `codesign` over SSH usually cannot open the
+keychain. `BURROW_SIGN_IDENTITY` overrides the file, and `BURROW_DIR` and `BURROW_HOME` the
+binary's and the state folder.
 
 ## Roll back
 

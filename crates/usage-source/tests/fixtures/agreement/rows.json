@@ -3,9 +3,26 @@
     "account": "work",
     "binding": "weekly_all",
     "failure": null,
+    "groups": [
+      {
+        "keys": [
+          "session",
+          "weekly_all"
+        ],
+        "models": "",
+        "name": "All models"
+      },
+      {
+        "keys": [
+          "weekly_scoped:Fable"
+        ],
+        "models": "",
+        "name": "Fable"
+      }
+    ],
     "key": "claude:work",
     "label": "sam@work.example",
-    "needle": -29,
+    "needle": -14,
     "plan": "team",
     "provider": "claude",
     "retained": false,
@@ -25,8 +42,12 @@
         "key": "session",
         "length": 18000,
         "name": "session",
+        "pace": "7.2× room",
+        "period": "session",
         "remaining": 74.0,
         "resets_at": 1800005100,
+        "severity": "surplus",
+        "short": "session",
         "used": 26.0
       },
       {
@@ -34,8 +55,12 @@
         "key": "weekly_all",
         "length": 604800,
         "name": "weekly Global",
+        "pace": "2.1× room",
+        "period": "weekly",
         "remaining": 61.0,
         "resets_at": 1800258900,
+        "severity": "surplus",
+        "short": "weekly",
         "used": 39.0
       },
       {
@@ -43,8 +68,12 @@
         "key": "weekly_scoped:Fable",
         "length": 604800,
         "name": "weekly Fable",
+        "pace": "unused",
+        "period": "weekly",
         "remaining": 100.0,
         "resets_at": 1800258900,
+        "severity": "surplus",
+        "short": "Fable (weekly)",
         "used": 0.0
       }
     ]
@@ -53,9 +82,18 @@
     "account": null,
     "binding": "codex:primary",
     "failure": null,
+    "groups": [
+      {
+        "keys": [
+          "codex:primary"
+        ],
+        "models": "",
+        "name": ""
+      }
+    ],
     "key": "codex:personal",
     "label": "personal",
-    "needle": -34,
+    "needle": -17,
     "plan": "pro",
     "provider": "codex",
     "retained": false,
@@ -71,25 +109,46 @@
         "key": "codex:primary",
         "length": 604800,
         "name": "codex",
+        "pace": "2.4× room",
+        "period": "weekly",
         "remaining": 29.0,
         "resets_at": 1800088200,
+        "severity": "on_pace",
+        "short": "codex (weekly)",
         "used": 71.0
       }
     ]
   },
   {
     "account": null,
-    "binding": "gemini-5h",
+    "binding": "argon-weekly",
     "failure": null,
+    "groups": [
+      {
+        "keys": [
+          "gemini-weekly",
+          "gemini-5h"
+        ],
+        "models": "Gemini Flash, Gemini Pro",
+        "name": "Gemini models"
+      },
+      {
+        "keys": [
+          "argon-weekly"
+        ],
+        "models": "",
+        "name": "Gemini 4 Argon"
+      }
+    ],
     "key": "gemini:personal",
     "label": "personal",
-    "needle": -90,
+    "needle": 18,
     "plan": "AI Pro",
     "provider": "gemini",
     "retained": false,
     "served_at": 1799999940,
     "severity": "on_pace",
-    "slack": "+4",
+    "slack": "-9",
     "stale": false,
     "status": "ok",
     "use_before": {
@@ -99,13 +158,43 @@
     },
     "windows": [
       {
-        "binding": true,
+        "binding": false,
+        "key": "gemini-weekly",
+        "length": 604800,
+        "name": "Gemini models (weekly) Gemini Flash, Gemini Pro",
+        "pace": "1.8× room",
+        "period": "weekly",
+        "remaining": 58.0,
+        "resets_at": 1800259200,
+        "severity": "surplus",
+        "short": "Gemini models (weekly)",
+        "used": 42.0
+      },
+      {
+        "binding": false,
         "key": "gemini-5h",
         "length": 18000,
-        "name": "Gemini models (5h)",
+        "name": "Gemini models (5h) Gemini Flash, Gemini Pro",
+        "pace": "unused",
+        "period": "5h",
         "remaining": 100.0,
         "resets_at": 1800017300,
+        "severity": "on_pace",
+        "short": "Gemini models (5h)",
         "used": 0.0
+      },
+      {
+        "binding": true,
+        "key": "argon-weekly",
+        "length": 604800,
+        "name": "Gemini 4 Argon (weekly)",
+        "pace": "1.6× too fast",
+        "period": "weekly",
+        "remaining": 25.0,
+        "resets_at": 1800207360,
+        "severity": "on_pace",
+        "short": "Gemini 4 Argon (weekly)",
+        "used": 75.0
       }
     ]
   },
@@ -113,9 +202,19 @@
     "account": "home",
     "binding": "seven_day",
     "failure": null,
+    "groups": [
+      {
+        "keys": [
+          "five_hour",
+          "seven_day"
+        ],
+        "models": "",
+        "name": ""
+      }
+    ],
     "key": "paseo:claude:home",
     "label": "sam@home.example",
-    "needle": -18,
+    "needle": -9,
     "plan": "Max",
     "provider": "claude",
     "retained": false,
@@ -135,8 +234,12 @@
         "key": "five_hour",
         "length": 18000,
         "name": "5h",
+        "pace": "9.9× room",
+        "period": "5h",
         "remaining": 86.0,
         "resets_at": 1800006900,
+        "severity": "surplus",
+        "short": "5h",
         "used": 14.0
       },
       {
@@ -144,8 +247,12 @@
         "key": "seven_day",
         "length": 604800,
         "name": "Weekly",
+        "pace": "1.6× room",
+        "period": "weekly",
         "remaining": 41.0,
         "resets_at": 1800183300,
+        "severity": "on_pace",
+        "short": "weekly",
         "used": 59.0
       }
     ]

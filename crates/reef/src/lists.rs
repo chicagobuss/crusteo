@@ -125,6 +125,11 @@ pub fn agent_row(host: &Host, agent: &Agent, cx: &Context) -> Value {
         .iter()
         .find_map(|key| agent.raw[*key].as_str());
     put("thinking", json!(thinking));
+    // Whole percents, so a row changes only when what Skiff shows does.
+    put(
+        "context",
+        json!(agent.context_percent().map(|full| full.round() as i64)),
+    );
     if let Some(workspace) = workspace {
         put("workspace", json!(workspace_name(workspace)));
         let project = directory
@@ -295,7 +300,8 @@ pub struct ListOut {
 }
 
 /// The groups an agent falls in, as (key, label, order). An agent with
-/// several labels is in several groups.
+/// several labels is in several groups, but for by combination, where it
+/// is in one: its labels together, as crusteo's Lanes combine them.
 fn groups_of(
     fleet: &Fleet,
     host: &Host,
@@ -304,6 +310,23 @@ fn groups_of(
 ) -> Vec<(String, String, String)> {
     match grouping {
         Grouping::None => Vec::new(),
+        Grouping::Combination => {
+            let mut labels = groups_of(fleet, host, agent, Grouping::Label);
+            if labels.len() < 2 {
+                return labels;
+            }
+            labels.sort_by(|a, b| a.2.cmp(&b.2));
+            let keys: Vec<&str> = labels.iter().map(|(key, ..)| key.as_str()).collect();
+            let names: Vec<&str> = labels.iter().map(|(_, name, _)| name.as_str()).collect();
+            let orders: Vec<&str> = labels.iter().map(|(.., order)| order.as_str()).collect();
+            // Just after its first label's own group, so a label's
+            // combinations follow it.
+            vec![(
+                format!("combo:{}", keys.join("+")),
+                names.join(" + "),
+                orders.join("\u{1}"),
+            )]
+        }
         Grouping::State => {
             let bucket = state(agent);
             vec![(
@@ -838,7 +861,7 @@ mod tests {
     }
 
     #[test]
-    fn rows_say_the_model_and_the_effort_it_runs_at() {
+    fn rows_say_the_model_the_effort_it_runs_at_and_how_full_it_is() {
         let host = host(
             "example-a",
             vec![
@@ -846,7 +869,8 @@ mod tests {
                     "chosen",
                     "w1",
                     "2026-10-17T08:00:00Z",
-                    json!({"model": "opus", "thinkingOptionId": "low", "effectiveThinkingOptionId": "low"}),
+                    json!({"model": "opus", "thinkingOptionId": "low", "effectiveThinkingOptionId": "low",
+                        "lastUsage": {"contextWindowUsedTokens": 84_500, "contextWindowMaxTokens": 200_000}}),
                 ),
                 agent(
                     "default",
@@ -875,6 +899,8 @@ mod tests {
             "the provider's resolved default"
         );
         assert!(row("unknown").get("thinking").is_none());
+        assert_eq!(chosen["context"], 42, "a whole percent of its window");
+        assert!(row("unknown").get("context").is_none());
     }
 
     #[test]
@@ -1271,6 +1297,21 @@ mod tests {
             ]
         );
         assert_eq!(by_label.rows[0].1["group"], "label:billing");
+
+        // By combination, each agent is in one group, under all its labels.
+        let by_combination = list(ListSpec {
+            group: Grouping::Combination,
+            ..Default::default()
+        });
+        let groups: Vec<(&str, u64)> = (by_combination.groups.iter())
+            .map(|g| (g["label"].as_str().unwrap(), g["total"].as_u64().unwrap()))
+            .collect();
+        assert_eq!(groups, [("Billing + infra", 2), ("No label", 2)]);
+        assert_eq!(by_combination.rows.len(), 4, "no agent twice");
+        assert_eq!(
+            by_combination.groups[0]["key"],
+            "combo:label:billing+label:infra"
+        );
 
         let by_state = list(ListSpec {
             group: Grouping::State,

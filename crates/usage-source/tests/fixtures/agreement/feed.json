@@ -34,8 +34,12 @@
       "plan": "AI Pro",
       "status": "ok",
       "windows": [
-        {"key": "gemini-5h", "label": "Gemini models (5h)", "scope": null, "used_percent": 0.0,
-         "remaining_percent": 100.0, "window_seconds": 18000.0, "resets_at": 1800017300.0}
+        {"key": "gemini-weekly", "label": "Gemini models (weekly)", "scope": "Gemini Flash, Gemini Pro",
+         "used_percent": 42.0, "remaining_percent": 58.0, "window_seconds": 604800.0, "resets_at": 1800259200.0},
+        {"key": "gemini-5h", "label": "Gemini models (5h)", "scope": "Gemini Flash, Gemini Pro", "used_percent": 0.0,
+         "remaining_percent": 100.0, "window_seconds": 18000.0, "resets_at": 1800017300.0},
+        {"key": "argon-weekly", "label": "Gemini 4 Argon (weekly)", "scope": null, "used_percent": 75.0,
+         "remaining_percent": 25.0, "window_seconds": 604800.0, "resets_at": 1800207360.0}
       ]
     }
   }

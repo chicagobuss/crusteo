@@ -147,7 +147,8 @@ pub fn info(version: Option<&[u32]>, catalog: &Catalog) -> ProviderInfo {
             streaming: true,
             session_persistence: true,
             dynamic_modes: false,
-            mcp_servers: true,
+            // A client's `mcpServers` are not passed to app-server yet.
+            mcp_servers: false,
             reasoning_stream: true,
             tool_invocations: true,
             steer: true,
@@ -183,6 +184,7 @@ impl Provider for CodexProvider {
                     binary: self.binary.clone(),
                     cwd: PathBuf::from(&spec.cwd),
                     env: spec.env.clone(),
+                    unset: spec.unset.clone(),
                     trace: self.trace_dir.as_ref().map(|dir| {
                         let name = format!("codex-{}.jsonl", uuid::Uuid::new_v4().simple());
                         dir.join(name)
@@ -227,6 +229,7 @@ struct CliLauncher {
     binary: PathBuf,
     cwd: PathBuf,
     env: Vec<(String, String)>,
+    unset: Vec<String>,
     trace: Option<PathBuf>,
 }
 
@@ -237,44 +240,25 @@ impl Launcher for CliLauncher {
         if self.cwd.is_dir() {
             command.current_dir(&self.cwd);
         }
+        for key in &self.unset {
+            command.env_remove(key);
+        }
         for (key, value) in &self.env {
             command.env(key, value);
         }
         let process = JsonProcess::spawn(command)?;
-        Ok(match &self.trace {
-            Some(path) => tee(process, path),
-            None => keep_alive(process),
-        })
+        Ok(own(process, self.trace.as_deref()))
     }
 }
 
-/// Owns the process for as long as its channels are in use.
-fn keep_alive(process: JsonProcess) -> Transport {
-    let JsonProcess {
-        input,
-        mut output,
-        child,
-    } = process;
-    let (output_tx, output_rx) = mpsc::unbounded_channel();
-    tokio::spawn(async move {
-        let _child = child; // killed on drop
-        while let Some(message) = output.recv().await {
-            let done = matches!(message, Output::Exited { .. });
-            if output_tx.send(message).is_err() || done {
-                break;
-            }
-        }
-    });
-    Transport {
-        input,
-        output: output_rx,
-    }
-}
-
-/// Like [`keep_alive`], also writing every frame to `path`.
-fn tee(process: JsonProcess, path: &Path) -> Transport {
-    let file = std::fs::File::create(path)
-        .ok()
+/// Owns the process for as long as the session holds its channels, writing
+/// every frame to `trace` when there is one. When the session lets go,
+/// app-server's process tree is ended while it still runs, before its stdin
+/// closes: one that exits first leaves its tools to init
+/// ([`burrow_provider::group`]).
+fn own(process: JsonProcess, trace: Option<&Path>) -> Transport {
+    let file = trace
+        .and_then(|path| std::fs::File::create(path).ok())
         .map(|f| Arc::new(Mutex::new(f)));
     let record = move |file: &Option<Arc<Mutex<std::fs::File>>>, dir: &str, frame: &Value| {
         if let Some(file) = file
@@ -286,30 +270,46 @@ fn tee(process: JsonProcess, path: &Path) -> Transport {
     let JsonProcess {
         input: process_input,
         mut output,
-        child,
+        mut child,
     } = process;
     let (input_tx, mut input_rx) = mpsc::unbounded_channel::<Value>();
     let (output_tx, output_rx) = mpsc::unbounded_channel();
-    let in_file = file.clone();
     tokio::spawn(async move {
-        while let Some(frame) = input_rx.recv().await {
-            record(&in_file, "in", &frame);
-            if process_input.send(frame).is_err() {
-                break;
+        let mut input_open = true;
+        loop {
+            tokio::select! {
+                frame = input_rx.recv(), if input_open => match frame {
+                    Some(frame) => {
+                        record(&file, "in", &frame);
+                        let _ = process_input.send(frame);
+                    }
+                    None => {
+                        input_open = false;
+                        child.end();
+                    }
+                },
+                message = output.recv() => {
+                    let Some(message) = message else { break };
+                    if let Output::Message(frame) = &message {
+                        record(&file, "out", frame);
+                    }
+                    let done = matches!(message, Output::Exited { .. });
+                    if output_tx.send(message).is_err() {
+                        child.end();
+                        break;
+                    }
+                    if done {
+                        break;
+                    }
+                }
+                _ = output_tx.closed() => {
+                    child.end();
+                    break;
+                }
             }
         }
-    });
-    tokio::spawn(async move {
-        let _child = child;
-        while let Some(message) = output.recv().await {
-            if let Output::Message(frame) = &message {
-                record(&file, "out", frame);
-            }
-            let done = matches!(message, Output::Exited { .. });
-            if output_tx.send(message).is_err() || done {
-                break;
-            }
-        }
+        // Its stdin closes only now, after the tree was ended.
+        drop(process_input);
     });
     Transport {
         input: input_tx,

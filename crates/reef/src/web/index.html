@@ -156,10 +156,25 @@ select, input, textarea { font: inherit; color: inherit; background: var(--surfa
 .more { display: block; margin: 8px auto; }
 
 /* Conversation pane */
-.convhead { flex-shrink: 0; display: flex; align-items: center; gap: 4px; padding: 6px 8px 6px 12px; border-bottom: 1px solid var(--border); }
-.convhead h2 { flex: 1; min-width: 0; margin: 0; font-size: 16px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.convhead .meta { font-size: 12px; color: var(--muted); }
-.convhead #back { width: 36px; height: 36px; margin-left: -8px; padding: 0; display: grid; place-items: center; flex-shrink: 0; }
+/* Text on the left in three rows; on the right, two rows of things to tap: the actions, then the labels. */
+.convhead { flex-shrink: 0; display: grid; grid-template-columns: auto minmax(0, 1fr) clamp(132px, 38%, 360px);
+  align-items: center; gap: 4px 6px; padding: 6px 8px 6px 12px; border-bottom: 1px solid var(--border); }
+.convhead .headtext { grid-column: 2; grid-row: 1 / 3; min-width: 0; }
+.convhead h2 { margin: 0; font-size: 16px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.convhead .meta { font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.convhead #back { grid-column: 1; grid-row: 1 / 3; width: 36px; height: 36px; margin-left: -8px; padding: 0; display: grid; place-items: center; }
+.convhead .headside { display: contents; }
+.convhead .acts { grid-column: 3; grid-row: 1; align-self: start; display: flex; justify-content: flex-end; gap: 2px; margin: -2px -4px 0 0; }
+.convhead .acts button.icon { padding: 5px; }
+.convhead .tagrow { grid-column: 3; grid-row: 2; align-self: end; display: flex; align-items: center; gap: 2px; min-width: 0; }
+/* Few labels sit at the right under the actions; more than fit are cut, and the chevron shows the rest. */
+.convhead .tagrow .chips { flex: 0 1 auto; min-width: 0; margin: 0 0 0 auto; cursor: pointer; }
+.convhead .tagrow .chip { font-size: 12px; line-height: 20px; padding: 0 8px; border-radius: 10px; }
+.convhead #convmore { flex: 0 0 auto; margin: -4px -4px -4px 0; padding: 4px; color: var(--accent); }
+/* Open, the labels get a full-width row of their own under everything. */
+.convhead.full .tagrow { grid-column: 2 / 4; grid-row: 3; align-items: flex-end; }
+.convhead.full .tagrow .chips { flex: 1 1 auto; margin: 0; flex-wrap: wrap; }
+.convhead.full #convmore svg { transform: rotate(180deg); }
 .mlane .lanehead .plain { display: flex; align-items: center; gap: 2px; padding: 4px 6px 4px 0; }
 .measure { max-width: 80ch; margin: 0 auto; padding: 8px 16px 16px; }
 .turn { margin: 14px 0; }
@@ -209,14 +224,19 @@ select, input, textarea { font: inherit; color: inherit; background: var(--surfa
 .pool .why.failed { color: var(--bad); white-space: pre-line; }
 .pool .why.last { color: var(--muted); }
 .pool .hint { color: var(--accent); font-size: 12px; margin-top: 4px; }
-.win { margin-top: 8px; }
-.win .wtop { display: flex; gap: 8px; font-size: 13px; }
-.win .wtop .l { flex: 1; min-width: 0; color: var(--muted); }
-.win.binding .wtop .l { color: var(--text); font-weight: 600; }
-.win .wtop .r { color: var(--muted); font-variant-numeric: tabular-nums; }
-.win .bar { height: 6px; border-radius: 3px; background: var(--surface2); overflow: hidden; margin-top: 3px; }
-.win .bar i { display: block; height: 100%; border-radius: 3px; background: var(--run); }
-.win .bar i.warn { background: var(--warn); } .win .bar i.bad { background: var(--bad); }
+/* Each window a line of one table: period, what is left as a bar and a
+   number, the reset, the pace. */
+.wgroup { margin-top: 8px; font-size: 13px; }
+.wline { display: grid; grid-template-columns: 5em 1fr 2.6em 3.2em 6.4em; gap: 8px; align-items: center;
+  margin-top: 4px; font-size: 13px; font-variant-numeric: tabular-nums; }
+.wline.heads { margin: 6px 0 -2px; font-size: 11px; color: var(--faint); }
+.wline .n { text-align: right; }
+.wline .faint { color: var(--muted); }
+.wline .per { color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.wline .mark { display: inline-block; width: 1em; }
+.wline .bar { height: 6px; border-radius: 3px; background: var(--surface2); overflow: hidden; }
+.wline .bar i { display: block; height: 100%; border-radius: 3px; background: currentColor; }
+.convsub .ctx.warn { color: var(--warn); } .convsub .ctx.bad { color: var(--bad); }
 .assistant p { margin: 6px 0; }
 .assistant p.h { font-weight: 700; margin-top: 12px; }
 .assistant ul, .assistant ol { margin: 6px 0; padding-left: 22px; }
@@ -339,13 +359,12 @@ select, input, textarea { font: inherit; color: inherit; background: var(--surfa
 .chip.add::before { content: "+ "; }
 .newlabel { display: flex; gap: 6px; margin-top: 8px; }
 .newlabel input { flex: 1; }
-.convhead .chips { cursor: pointer; margin-top: 2px; }
 .convsub { display: flex; align-items: center; gap: 6px; margin-top: 2px; min-width: 0; }
-.convsub .spec { flex: 0 0 auto; max-width: 100%; font-size: 11px; line-height: 16px; color: var(--muted);
+.convsub .spec { flex: 0 1 auto; min-width: 0; font-size: 11px; line-height: 16px; color: var(--muted);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.convsub .ctx { flex: 0 0 auto; margin-left: -3px; font-size: 11px; line-height: 16px; color: var(--muted); white-space: nowrap; }
+.convsub .ctx[hidden] { display: none; }
 .convsub .spec:empty { display: none; }
-/* The labels give way first; they are a tap away in the labels panel. */
-.convsub .chips { flex: 0 1 auto; min-width: 0; margin-top: 0; }
 button.icon.accent { color: var(--accent); }
 button.primary.danger { background: var(--bad); border-color: var(--bad); color: #fff; }
 .status { position: fixed; bottom: calc(env(safe-area-inset-bottom) + 80px); left: 50%; transform: translateX(-50%); z-index: 8;
@@ -387,14 +406,19 @@ button.primary.danger { background: var(--bad); border-color: var(--bad); color:
   <section class="pane" id="convpane" hidden>
     <div class="convhead">
       <button class="plain" id="back" aria-label="Back"></button>
-      <div style="flex:1;min-width:0"><h2 id="title"></h2><div class="meta" id="convmeta"></div>
-        <div class="convsub" id="convsub" hidden><span class="spec" id="convspec"></span>
-          <div class="chips" id="convlabels" title="Edit labels"></div></div></div>
-      <button class="icon" id="bell" aria-label="Notifications for this agent"></button>
-      <button class="icon" id="labels" aria-label="Labels" title="Labels"></button>
-      <button class="icon" id="archive" aria-label="Archive" title="Archive"></button>
-      <button class="icon" id="delete" aria-label="Delete" title="Delete"></button>
-      <button class="icon" id="close" aria-label="Close"></button>
+      <div class="headtext"><h2 id="title"></h2><div class="meta" id="convmeta"></div>
+        <div class="convsub" id="convsub" hidden><span class="spec" id="convspec"></span><span class="ctx" id="convctx" hidden></span></div></div>
+      <div class="headside">
+        <div class="acts">
+          <button class="icon" id="bell" aria-label="Notifications for this agent"></button>
+          <button class="icon" id="labels" aria-label="Labels" title="Labels"></button>
+          <button class="icon" id="archive" aria-label="Archive" title="Archive"></button>
+          <button class="icon" id="delete" aria-label="Delete" title="Delete"></button>
+          <button class="icon" id="close" aria-label="Close"></button>
+        </div>
+        <div class="tagrow"><div class="chips" id="convlabels" title="Edit labels"></div>
+          <button class="icon" id="convmore" aria-label="Show all labels" title="Show all labels" hidden></button></div>
+      </div>
     </div>
     <div class="scroll" id="convscroll"><div class="measure" id="convbody"></div></div>
     <div class="composer"><div class="measure">
@@ -441,7 +465,8 @@ let ws = null, open = null, backoff = 1000, nextReq = 0, hosts = [], settings = 
 let convTurns = 3, following = true;
 
 const STATES = { needs_input: "Needs input", failed: "Failed", running: "Working", done: "Done" };
-const GROUPS = { none: "No groups", state: "By state", host: "By host", label: "By label", workspace: "By workspace" };
+const GROUPS = { none: "No groups", state: "By state", host: "By host", label: "By label", combination: "By combination",
+  workspace: "By workspace" };
 const SORTS = { recent: "Recent first", needs: "Needs you first", name: "By name" };
 const PER_GROUP = 25;
 
@@ -571,7 +596,11 @@ function receive(m) {
       return sheet && !composing() && drawSheet();
     case "settings": settings = m.settings; if (fillSelects()) subscribeList(); drawChrome(); return drawSheet();
     case "notification": return notify(m);
-    case "snapshot": views[m.id] = { seq: m.seq, fields: m, parts: m.rows || m.turns || m.tiles || [], cards: m.cards || [] }; break;
+    case "snapshot":
+      // One the previous agent's view sent before Reef had the new
+      // subscription: not this conversation's.
+      if (m.id === "conv" && m.agent && (!open || m.agent.id !== open.id || m.agent.host !== open.host)) return;
+      views[m.id] = { seq: m.seq, fields: m, parts: m.rows || m.turns || m.tiles || [], cards: m.cards || [] }; break;
     case "delta": if (!applyDelta(m)) return; break;
     case "result":
       if (pending[m.req]) { const then = pending[m.req]; delete pending[m.req]; then(m); }
@@ -760,6 +789,7 @@ const ICON = {
   arrow: '<path d="M12 19V5"/><path d="m5 12 7-7 7 7"/>',
   close: '<path d="M18 6 6 18"/><path d="m6 6 12 12"/>',
   back: '<path d="m15 18-6-6 6-6"/>',
+  more: '<path d="m6 9 6 6 6-6"/>',
   plus: '<path d="M12 5v14"/><path d="M5 12h14"/>',
   tag: '<path d="M12.6 2.6A2 2 0 0 0 11.2 2H4a2 2 0 0 0-2 2v7.2a2 2 0 0 0 .6 1.4l8.7 8.7a2.4 2.4 0 0 0 3.4 0l6.6-6.6a2.4 2.4 0 0 0 0-3.4z"/><circle cx="7.5" cy="7.5" r=".5" fill="currentColor"/>',
   trash: '<path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M10 11v6"/><path d="M14 11v6"/>',
@@ -768,7 +798,7 @@ function icon(name, size) {
   const s = size || 20;
   return '<svg width="' + s + '" height="' + s + '" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' + ICON[name] + "</svg>";
 }
-function bellFor(row) { return icon(row.notify === false ? "quiet" : "bell", 18); }
+function bellFor(row, size) { return icon(row.notify === false ? "quiet" : "bell", size || 18); }
 function toggleNotify(row) {
   act("notify:" + row.host + "/" + row.id, { action: "notify", host: row.host, agent: row.id, on: row.notify === false });
 }
@@ -1068,7 +1098,8 @@ function markdown(text, sources) {
 
 // The open agent's provider, model and effort (the defaults when it names
 // none), by the names its host gives them once the host's choices are in
-// (fetched once), by id until then.
+// (fetched once), by id until then; then how full its context is, amber
+// from 80% and red from 90%, as crusteo's composer shows it.
 function drawSpec() {
   if (!open) return;
   const agent = (views.conv && views.conv.fields.agent) || open;
@@ -1079,15 +1110,32 @@ function drawSpec() {
   const models = (provider && provider.models) || [];
   const model = models.find((m) => m.id === agent.model) || (!agent.model && models.find((m) => m.default));
   const thinking = model && (model.thinking || []).find((t) => t.id === agent.thinking);
-  $("convspec").textContent = [provider ? provider.label : agent.provider, model ? model.label : agent.model,
+  const spec = $("convspec"), ctx = $("convctx"), full = agent.context;
+  spec.textContent = [provider ? provider.label : agent.provider, model ? model.label : agent.model,
     thinking ? thinking.label : agent.thinking].filter(Boolean).join(" · ");
-  $("convsub").hidden = !$("convspec").textContent && $("convlabels").hidden;
+  // Its own span, so a narrow screen cuts the model's name, not this.
+  ctx.hidden = typeof full !== "number";
+  ctx.className = "ctx" + (full >= 90 ? " bad" : full >= 80 ? " warn" : "");
+  ctx.textContent = ctx.hidden ? "" : (spec.textContent ? "· " : "") + full + "% context";
+  $("convsub").hidden = !spec.textContent && ctx.hidden;
+  fitHead();
+}
+
+// The chevron shows only when the labels don't all fit; it opens the header to show every one.
+let headFull = false;
+function fitHead() {
+  const more = $("convmore"), labels = $("convlabels");
+  $("convpane").querySelector(".convhead").classList.toggle("full", headFull && !labels.hidden);
+  if (headFull) { more.hidden = labels.hidden; return; }
+  more.hidden = true;
+  more.hidden = labels.hidden || labels.scrollWidth <= labels.clientWidth + 1;
 }
 
 let firstDraw = true;
 function drawConv() {
   if (!open) {
     $("convbody").innerHTML = "";
+    $("convbody").dataset.agent = "";
     $("convbody").append(el("div", "placeholder", "Pick an agent to see its conversation"));
     return;
   }
@@ -1097,7 +1145,7 @@ function drawConv() {
   const agent = (v && v.fields.agent) || open;
   $("title").textContent = agent.title || "Conversation";
   $("convmeta").textContent = [agent.host || open.host, agent.workspace, STATES[agent.state]].filter(Boolean).join(" · ");
-  $("bell").innerHTML = bellFor(agent);
+  $("bell").innerHTML = bellFor(agent, 20);
   $("bell").className = "icon" + (agent.notify === false ? " off" : "");
   const labelBox = $("convlabels");
   labelBox.hidden = !(agent.labels && agent.labels.length);
@@ -1107,14 +1155,20 @@ function drawConv() {
   drawComposer();
   const scroller = $("convscroll");
   const body = $("convbody");
+  // Whose conversation the body shows.
+  const showing = open.host + "/" + open.id;
   if (!v || v.fields.loading) {
-    // A conversation already on screen stays until its replacement comes.
-    if (body.querySelector(".turn")) return;
+    // This agent's conversation, already on screen (a reconnect), stays
+    // until its replacement comes. Another agent's never does: it read as
+    // this one's under its title until this one's loaded.
+    if (body.dataset.agent === showing && body.querySelector(".turn")) return;
     body.innerHTML = "";
+    body.dataset.agent = showing;
     return body.append(el("div", "note", "Loading..."));
   }
   const anchor = following ? null : readingAt(scroller);
   body.innerHTML = "";
+  body.dataset.agent = showing;
   if (v.fields.error) body.append(el("div", "note", v.fields.error));
   if (v.fields.has_older) {
     body.append(button("Load earlier", "more", "older", () => {
@@ -1154,11 +1208,21 @@ function readingAt(scroller) {
   return null;
 }
 
-// Following the end is the reader's choice, made by where they scroll.
+// Following the end is the reader's choice, made by where they scroll: back
+// to the end follows again, and only scrolling up stops it. The pane
+// shrinking under the keyboard or a taller composer is not the reader's
+// doing, so it leaves following as it was.
+let lastTop = 0;
 $("convscroll").addEventListener("scroll", () => {
   const s = $("convscroll");
-  following = s.scrollTop + s.clientHeight >= s.scrollHeight - 60;
+  if (s.scrollTop + s.clientHeight >= s.scrollHeight - 60) following = true;
+  else if (s.scrollTop < lastTop) following = false;
+  lastTop = s.scrollTop;
 }, { passive: true });
+function toEnd() { const s = $("convscroll"); if (following) s.scrollTop = s.scrollHeight; }
+// The pane resized, or what's in it grew without a redraw (an image loading).
+new ResizeObserver(toEnd).observe($("convscroll"));
+new ResizeObserver(toEnd).observe($("convbody"));
 
 function askCard(a) {
   const card = el("div", "card");
@@ -1256,9 +1320,15 @@ function dialSvg(needle) {
 function resetsIn(at, retained) {
   const s = at - Date.now() / 1000;
   if (s <= 0) return retained ? "reset time passed" : "resets now";
-  if (s < 90 * 60) return "resets in " + Math.max(1, Math.round(s / 60)) + "m";
-  if (s < 48 * 3600) return "resets in " + (s / 3600).toFixed(1) + "h";
-  return "resets in " + (s / 86400).toFixed(1) + "d";
+  return "resets in " + resetShort(at);
+}
+// The same for a table cell: 26m, 3.3h, 2.1d, "now", or "passed".
+function resetShort(at, retained) {
+  const s = at - Date.now() / 1000;
+  if (s <= 0) return retained ? "passed" : "now";
+  if (s < 90 * 60) return Math.max(1, Math.round(s / 60)) + "m";
+  if (s < 48 * 3600) return (s / 3600).toFixed(1) + "h";
+  return (s / 86400).toFixed(1) + "d";
 }
 function bindingWindow(row) { return (row.windows || []).find((w) => w.binding); }
 // A row whose latest read failed, as Paseo's usage card says it: "Error" or
@@ -1281,7 +1351,7 @@ function drawUsage() {
     const w = bindingWindow(top);
     g.className = "ugauge sev-" + top.severity + (top.stale ? " stale" : "");
     g.innerHTML = dialSvg(top.needle) + "<span>" + top.slack + "</span>";
-    g.title = [top.provider + " " + (top.account || top.label), w ? w.name + " " + Math.round(w.remaining) + "% left, " + resetsIn(w.resets_at, top.retained) : "",
+    g.title = [top.provider + " " + (top.account || top.label), w ? (w.short || w.name) + " " + Math.round(w.remaining) + "% left, " + resetsIn(w.resets_at, top.retained) : "",
       top.retained ? failureText(top) + "\n" + lastUpdated(top) : ""]
       .filter(Boolean).join("\n");
   }
@@ -1333,19 +1403,39 @@ function drawUsageDrawer() {
       const u = p.use_before;
       box.append(el("div", "hint", "Use it before reset: " + Math.round(u.remaining) + "% of " + u.window + " left, " + resetsIn(u.resets_at)));
     }
-    for (const w of p.windows || []) {
-      const used = Math.max(0, Math.min(100, w.used || 0));
-      const row = el("div", "win" + (w.binding ? " binding" : ""));
-      const top = el("div", "wtop");
-      top.append(el("span", "l", w.name), el("span", "r", Math.round(used) + "%" + (w.resets_at > 0 ? " · " + resetsIn(w.resets_at, p.retained) : "")));
-      const bar = el("div", "bar"), fill = el("i", used >= 90 ? "bad" : used >= 70 ? "warn" : "");
-      fill.style.width = used + "%";
-      bar.append(fill);
-      row.append(top, bar);
-      box.append(row);
+    // As crusteo's usage table: a heading per group, a line per period with
+    // what is left, the reset and the pace, the window the dial shows marked.
+    // A Reef from before groups sends none: then one group of every window.
+    const windows = new Map((p.windows || []).map((w) => [w.key, w]));
+    const groups = p.groups || [{ name: "", keys: [...windows.keys()] }];
+    for (const g of groups) {
+      if (g.name) box.append(el("div", "wgroup", g.name));
+      for (const key of g.keys) {
+        const w = windows.get(key);
+        if (w) box.append(windowLine(w, p.retained));
+      }
     }
     body.append(box);
   }
+  if (rows.length) body.prepend(windowLine(null));
+}
+// One window's line in the usage drawer, or with none the column heads.
+function windowLine(w, retained) {
+  const line = el("div", "wline" + (w ? "" : " heads"));
+  if (!w) {
+    line.append(el("span"), el("span"), el("span", "n", "left"), el("span", "n", "resets"), el("span", "", "pace"));
+    return line;
+  }
+  const left = Math.max(0, Math.min(100, w.remaining || 0)), sev = "sev-" + (w.severity || "unknown");
+  const per = el("span", "per");
+  per.append(el("span", "mark " + sev, w.binding ? "●" : ""), w.period || w.name);
+  const bar = el("span", "bar"), fill = el("i", sev);
+  fill.style.width = left + "%";
+  bar.append(fill);
+  const pace = w.pace || "";
+  line.append(per, bar, el("span", "n", Math.round(left) + "%"), el("span", "n faint", w.resets_at > 0 ? resetShort(w.resets_at, retained) : "—"),
+    el("span", pace.endsWith("too fast") ? sev : "faint", pace));
+  return line;
 }
 
 function renderItem(item) {
@@ -1463,6 +1553,9 @@ function sendAs(action) {
   if ((!text.trim() && !attached.length) || !open || shrinking) return;
   const message = { action, host: open.host, agent: open.id, text, message_id: newId() };
   if (attached.length) message.images = attached.map((a) => ({ data: a.data, mime_type: a.mime }));
+  // What you send is what you want to see next.
+  following = true;
+  toEnd();
   act("send", message, (r) => {
     if (r.ok) { $("draft").value = ""; sizeDraft(); attached = []; drawAttached(); }
   });
@@ -2545,13 +2638,16 @@ new ResizeObserver(() => { if (prefs.tab === "map") drawMap(); }).observe($("map
 
 $("gear").innerHTML = icon("gear");
 $("usage").onclick = showUsage;
-$("archive").innerHTML = icon("archive", 18);
-$("delete").innerHTML = icon("trash", 18);
-$("labels").innerHTML = icon("tag", 18);
+$("archive").innerHTML = icon("archive", 20);
+$("delete").innerHTML = icon("trash", 20);
+$("labels").innerHTML = icon("tag", 20);
 $("new").innerHTML = icon("plus", 22);
-$("close").innerHTML = icon("close", 18);
+$("close").innerHTML = icon("close", 20);
 $("send").innerHTML = icon("arrow", 18);
 $("back").innerHTML = icon("back", 26);
+$("convmore").innerHTML = icon("more", 20);
+$("convmore").onclick = (e) => { e.stopPropagation(); headFull = !headFull; fitHead(); };
+new ResizeObserver(fitHead).observe($("convpane").querySelector(".convhead"));
 $("add").innerHTML = icon("plus", 22);
 $("gear").onclick = () => showSheet("settings");
 $("dots").onclick = () => showSheet("hosts");

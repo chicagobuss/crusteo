@@ -6,6 +6,7 @@
 //! ```json
 //! {"revision": 7, "served_at": "2026-10-02T18:04:48Z",
 //!  "pools": {"<pool id>": {"provider": "claude", "account_label": "work",
+//!    "account_fingerprint": "anthropic:…",
 //!    "plan": "max", "status": "ok", "windows": [{"key": "weekly_all",
 //!    "label": "weekly", "scope": null, "used_percent": 39, "remaining_percent": 61,
 //!    "window_seconds": 604800, "resets_at": 1791223199}]}}}
@@ -38,6 +39,7 @@ pub fn parse_usage(body: &str) -> Result<UsageSnapshot, String> {
             id,
             provider: pool.provider,
             account_label: pool.account_label,
+            fingerprint: pool.account_fingerprint.unwrap_or_default(),
             plan: pool.plan.unwrap_or_default(),
             failure: failed.then(|| Failure {
                 status: pool.status.clone(),
@@ -117,6 +119,10 @@ struct RawPool {
     provider: String,
     #[serde(default)]
     account_label: String,
+    /// Who the account is ([`crate::email_fingerprint`] for one known by
+    /// email), so a daemon's report of it, named by email, is known as it.
+    #[serde(default)]
+    account_fingerprint: Option<String>,
     #[serde(default)]
     plan: Option<String>,
     #[serde(default)]
@@ -145,11 +151,13 @@ struct RawWindow {
 }
 
 fn window(raw: RawWindow) -> Window {
+    let scope = raw.scope.unwrap_or_default();
     Window {
-        label: match raw.scope.as_deref().filter(|scope| !scope.is_empty()) {
-            Some(scope) => format!("{} {scope}", raw.label),
-            None => raw.label,
+        label: match scope.as_str() {
+            "" => raw.label,
+            scope => format!("{} {scope}", raw.label),
         },
+        scope,
         key: raw.key,
         used_percent: raw.used_percent,
         remaining_percent: raw.remaining_percent,
@@ -188,6 +196,7 @@ mod tests {
             remaining_percent: 100. - used,
             window_seconds: seconds,
             resets_at,
+            ..Default::default()
         }
     }
 
@@ -237,7 +246,7 @@ mod tests {
     fn a_feed_reads_into_pools_with_plans() {
         let body = r#"{"revision": 3, "served_at": "2026-10-10T08:00:00Z", "pools": {
             "codex:work": {"provider": "codex", "account_label": "work", "plan": "pro",
-                "status": "ok", "windows": [
+                "account_fingerprint": "openai:b7f5e7db797892b3d29cdbfa", "status": "ok", "windows": [
                 {"key": "w", "label": "weekly", "used_percent": 20, "remaining_percent": 80,
                  "window_seconds": 604800, "resets_at": 1791000000, "binding": true}]}}}"#;
         let snapshot = parse_usage(body).unwrap();
@@ -246,6 +255,10 @@ mod tests {
         assert_eq!(
             (pool.id.as_str(), pool.plan.as_str()),
             ("codex:work", "pro")
+        );
+        assert_eq!(
+            Some(pool.fingerprint.clone()),
+            crate::email_fingerprint("codex", "work@example.com")
         );
         assert_eq!(pool.windows[0].remaining_percent, 80.);
         assert!(parse_usage("{}").is_err());

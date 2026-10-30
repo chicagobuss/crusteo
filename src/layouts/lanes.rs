@@ -13,8 +13,8 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use fleet::lanes::{
-    BACKGROUND, LabelLaneMode, Lane, LaneCard, LaneGrouping, LaneKind, LaneModel, LaneState,
-    UNLABELLED,
+    BACKGROUND, LabelLaneMode, Lane, LaneBand, LaneCard, LaneGrouping, LaneKind, LaneModel,
+    LaneState, UNLABELLED,
 };
 use fleet::project_remove;
 use fleet::timeline::ItemKind;
@@ -28,12 +28,12 @@ use gpui_kit::component::scroll::{Scrollbar, ScrollbarMode};
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::gpui::{
     Anchor, AnyElement, AnyView, App, AppContext, Bounds, ClickEvent, Context, CursorStyle,
-    DismissEvent, Div, DragMoveEvent, Entity, FocusHandle, Focusable, Hsla, InteractiveElement,
-    IntoElement, KeyDownEvent, ListAlignment, ListState, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Point, Render, Rgba, ScrollDelta,
-    ScrollHandle, ScrollWheelEvent, SharedString, Stateful, StatefulInteractiveElement,
-    StyleRefinement, Styled, Subscription, WeakEntity, Window, anchored, canvas, deferred, div,
-    list, point, px, rgb,
+    DismissEvent, Div, DragMoveEvent, Entity, FocusHandle, Focusable, FontWeight, Hsla,
+    InteractiveElement, IntoElement, KeyDownEvent, ListAlignment, ListState, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Point, Render, Rgba,
+    ScrollDelta, ScrollHandle, ScrollWheelEvent, SharedString, Stateful,
+    StatefulInteractiveElement, StyleRefinement, Styled, Subscription, WeakEntity, Window,
+    anchored, canvas, deferred, div, list, point, px, rgb,
 };
 
 use gpui_kit::prelude::FluentBuilder;
@@ -56,17 +56,17 @@ const EXPANDED_MAX: f32 = 720.;
 const EXPANDED_RESIZE_MIN: f32 = 300.;
 const CARD_GAP: f32 = 6.;
 const CARD_HEIGHT: f32 = 90.;
+/// Beside a header's rows; above and below them is [`HEADER_PADDING_Y`].
 const HEADER_PADDING: f32 = 10.;
+const HEADER_PADDING_Y: f32 = 8.;
 const HEADER_TITLE_HEIGHT: f32 = 24.;
-const HEADER_STATUS_HEIGHT: f32 = 16.;
+/// The hosts, and the lane's state counts at its right end.
 const HEADER_HOST_HEIGHT: f32 = 20.;
 const HEADER_ROW_GAP: f32 = 6.;
-const HEADER_HEIGHT: f32 = HEADER_PADDING * 2.
-    + HEADER_TITLE_HEIGHT
-    + HEADER_STATUS_HEIGHT
-    + HEADER_HOST_HEIGHT
-    + HEADER_ROW_GAP * 2.
-    + 1.;
+/// The strip over the columns while any lane is under a band.
+const BAND_HEIGHT: f32 = 28.;
+const HEADER_HEIGHT: f32 =
+    HEADER_PADDING_Y * 2. + HEADER_TITLE_HEIGHT + HEADER_HOST_HEIGHT + HEADER_ROW_GAP + 1.;
 
 struct RelabelPending {
     source: String,
@@ -1109,6 +1109,7 @@ struct LaneModelKey {
     membership: (LaneGrouping, LabelLaneMode, bool),
     order: Vec<String>,
     collapsed: BTreeSet<String>,
+    bands: BTreeSet<String>,
     colors: BTreeMap<String, String>,
 }
 
@@ -1117,6 +1118,7 @@ struct LaneModelKeyRef<'a> {
     membership: (LaneGrouping, LabelLaneMode, bool),
     order: &'a [String],
     collapsed: &'a BTreeSet<String>,
+    bands: &'a BTreeSet<String>,
     colors: &'a BTreeMap<String, String>,
 }
 
@@ -1126,6 +1128,7 @@ impl LaneModelKey {
             membership: self.membership,
             order: &self.order,
             collapsed: &self.collapsed,
+            bands: &self.bands,
             colors: &self.colors,
         }
     }
@@ -1143,6 +1146,7 @@ fn lane_model_key_ref(nav: &crate::app::Nav) -> LaneModelKeyRef<'_> {
         ),
         order: &nav.lane_order,
         collapsed: &nav.lane_collapsed,
+        bands: &nav.lane_bands,
         colors: &nav.lane_color_choices,
     }
 }
@@ -1153,13 +1157,10 @@ fn lane_model_key(nav: &crate::app::Nav) -> LaneModelKey {
         membership: key.membership,
         order: key.order.to_vec(),
         collapsed: key.collapsed.clone(),
+        bands: key.bands.clone(),
         colors: key.colors.clone(),
     }
 }
-
-/// Below this width a column header shows its buttons only on hover, and
-/// its host chips collapse to a count.
-const NARROW_WIDTH: f32 = 290.;
 
 /// A lane's card list only builds the rows in view. `source` is the lane
 /// and row settings the list state was last told about, to see what
@@ -1451,6 +1452,7 @@ impl Lanes {
                 order: nav.lane_order.clone(),
                 collapsed: nav.lane_collapsed.clone(),
                 hide_background: !nav.show_background(),
+                bands: nav.lane_bands.clone(),
             };
             *slot = Some(LaneCache {
                 model: LaneModel::build(&store.fleet, nav.lane_grouping, &state),
@@ -1646,9 +1648,17 @@ impl Lanes {
     }
 
     fn reveal_lane(&mut self, key: &str, cx: &mut Context<Self>) {
-        self.core
-            .nav
-            .update(cx, |nav, cx| nav.set_lane_collapsed(key, false, cx));
+        // A lane in a collapsed band shows with its band.
+        let band = (self.current_lanes(cx).iter())
+            .find(|lane| lane.key == key)
+            .and_then(|lane| lane.band.as_ref().filter(|band| band.collapsed))
+            .map(|band| fleet::lanes::band_collapse_key(&band.key));
+        self.core.nav.update(cx, |nav, cx| {
+            nav.set_lane_collapsed(key, false, cx);
+            if let Some(band) = &band {
+                nav.set_lane_collapsed(band, false, cx);
+            }
+        });
         let lanes = self.visible_lanes(cx);
         if let Some(index) = lanes.iter().position(|lane| lane.key == key) {
             self.side.handle.scroll_to_item(index);
@@ -3278,6 +3288,9 @@ impl Render for Lanes {
             Some(drag) => in_order(&visible, &drag.order),
             None => visible,
         };
+        // While any lane is under a band, every column has a strip on top.
+        let banded = visible.iter().any(|lane| lane.band.is_some());
+        let strip = if banded { BAND_HEIGHT } else { 0. };
         let mut columns = columns::wheel(
             div()
                 .id("lanes-columns")
@@ -3291,7 +3304,7 @@ impl Render for Lanes {
                 .overflow_x_scroll()
                 .restrict_scroll_to_axis()
                 .track_scroll(&self.side.handle),
-            px(HEADER_HEIGHT),
+            px(HEADER_HEIGHT + strip),
             |this| &mut this.side,
             |this| &mut this.width,
             cx,
@@ -3364,7 +3377,7 @@ impl Render for Lanes {
                 );
             }
             x += width + px(COLUMN_GAP);
-            columns = columns.child(if near {
+            let column = if near {
                 let style = self.lane_style(lane, cx);
                 let inputs = ColumnInputs {
                     lanes: visible.clone(),
@@ -3381,12 +3394,33 @@ impl Render for Lanes {
                     && !self.expanded_terminals.contains_key(&lane.key);
                 let view = self.column_view(&lane.key, inputs, cx);
                 // A cached view is laid out from this style, not its content.
+                let style = StyleRefinement::default().w(width).flex_shrink_0();
+                let style = if banded {
+                    style.flex_1().min_h(px(0.))
+                } else {
+                    style.h_full()
+                };
                 AnyView::from(view)
-                    .cached(StyleRefinement::default().w(width).h_full().flex_shrink_0())
+                    .cached(style)
                     .relocatable(relocatable)
                     .into_any_element()
+            } else if banded {
+                div().w(width).flex_1().min_h(px(0.)).into_any_element()
             } else {
                 div().w(width).flex_shrink_0().h_full().into_any_element()
+            };
+            columns = columns.child(if banded {
+                div()
+                    .w(width)
+                    .h_full()
+                    .flex_shrink_0()
+                    .flex()
+                    .flex_col()
+                    .child(self.band_strip(&visible, ix, width, near, cx))
+                    .child(column)
+                    .into_any_element()
+            } else {
+                column
             });
         }
         // A lane narrowed with the board scrolled to its end would shorten
@@ -4008,52 +4042,69 @@ impl Lanes {
             .find
             .as_ref()
             .and_then(|find| find.pointed_lane().map(str::to_string));
-        let tabs = lanes.iter().filter(|lane| lane.collapsed).map(|lane| {
-            let style = self.lane_style(lane, cx);
-            let found = lit.as_ref().map(|lit| lit.contains(&lane.key));
-            let singled = pointed.as_deref() == Some(lane.key.as_str());
-            let dot = style
-                .swatch
-                .map(|index| rgb(theme::LANE_COLORS[index].1))
-                .unwrap_or(p.extra_muted);
-            let key = lane.key.clone();
-            let description = format!("Restore {} ({} cards)", lane.title, lane.cards.len());
-            Button::new(eid("lane-restore", &lane.key))
-                .small()
-                .ghost()
-                .flex_shrink_0()
-                .bg(style.column)
-                .border_1()
-                .border_color(p.border)
-                .rounded(px(6.))
-                .when(found == Some(true), |tab| tab.border_color(p.accent))
-                .when(singled, |tab| {
-                    tab.border_2()
-                        .border_color(p.accent)
-                        .bg(with_alpha(p.accent, 0.25))
-                })
-                .when(found == Some(false), |tab| tab.opacity(0.35))
-                .accessibility_label(description.clone())
-                .tooltip(description)
-                .child(div().size(px(6.)).flex_shrink_0().rounded_full().bg(dot))
-                .child(
-                    div()
-                        .min_w(px(0.))
-                        .max_w(px(152.))
-                        .truncate()
-                        .child(lane.title.clone()),
-                )
-                .child(
-                    div()
-                        .text_size(size::sm())
-                        .text_color(p.extra_muted)
-                        .child(lane.cards.len().to_string()),
-                )
-                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                    cx.stop_propagation();
-                    this.restore_lane(&key, window, cx);
-                }))
-        });
+        // A collapsed band is one tab, where its first lane would be.
+        let mut bands_seen: HashSet<&str> = HashSet::new();
+        let band_tabs: HashMap<&str, AnyElement> = (lanes.iter())
+            .filter_map(|lane| lane.band.as_ref().filter(|band| band.collapsed))
+            .filter(|band| bands_seen.insert(band.key.as_str()))
+            .map(|band| (band.key.as_str(), self.band_tab(lanes, band, cx)))
+            .collect();
+        let mut band_tabs = band_tabs;
+        let tabs = lanes
+            .iter()
+            .filter(|lane| lane.collapsed)
+            .filter_map(|lane| {
+                if let Some(band) = lane.band.as_ref().filter(|band| band.collapsed) {
+                    return band_tabs.remove(band.key.as_str());
+                }
+                let style = self.lane_style(lane, cx);
+                let found = lit.as_ref().map(|lit| lit.contains(&lane.key));
+                let singled = pointed.as_deref() == Some(lane.key.as_str());
+                let dot = style
+                    .swatch
+                    .map(|index| rgb(theme::LANE_COLORS[index].1))
+                    .unwrap_or(p.extra_muted);
+                let key = lane.key.clone();
+                let description = format!("Restore {} ({} cards)", lane.title, lane.cards.len());
+                Button::new(eid("lane-restore", &lane.key))
+                    .small()
+                    .ghost()
+                    .flex_shrink_0()
+                    .bg(style.column)
+                    .border_1()
+                    .border_color(p.border)
+                    .rounded(px(6.))
+                    .when(found == Some(true), |tab| tab.border_color(p.accent))
+                    .when(singled, |tab| {
+                        tab.border_2()
+                            .border_color(p.accent)
+                            .bg(with_alpha(p.accent, 0.25))
+                    })
+                    .when(found == Some(false), |tab| tab.opacity(0.35))
+                    .accessibility_label(description.clone())
+                    .tooltip(description)
+                    .child(div().size(px(6.)).flex_shrink_0().rounded_full().bg(dot))
+                    .child(
+                        div()
+                            .min_w(px(0.))
+                            .max_w(px(152.))
+                            .truncate()
+                            .child(lane.title.clone()),
+                    )
+                    .child(
+                        div()
+                            .text_size(size::sm())
+                            .text_color(p.extra_muted)
+                            .child(lane.cards.len().to_string()),
+                    )
+                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                        cx.stop_propagation();
+                        this.restore_lane(&key, window, cx);
+                    }))
+                    .into_any_element()
+                    .into()
+            });
+        let tabs: Vec<AnyElement> = tabs.collect();
         div()
             .relative()
             .flex_1()
@@ -4090,6 +4141,54 @@ impl Lanes {
                     .mode(ScrollbarMode::Hover)
                     .viewport_from_layout(),
             )
+            .into_any_element()
+    }
+
+    /// A collapsed band's tab: its name and agents, in its colour.
+    fn band_tab(&self, lanes: &LaneSet, band: &LaneBand, cx: &mut Context<Self>) -> AnyElement {
+        let p = palette();
+        let nav = self.core.nav.read(cx);
+        let swatch = colors::index(&band.key, band.color.as_deref(), &nav.lane_color_choices);
+        let base = rgb(theme::LANE_COLORS[swatch].1);
+        let agents: HashSet<(&HostId, &str)> = (lanes.iter())
+            .filter(|lane| lane.band.as_ref().is_some_and(|b| b.key == band.key))
+            .flat_map(|lane| &lane.cards)
+            .map(|card| (&card.host, card.agent_id.as_str()))
+            .collect();
+        let description = format!("Restore the {} band ({} agents)", band.title, agents.len());
+        let collapsed = fleet::lanes::band_collapse_key(&band.key);
+        Button::new(eid("band-restore", &band.key))
+            .small()
+            .ghost()
+            .flex_shrink_0()
+            .bg(colors::tint(p.surface1, base, 0.32))
+            .border_1()
+            .border_color(base)
+            .rounded(px(6.))
+            .accessibility_label(description.clone())
+            .tooltip(description)
+            .child(ui::icon("layers", 12., p.muted))
+            .child(
+                div()
+                    .min_w(px(0.))
+                    .max_w(px(152.))
+                    .truncate()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(band.title.clone()),
+            )
+            .child(
+                div()
+                    .text_size(size::sm())
+                    .text_color(p.extra_muted)
+                    .child(agents.len().to_string()),
+            )
+            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                cx.stop_propagation();
+                this.core
+                    .nav
+                    .update(cx, |nav, cx| nav.set_lane_collapsed(&collapsed, false, cx));
+                cx.notify();
+            }))
             .into_any_element()
     }
 
@@ -4220,6 +4319,172 @@ impl Lanes {
         } else {
             color_dot(lane)
         }
+    }
+
+    /// The strip over a column while any lane is under a band: its band's,
+    /// unbroken across the band's lanes and the gaps between them, named
+    /// over its first lane with the band's controls; blank over a lane under
+    /// none, so every header stays level.
+    fn band_strip(
+        &self,
+        lanes: &LaneSet,
+        ix: usize,
+        width: Pixels,
+        near: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let p = palette();
+        let strip = div().h(px(BAND_HEIGHT)).flex_shrink_0().pb(px(4.));
+        let lane = &lanes[ix];
+        let Some(band) = lane.band.as_ref() else {
+            return strip.into_any_element();
+        };
+        let ours = |other: Option<&Rc<Lane>>| {
+            (other.and_then(|lane| lane.band.as_ref())).is_some_and(|other| other.key == band.key)
+        };
+        let first = !ours(ix.checked_sub(1).and_then(|ix| lanes.get(ix)));
+        let last = !ours(lanes.get(ix + 1));
+        let nav = self.core.nav.read(cx);
+        let swatch = colors::index(&band.key, band.color.as_deref(), &nav.lane_color_choices);
+        let base = rgb(theme::LANE_COLORS[swatch].1);
+        let mut segment = div()
+            .h_full()
+            // Over the gap to the next lane of the band too.
+            .w(if last { width } else { width + px(COLUMN_GAP) })
+            .bg(colors::tint(p.surface1, base, 0.32))
+            .border_t_2()
+            .border_color(base)
+            .flex()
+            .items_center()
+            .gap(px(4.))
+            .px(px(8.))
+            .overflow_hidden();
+        if first {
+            segment = segment.rounded_tl(px(6.)).rounded_bl(px(6.));
+        }
+        if last {
+            segment = segment.rounded_tr(px(6.)).rounded_br(px(6.));
+        }
+        if !(first && near) {
+            return strip.child(segment).into_any_element();
+        }
+        // Each agent once, however many of the band's lanes it is in.
+        let agents: HashSet<(&HostId, &str)> = (lanes.iter())
+            .filter(|lane| ours(Some(lane)))
+            .flat_map(|lane| &lane.cards)
+            .map(|card| (&card.host, card.agent_id.as_str()))
+            .collect();
+        let button = |id: &str, icon: &str, tip: &'static str| {
+            Button::new(eid_parts(id, &[&band.key]))
+                .icon(Icon::empty().path(icon))
+                .ghost()
+                .xsmall()
+                .tooltip(tip)
+        };
+        let key = band.key.clone();
+        let left = button("band-left", "icons/chevron-left.svg", "Move band left").on_click(
+            cx.listener({
+                let key = key.clone();
+                move |this, _: &ClickEvent, _, cx| {
+                    cx.stop_propagation();
+                    this.move_band(&key, -1, cx);
+                }
+            }),
+        );
+        let right = button("band-right", "icons/chevron-right.svg", "Move band right").on_click(
+            cx.listener({
+                let key = key.clone();
+                move |this, _: &ClickEvent, _, cx| {
+                    cx.stop_propagation();
+                    this.move_band(&key, 1, cx);
+                }
+            }),
+        );
+        let fold = button(
+            "band-collapse",
+            "icons/fold-horizontal.svg",
+            "Collapse band into the tabs above",
+        )
+        .on_click(cx.listener({
+            let key = key.clone();
+            move |this, _: &ClickEvent, window, cx| {
+                cx.stop_propagation();
+                this.hide_band(&key, window, cx);
+            }
+        }));
+        let labels = band.labels.clone();
+        let remove = button("band-remove", "icons/x.svg", "Stop showing as a band").on_click(
+            cx.listener(move |this, _: &ClickEvent, _, cx| {
+                cx.stop_propagation();
+                this.core.nav.update(cx, |nav, cx| {
+                    for label in &labels {
+                        nav.set_lane_band(label, false, cx);
+                    }
+                });
+            }),
+        );
+        strip
+            .child(
+                segment
+                    .child(div().size(px(8.)).flex_shrink_0().rounded_full().bg(base))
+                    .child(
+                        div()
+                            .min_w(px(0.))
+                            .truncate()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(p.foreground)
+                            .child(band.title.clone()),
+                    )
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .text_size(size::sm())
+                            .text_color(p.muted)
+                            .child(agents.len().to_string()),
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .flex()
+                            .items_center()
+                            .child(left)
+                            .child(right)
+                            .child(fold)
+                            .child(remove),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    /// Moves a band's lanes together one place left or right.
+    fn move_band(&mut self, band: &str, step: isize, cx: &mut Context<Self>) {
+        let keys: Vec<(String, Option<String>)> = (self.lanes(cx).iter())
+            .map(|lane| (lane.key.clone(), lane.band.as_ref().map(|b| b.key.clone())))
+            .collect();
+        self.core
+            .nav
+            .update(cx, |nav, cx| nav.move_lane_run(&keys, band, step, cx));
+    }
+
+    /// Collapses a band's lanes into one tab.
+    fn hide_band(&mut self, band: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let collapsed = fleet::lanes::band_collapse_key(band);
+        let focused_in_band = self.focused_lane.as_ref().is_some_and(|focused| {
+            (self.current_lanes(cx).iter()).any(|lane| {
+                &lane.key == focused && lane.band.as_ref().is_some_and(|b| b.key == band)
+            })
+        });
+        self.core
+            .nav
+            .update(cx, |nav, cx| nav.set_lane_collapsed(&collapsed, true, cx));
+        if focused_in_band {
+            self.focused_lane = None;
+            self.focused_agent = None;
+            self.move_column(0, cx);
+        }
+        self.focus.focus(window, cx);
+        cx.notify();
     }
 
     /// The column view for `key`, notified only when `inputs` change what it
@@ -4797,7 +5062,6 @@ impl Lanes {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let p = palette();
-        let narrow = width < px(NARROW_WIDTH);
         let counts = lane.bucket_counts();
         let key = lane.key.clone();
         let count = lane.cards.len().to_string();
@@ -4906,7 +5170,8 @@ impl Lanes {
             .flex_shrink_0()
             .overflow_hidden()
             .bg(style.header)
-            .p(px(HEADER_PADDING))
+            .px(px(HEADER_PADDING))
+            .py(px(HEADER_PADDING_Y))
             .border_b_1()
             .border_color(p.border)
             .flex()
@@ -4992,29 +5257,45 @@ impl Lanes {
                             .when(fit.collapse, |buttons| buttons.child(collapse)),
                     ),
             )
-            .child(
+            .child({
+                // The state counts keep the row's right end; the hosts give
+                // way to them.
+                let shown: Vec<(fleet::Bucket, usize)> =
+                    counts.into_iter().filter(|(_, count)| *count > 0).collect();
+                let counts_width = state_counts_width(&shown);
+                let room = width.as_f32() - 2. - 2. * HEADER_PADDING - counts_width - 8.;
                 div()
-                    .h(px(HEADER_STATUS_HEIGHT))
+                    .h(px(HEADER_HOST_HEIGHT))
                     .flex_shrink_0()
-                    .overflow_hidden()
-                    .line_height(px(16.))
                     .flex()
+                    .items_center()
                     .gap(px(8.))
-                    .children(counts.iter().filter(|(_, count)| *count > 0).map(
-                        |(bucket, count)| {
-                            let color = ui::bucket_color(*bucket).unwrap_or(p.extra_muted);
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap(px(4.))
-                                .text_size(size::sm())
-                                .text_color(color)
-                                .child(div().size(px(6.)).rounded_full().bg(color))
-                                .child(count.to_string())
-                        },
-                    )),
-            )
-            .child(header_hosts(lane, narrow, &self.core.store.read(cx).fleet))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .overflow_hidden()
+                            .child(header_hosts(lane, room, &self.core.store.read(cx).fleet)),
+                    )
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .line_height(px(16.))
+                            .flex()
+                            .gap(px(8.))
+                            .children(shown.iter().map(|(bucket, count)| {
+                                let color = ui::bucket_color(*bucket).unwrap_or(p.extra_muted);
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(4.))
+                                    .text_size(size::sm())
+                                    .text_color(color)
+                                    .child(div().size(px(6.)).rounded_full().bg(color))
+                                    .child(count.to_string())
+                            })),
+                    )
+            })
             .on_mouse_down(MouseButton::Right, {
                 let lane = Rc::clone(lane);
                 cx.listener(move |this, event: &MouseDownEvent, window, cx| {
@@ -5034,6 +5315,9 @@ impl Lanes {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.core.nav.read(cx).lane_grouping == LaneGrouping::Label {
+            return self.open_band_menu(lane, position, window, cx);
+        }
         if self.core.nav.read(cx).lane_grouping != LaneGrouping::Project {
             return;
         }
@@ -5057,6 +5341,78 @@ impl Lanes {
         let core = self.core.clone();
         let menu = PopupMenu::build(window, cx, move |menu, _, cx| {
             crate::widgets::remove_project::menu_items(menu, &core, &projects, cx)
+        });
+        let _dismiss = cx.subscribe_in(&menu, window, |this, _, _: &DismissEvent, window, cx| {
+            this.card_menu = None;
+            this.focus.focus(window, cx);
+            cx.notify();
+        });
+        self.card_menu = Some(CardMenu {
+            position,
+            menu,
+            _dismiss,
+        });
+        cx.notify();
+    }
+
+    /// Grouped by label, a lane's menu shows each of its labels as a band,
+    /// or stops showing its band.
+    fn open_band_menu(
+        &mut self,
+        lane: &Rc<Lane>,
+        position: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // The lane keys of its labels, named: a label's lane is keyed as
+        // bands keep it; a combination's members by the catalog.
+        let fleet = &self.core.store.read(cx).fleet;
+        let banded: BTreeSet<&str> = (lane.band.iter())
+            .flat_map(|band| band.labels.iter().map(String::as_str))
+            .collect();
+        let mut offers: Vec<(String, String)> = Vec::new();
+        if lane.kind == LaneKind::Label && lane.band.is_none() {
+            offers.push((lane.key.clone(), lane.title.clone()));
+        } else {
+            for key in &lane.label_keys {
+                if banded.contains(key.as_str()) {
+                    continue;
+                }
+                let name = (fleet.labels.as_ref())
+                    .and_then(|catalog| catalog.get(&fleet::labels::LabelId::new(key)))
+                    .map_or_else(|| key.clone(), |label| label.name.clone());
+                offers.push((key.clone(), name));
+            }
+        }
+        let band = lane.band.clone();
+        if offers.is_empty() && band.is_none() {
+            return;
+        }
+        let nav = self.core.nav.clone();
+        let menu = PopupMenu::build(window, cx, move |mut menu, _, _| {
+            for (key, name) in &offers {
+                let (nav, key) = (nav.clone(), key.clone());
+                menu = menu.item(PopupMenuItem::new(format!("Show {name} as band")).on_click(
+                    move |_, _, cx| {
+                        nav.update(cx, |nav, cx| nav.set_lane_band(&key, true, cx));
+                    },
+                ));
+            }
+            if let Some(band) = &band {
+                let (nav, labels) = (nav.clone(), band.labels.clone());
+                menu = menu.item(
+                    PopupMenuItem::new(format!("Stop showing {} as band", band.title)).on_click(
+                        move |_, _, cx| {
+                            nav.update(cx, |nav, cx| {
+                                for label in &labels {
+                                    nav.set_lane_band(label, false, cx);
+                                }
+                            });
+                        },
+                    ),
+                );
+            }
+            menu
         });
         let _dismiss = cx.subscribe_in(&menu, window, |this, _, _: &DismissEvent, window, cx| {
             this.card_menu = None;
@@ -7345,8 +7701,36 @@ fn host_names(fleet: &fleet::Fleet, hosts: &[HostId]) -> String {
     names.join(", ")
 }
 
-/// Host metadata occupies one bounded row even when a lane has no cards yet.
-fn header_hosts(lane: &Lane, narrow: bool, fleet: &fleet::Fleet) -> AnyElement {
+/// Roughly how wide a header's state counts draw: a dot, a gap and the
+/// digits for each, with gaps between.
+fn state_counts_width(counts: &[(fleet::Bucket, usize)]) -> f32 {
+    let each: f32 = (counts.iter())
+        .map(|(_, count)| 10. + 7. * count.to_string().len() as f32)
+        .sum();
+    each + 8. * counts.len().saturating_sub(1) as f32
+}
+
+/// How many host chips fit in `room` beside a "+N" for the rest, at most
+/// two; none means the hosts go as a count.
+fn hosts_that_fit(names: &[&str], room: f32) -> usize {
+    let chip = |name: &str| 12. + 6.5 * name.chars().count() as f32;
+    let more = |rest: usize| match rest {
+        0 => 0.,
+        rest => 4. + 12. + 7. * rest.to_string().len() as f32,
+    };
+    (1..=names.len().min(2))
+        .rev()
+        .find(|&shown| {
+            let chips: f32 = names[..shown].iter().map(|name| chip(name)).sum();
+            chips + 4. * (shown - 1) as f32 + more(names.len() - shown) <= room
+        })
+        .unwrap_or(0)
+}
+
+/// Host metadata occupies one bounded row even when a lane has no cards
+/// yet: up to two chips and "+N" for the rest, as many as fit in `room`,
+/// else "N hosts". Each says its hosts in full on hover.
+fn header_hosts(lane: &Lane, room: f32, fleet: &fleet::Fleet) -> AnyElement {
     let p = palette();
     let row = div()
         .h(px(HEADER_HOST_HEIGHT))
@@ -7364,7 +7748,13 @@ fn header_hosts(lane: &Lane, narrow: bool, fleet: &fleet::Fleet) -> AnyElement {
             .child(div().italic().child("Hosts not listed"))
             .into_any_element();
     }
-    if narrow && lane.hosts.len() > 1 {
+    let names: Vec<&str> = lane
+        .hosts
+        .iter()
+        .map(|host| fleet.host_name(host))
+        .collect();
+    let fit = hosts_that_fit(&names, room);
+    if fit == 0 && lane.hosts.len() > 1 {
         let names = host_names(fleet, &lane.hosts);
         return row
             .child(
@@ -7381,7 +7771,9 @@ fn header_hosts(lane: &Lane, narrow: bool, fleet: &fleet::Fleet) -> AnyElement {
             )
             .into_any_element();
     }
-    let row = row.children(lane.hosts.iter().take(2).map(|host| {
+    // A single host keeps its chip, cut short if it must be.
+    let fit = fit.max(1);
+    let row = row.children(lane.hosts.iter().take(fit).map(|host| {
         let name = fleet.host_name(host).to_string();
         div()
             .id(eid_parts("lane-host", &[&lane.key, host.as_str()]))
@@ -7395,8 +7787,8 @@ fn header_hosts(lane: &Lane, narrow: bool, fleet: &fleet::Fleet) -> AnyElement {
             .child(div().min_w(px(0.)).truncate().child(name.clone()))
             .tooltip(move |window, cx| Tooltip::new(name.clone()).max_w(px(360.)).build(window, cx))
     }));
-    let row = if lane.hosts.len() > 2 {
-        let names = host_names(fleet, &lane.hosts[2..]);
+    let row = if lane.hosts.len() > fit {
+        let names = host_names(fleet, &lane.hosts[fit..]);
         row.child(
             div()
                 .id(eid("lane-host-more", &lane.key))
@@ -7407,7 +7799,7 @@ fn header_hosts(lane: &Lane, narrow: bool, fleet: &fleet::Fleet) -> AnyElement {
                 .bg(p.surface2)
                 .flex()
                 .items_center()
-                .child(format!("+{}", lane.hosts.len() - 2))
+                .child(format!("+{}", lane.hosts.len() - fit))
                 .tooltip(move |window, cx| {
                     Tooltip::new(names.clone())
                         .max_w(px(360.))
@@ -7796,6 +8188,7 @@ mod box_tests {
                 })
                 .collect(),
             collapsed: false,
+            band: None,
         }
     }
 
@@ -8155,6 +8548,7 @@ mod filter_tests {
             color: None,
             label_keys: vec![key.into()],
             collapsed: false,
+            band: None,
             hosts: vec![HostId::new("mac"), HostId::new("box")],
             cards,
             workspaces: workspaces
@@ -8307,6 +8701,19 @@ mod header_fit_tests {
     use super::*;
 
     #[test]
+    fn host_chips_give_way_to_a_count_as_room_runs_out() {
+        let names = ["office-mac.local", "lab-box-zt", "storage"];
+        assert_eq!(hosts_that_fit(&names, 400.), 2);
+        assert_eq!(hosts_that_fit(&names, 160.), 1);
+        assert_eq!(hosts_that_fit(&names, 60.), 0);
+        // With nothing left over there is no "+N" to make room for.
+        assert_eq!(hosts_that_fit(&names[..1], 130.), 1);
+        assert_eq!(hosts_that_fit(&[], 400.), 0);
+        let counts = [(fleet::Bucket::Running, 8), (fleet::Bucket::Done, 13)];
+        assert_eq!(state_counts_width(&counts), 17. + 24. + 8.);
+    }
+
+    #[test]
     fn header_controls_go_in_order_as_a_lane_narrows() {
         let at = |width: f32| HeaderFit::for_width(width, false, 1);
         let all = HeaderFit {
@@ -8418,6 +8825,7 @@ mod collapsed_tab_tests {
             cards: Vec::new(),
             workspaces: Vec::new(),
             collapsed,
+            band: None,
         })
     }
 

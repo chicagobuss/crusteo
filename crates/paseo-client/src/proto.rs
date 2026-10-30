@@ -436,6 +436,15 @@ impl Agent {
         self.model.as_deref().filter(|model| !model.is_empty())
     }
 
+    /// How full its context window is, in percent, from the last turn's
+    /// usage; None until a provider has said.
+    pub fn context_percent(&self) -> Option<f64> {
+        let usage = &self.raw["lastUsage"];
+        let used = usage["contextWindowUsedTokens"].as_f64()?;
+        let max = usage["contextWindowMaxTokens"].as_f64()?;
+        (max > 0.).then(|| (used / max * 100.).clamp(0., 100.))
+    }
+
     pub fn bucket(&self) -> Bucket {
         let reason = self.attention_reason.as_deref();
         if !self.pending_permissions.is_empty() || reason == Some("permission") {

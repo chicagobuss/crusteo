@@ -109,6 +109,9 @@ fn report_pool(host: &str, entry: &Value, now: i64) -> Option<Pool> {
             format!("paseo:{id}")
         },
         provider: provider.to_string(),
+        // A feed may name the account otherwise ("personal"); this is how it
+        // knows the account is the same.
+        fingerprint: crate::email_fingerprint(provider, &label).unwrap_or_default(),
         account_label: label,
         plan: plan.unwrap_or_default().to_string(),
         status: "ok".into(),
@@ -188,6 +191,7 @@ pub fn parse_providers(host: &str, payload: &Value, now_unix: i64) -> Option<Rea
                 },
                 plan: plan.unwrap_or_default().to_string(),
                 status: "ok".into(),
+                fingerprint: String::new(),
                 windows,
                 failure,
             })
@@ -228,6 +232,7 @@ fn window(value: &Value) -> Option<Window> {
         resets_at: (value["resetsAt"].as_str())
             .and_then(crate::parse_unix)
             .map_or(0., |at| at as f64),
+        scope: String::new(),
     })
 }
 

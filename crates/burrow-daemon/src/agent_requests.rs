@@ -88,6 +88,9 @@ pub(crate) struct AgentConfig {
     pub title: Option<String>,
     #[serde(default)]
     pub system_prompt: Option<String>,
+    /// Set in the agent's environment (`paseo run --env`).
+    #[serde(default)]
+    pub env: Option<BTreeMap<String, String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -831,6 +834,7 @@ async fn create_with_git(daemon: &Arc<Daemon>, request: Create) -> Result<AgentS
             client_message_id: request.client_message_id,
             images: images(request.images),
             system_prompt: request.config.system_prompt,
+            env: request.config.env.unwrap_or_default(),
             background: request.background == Some(true),
             agent_id: request.agent_id,
             caller_agent_id: request.caller_agent_id,

@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 
 use burrow_protocol::codes;
@@ -58,6 +58,12 @@ pub struct Timing {
     /// How often an address in [`Config::also_listen`] that could not be
     /// bound is tried again.
     pub listen_retry: Duration,
+    /// How long an idle agent keeps its CLI before Burrow lets it go
+    /// ([`crate::agents::release_idle`]); an hour, as Paseo 0.14. `None`
+    /// keeps every CLI running.
+    pub idle_release: Option<Duration>,
+    /// How often idle agents are looked for.
+    pub idle_check: Duration,
 }
 
 impl Default for Timing {
@@ -67,6 +73,8 @@ impl Default for Timing {
             lease: codes::SOCKET_LEASE,
             lease_check: codes::LEASE_CHECK_EVERY,
             listen_retry: Duration::from_secs(5),
+            idle_release: Some(Duration::from_secs(60 * 60)),
+            idle_check: Duration::from_secs(5 * 60),
         }
     }
 }
@@ -100,6 +108,25 @@ impl Config {
     }
 }
 
+/// Where a client on this host reaches a daemon bound to `bound` and
+/// `also`: a loopback address it listens on, else loopback on the port of
+/// one bound to every interface, else the first. Never `0.0.0.0`, which a
+/// client cannot connect to.
+pub fn local_endpoint(bound: SocketAddr, also: &[SocketAddr]) -> String {
+    let all = || std::iter::once(bound).chain(also.iter().copied());
+    if let Some(loopback) = all().find(|addr| addr.ip().is_loopback()) {
+        return loopback.to_string();
+    }
+    if let Some(any) = all().find(|addr| addr.ip().is_unspecified()) {
+        let ip: std::net::IpAddr = match any {
+            SocketAddr::V4(_) => std::net::Ipv4Addr::LOCALHOST.into(),
+            SocketAddr::V6(_) => std::net::Ipv6Addr::LOCALHOST.into(),
+        };
+        return SocketAddr::new(ip, any.port()).to_string();
+    }
+    bound.to_string()
+}
+
 pub fn default_version() -> String {
     format!("{}-burrow", env!("CARGO_PKG_VERSION"))
 }
@@ -119,6 +146,11 @@ pub struct Daemon {
     pub creations: Mutex<HashMap<String, (Value, Value)>>,
     /// The last `workspace_setup_progress` snapshot per workspace.
     pub setups: Mutex<HashMap<String, Value>>,
+    /// Where a client on this host reaches the daemon (`host:port`), once
+    /// it listens: what its agents get as `PASEO_HOST`.
+    pub local_endpoint: OnceLock<String>,
+    /// When it started, as Paseo's `daemon.get_status` says it.
+    pub started_at: String,
 }
 
 impl Daemon {
@@ -151,6 +183,8 @@ impl Daemon {
             attachments,
             creations: Mutex::new(HashMap::new()),
             setups: Mutex::new(HashMap::new()),
+            local_endpoint: OnceLock::new(),
+            started_at: crate::clock::now_iso(),
         })
     }
 

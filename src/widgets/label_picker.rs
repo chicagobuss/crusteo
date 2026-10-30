@@ -46,6 +46,8 @@ struct Choice {
     color: String,
     assigned: bool,
     initial: bool,
+    /// Lanes shows it as a band; bands are listed first.
+    band: bool,
 }
 
 #[derive(Default)]
@@ -55,6 +57,7 @@ impl Choices {
     fn load(core: &Core, host: &HostId, workspace: &str, agents: &[String], cx: &App) -> Self {
         let mut choices = Self::default();
         let store = core.store.read(cx);
+        let bands = &core.nav.read(cx).lane_bands;
         if let Some(catalog) = &store.fleet.labels
             && !agents.is_empty()
         {
@@ -64,6 +67,7 @@ impl Choices {
                     color: label.color.clone(),
                     assigned: false,
                     initial: false,
+                    band: bands.contains(&label.id.to_string()),
                 });
             }
             let found = store.fleet.host(host);
@@ -101,21 +105,27 @@ impl Choices {
             .chain(store.fleet.hosts.iter().filter(|other| other.id() != host));
         for other in hosts {
             for label in &other.directory.labels {
-                choices.0.entry(label_key(&label.name)).or_insert(Choice {
+                let key = label_key(&label.name);
+                let band = bands.contains(&key);
+                choices.0.entry(key).or_insert(Choice {
                     name: label.name.clone(),
                     color: label.color.clone(),
                     assigned: false,
                     initial: false,
+                    band,
                 });
             }
         }
         if let Some(workspace) = store.fleet.workspace(host, workspace) {
             for name in &workspace.labels {
-                let choice = choices.0.entry(label_key(name)).or_insert(Choice {
+                let key = label_key(name);
+                let band = bands.contains(&key);
+                let choice = choices.0.entry(key).or_insert(Choice {
                     name: name.clone(),
                     color: DEFAULT_LABEL_COLOR.into(),
                     assigned: false,
                     initial: false,
+                    band,
                 });
                 choice.assigned = true;
                 choice.initial = true;
@@ -124,13 +134,18 @@ impl Choices {
         choices
     }
 
+    /// The choices whose name has `query` in it: bands first, then the
+    /// rest, each by name.
     fn matching(&self, query: &str) -> Vec<(String, Choice)> {
         let query = label_key(query);
-        self.0
+        let mut rows: Vec<(String, Choice)> = self
+            .0
             .iter()
             .filter(|(key, _)| key.contains(&query))
             .map(|(key, choice)| (key.clone(), choice.clone()))
-            .collect()
+            .collect();
+        rows.sort_by_key(|(_, choice)| !choice.band);
+        rows
     }
 
     fn add(&mut self, name: &str) -> bool {
@@ -146,6 +161,7 @@ impl Choices {
                 color: DEFAULT_LABEL_COLOR.into(),
                 assigned: false,
                 initial: false,
+                band: false,
             })
             .assigned = true;
         true
@@ -364,8 +380,12 @@ impl Render for LabelPicker {
                     .overflow_y_scroll()
                     .track_scroll(&self.scroll)
                     .restrict_scroll_to_axis()
-                    .children(rows.into_iter().enumerate().map(|(index, (key, choice))| {
+                    .children(rows.iter().enumerate().map(|(index, (key, choice))| {
+                        let (key, choice) = (key.clone(), choice.clone());
                         let assigned = choice.assigned;
+                        // A line under the last band, above the other labels.
+                        let last_band =
+                            choice.band && rows.get(index + 1).is_some_and(|(_, next)| !next.band);
                         div()
                             .id(SharedString::from(format!("label-{key}")))
                             .min_h(px(30.))
@@ -380,7 +400,9 @@ impl Render for LabelPicker {
                             .gap(px(8.))
                             .when(self.highlighted == Some(index), |d| d.bg(p.surface2))
                             .hover(|d| d.bg(p.surface2))
+                            .when(last_band, |d| d.border_b_1().border_color(p.border))
                             .child(div().flex_1().min_w(px(0.)).child(choice.name))
+                            .when(choice.band, |d| d.child(ui::icon("layers", 12., p.muted)))
                             .child(
                                 div()
                                     .w(px(14.))
@@ -424,6 +446,40 @@ impl Render for LabelPicker {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bands_list_first_and_search_keeps_them_first() {
+        let mut choices = Choices::default();
+        for (name, band) in [
+            ("agents", false),
+            ("fleet", true),
+            ("costs", false),
+            ("personal", true),
+        ] {
+            choices.0.insert(
+                name.into(),
+                Choice {
+                    name: name.into(),
+                    color: "red".into(),
+                    assigned: false,
+                    initial: false,
+                    band,
+                },
+            );
+        }
+        let names = |rows: Vec<(String, Choice)>| -> Vec<String> {
+            rows.into_iter().map(|(key, _)| key).collect()
+        };
+        assert_eq!(
+            names(choices.matching("")),
+            ["fleet", "personal", "agents", "costs"]
+        );
+        assert_eq!(
+            names(choices.matching("s")),
+            ["personal", "agents", "costs"]
+        );
+    }
+
     #[test]
     fn label_search_creation_and_toggle_diff_keep_existing_colors() {
         let mut choices = Choices::default();
@@ -434,6 +490,7 @@ mod tests {
                 color: "teal".into(),
                 assigned: true,
                 initial: true,
+                band: false,
             },
         );
         assert_eq!(choices.matching(" TOOL ").len(), 1);

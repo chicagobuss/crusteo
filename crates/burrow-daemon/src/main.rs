@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Context;
-use burrow_daemon::{Config, DEFAULT_LISTEN, Daemon, daemon, home, paseo_import, seed};
+use burrow_daemon::{Config, DEFAULT_LISTEN, Daemon, daemon, home, paseo_import, paseo_lock, seed};
 use burrow_provider::echo::EchoProvider;
 use burrow_provider::{Discovery, Provider, env};
 use burrow_provider_acp::AcpProvider;
@@ -96,7 +96,16 @@ struct Args {
     /// Do not offer Cursor even when it is installed.
     #[arg(long)]
     no_cursor: bool,
+    /// Do not hold Paseo's daemon lock (`$PASEO_HOME/paseo.pid`, default
+    /// `~/.paseo/paseo.pid`), by which Paseo's CLI finds a daemon without
+    /// `--host`. Burrow holds it only when it listens on Paseo's port (its
+    /// `config.json`'s, else 6767), and never takes it from a running Paseo.
+    #[arg(long, env = "BURROW_NO_PASEO_LOCK")]
+    no_paseo_lock: bool,
 }
+
+/// How long Burrow waits for its agents' CLIs to exit when it stops.
+const STOP_AGENTS_WITHIN: std::time::Duration = std::time::Duration::from_secs(5);
 
 #[derive(Debug, clap::Subcommand)]
 enum Subcommand {
@@ -243,9 +252,17 @@ async fn main() -> anyhow::Result<()> {
     let running = burrow_daemon::start(daemon.clone())
         .await
         .with_context(|| format!("listening on {listen}"))?;
+    let paseo_lock = (!args.no_paseo_lock)
+        .then(|| {
+            let home = paseo_lock::paseo_home(std::env::var_os("PASEO_HOME"), &user_home());
+            paseo_lock::take_for(&home, &daemon, running.local_addr.port())
+        })
+        .flatten();
     stopped().await;
     tracing::info!("shutting down");
     running.shutdown().await;
+    daemon.agents.stop_all(STOP_AGENTS_WITHIN).await;
+    drop(paseo_lock);
     daemon.close();
     Ok(())
 }

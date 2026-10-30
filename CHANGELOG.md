@@ -7,6 +7,102 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.0-beta.3] - 2026-10-29
+
+### Added
+
+- Lanes can show any label as a band: from a lane header's right-click menu, the label's agents'
+  lanes gather under a strip in its colour, split by their other labels, with "just *label*"
+  for agents that have only that one. Each band moves as a unit, collapses into one tab, and can
+  be put back to plain lanes from its strip. The label picker lists banded labels first.
+- Skiff groups by combination, as crusteo's Combinations lanes do: each agent is in one group
+  under all its labels ("Billing + infra"), so the map and the board show it once.
+- A conversation shows when each step began (an agent's message and the tool calls under it)
+  at the right of the step's last line, so it costs no height. A turn's last step leaves it to
+  the turn's footer.
+- Skiff shows how full an open agent's context is at the end of the line under its title
+  ("Claude · Opus 5.5 · High · 42% context"), amber from 80% and red from 90%. crusteo's
+  composer colours its "% context" the same way.
+- Burrow serves whole-turn timeline pages (`wholeTurnTimeline`), which Paseo 0.14's app asks for
+  to fold finished turns into summaries: a page of history never starts or ends partway into a
+  turn.
+- Burrow stops the CLI of an agent that has been idle for an hour, as Paseo 0.14 does, and the
+  agent's next prompt resumes its session in a new one. An agent keeps its CLI while a turn,
+  a question, a busy subagent or an ACP agent's terminal is still running.
+- `upgrade-macos.sh` in Burrow's examples upgrades Burrow on a Mac from anywhere, an agent Burrow
+  runs included: a one-off launchd job waits until no agent is mid-turn, swaps the binary (keeping
+  `burrow.prev`, and putting it back if the new one does not listen) and signs it with your
+  certificate. Signing with the same certificate and identifier keeps macOS's Local Network
+  access across upgrades; an ad-hoc build is a new program to macOS, and its agents lose the LAN
+  and VPN until access is allowed again. The install guide explains it.
+
+### Changed
+
+- Lane headers are a quarter shorter: a lane's state counts sit at the right end of its hosts'
+  row instead of a row of their own, and the header's padding above and below is tighter. The
+  host chips give way to the counts, from two chips to one to "N hosts", each naming its hosts
+  on hover.
+- Skiff's conversation header splits in two: the title and the two lines under it on the left,
+  and on the right the agent's buttons, larger, with its labels beneath them. When the labels
+  don't all fit, a chevron opens a full-width row with every one.
+- Burrow starts Claude Code as `CLAUDE_CODE_ENTRYPOINT=Burrow` rather than `sdk-ts`, and clears
+  the variables of a Claude session it was started from, as Paseo 0.14 does for itself. Paseo
+  made the change because `sdk-ts` sessions used up subscription limits faster.
+- Paseo 0.14.0-beta.2's CLI is checked against Burrow: every agent command works, as with 0.12
+  and 0.13.
+- Burrow folds timeline history as Paseo does: a tool call's updates are one entry, and so are
+  an assistant message's or a reasoning block's chunks. A page of 40 now holds 40 of those
+  rather than 40 raw rows, and a whole timeline (what `paseo logs` and `paseo wait` read) comes
+  as a quarter to a third as many entries and about a third fewer bytes. Pages match Paseo
+  0.14's, checked against its own code on real timelines. `projection: "canonical"` still
+  gets one entry per row.
+
+- A usage gauge's menu in crusteo, and each account in Skiff's usage panel, is a table: a
+  heading per group of limits ("Gemini Models", "Fable", "All models"), a line per period
+  ("weekly", "5h", "session") with what is left as a bar and a number, when it resets and its
+  pace ("1.8× room", "1.6× too fast"), and a dot on the window the dial shows. The models a
+  group covers, which usage feeds list with each limit, show on hover in crusteo and are left
+  out of Skiff.
+- The pace dials stretch their room side up to 99× on a log scale, so 10× and 30× to spare
+  read apart; the too-fast side still stops at 10×.
+
+### Fixed
+
+- Sending a prompt in Skiff scrolls the conversation to the end, even if you'd scrolled up to
+  read. The keyboard opening, the composer growing or an image loading no longer leave the end
+  of the conversation out of sight.
+- Skiff no longer shows the previous agent's conversation, thoughts included, under the title of
+  the one just opened while that one loads. From a slow host it could read as the new agent's
+  for seconds.
+- Burrow's agents get what Paseo gives its agents: `PASEO_AGENT_ID`, `PASEO_AGENT_CWD`, and
+  `PASEO_HOST` at Burrow's own address. Without them a `paseo` command run inside an agent said
+  "Daemon is not running", a message one agent sent another arrived from nobody and cancelled the
+  other's turn if it was busy, and `paseo run` made unparented agents in new workspaces.
+  `paseo run --env` is applied too.
+- A Burrow that has replaced Paseo on its port holds Paseo's daemon lock (`~/.paseo/paseo.pid`),
+  so Paseo's CLI without `--host` (in a shell, a cron job, an agent's own script) finds it, and
+  `paseo daemon start` no longer offers to start a second daemon. Never over a running Paseo's
+  lock; `--no-paseo-lock` turns it off.
+- Ending an agent's CLI ends its process tree and group, `SIGTERM` then `SIGKILL`, as Paseo does:
+  its MCP servers, running tools and background tasks used to outlive it. Burrow ends its agents'
+  CLIs before it exits.
+- `paseo status`, `paseo daemon status`, `paseo provider models`, `paseo provider diagnostic`,
+  `paseo daemon pair` (relay pairing off) and `paseo agent update --thinking` work against Burrow.
+  Models in the providers snapshot carry their provider, as Paseo's schema requires.
+- Providers no longer say they support MCP servers that Burrow does not pass on.
+- `burrow import-paseo` gives a Burrow that has no server id yet Paseo's, so clients see the same
+  host after the switch. It used to leave that to a manual copy; a Burrow first started without
+  one made its own.
+- A Codex agent's first message after Codex updated itself no longer fails with "Failed to resume
+  Codex thread …: already has an active writer". Burrow restarts an idle agent on the new CLI at
+  its next message; it now waits for the old CLI to let go of the thread first, and tries a
+  resume that still finds the thread busy again a few times over about four seconds. A thread
+  that stays open elsewhere (the Codex app, another daemon) fails the message with that reason.
+- A Codex or Gemini account that a usage feed names one way ("personal") and a daemon another
+  (its email) no longer shows two gauges when the two read it either side of a reset. The feed's
+  `account_fingerprint` is matched against the one the daemon's email gives; until now only the
+  numbers could match them, and those differ until both have read the reset.
+
 ## [0.1.0-beta.2] - 2026-10-27
 
 ### Added
@@ -480,7 +576,8 @@ First alpha, for a few early testers. Early software: expect rough edges.
 - Patched GPUI (`vendor/gpui-pre`) that skips redraws on window moves and lets cached views be
   reused after they move.
 
-[Unreleased]: https://github.com/chicagobuss/crusteo/compare/v0.1.0-beta.2...HEAD
+[Unreleased]: https://github.com/chicagobuss/crusteo/compare/v0.1.0-beta.3...HEAD
+[0.1.0-beta.3]: https://github.com/chicagobuss/crusteo/releases/tag/v0.1.0-beta.3
 [0.1.0-beta.2]: https://github.com/chicagobuss/crusteo/releases/tag/v0.1.0-beta.2
 [0.1.0-beta.1]: https://github.com/chicagobuss/crusteo/releases/tag/v0.1.0-beta.1
 [0.1.0-alpha.6]: https://github.com/chicagobuss/crusteo/releases/tag/v0.1.0-alpha.6

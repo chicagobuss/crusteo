@@ -196,10 +196,14 @@ and tool updates in a 60 ms window, terminal output in a 5 ms window.
   - Epochs and seqs survive restarts, so client caches and Reef's caches stay valid.
   - Only the recent tail of each agent is held in memory; older pages are read from the file.
   - Provider replay is needed only to import a session started elsewhere.
-- **Projection at read time** (P1). Port the folding rules and `selectProjectedTimelinePage`:
-  limits count entries, and a `tail` page pulls in earlier anchors whose updates overlap it.
-  Phase 0 serves one entry per row. That is a valid unfolded projection, and clients render it
-  correctly because they already merge live rows the same way.
+- **Projection** (done). Paseo 0.14's `TimelineProjection`, ported (`projection.rs`): the
+  folds above, kept up to date as rows are appended and rebuilt when a timeline loads, and its
+  page selection, so limits count entries and a `tail` page pulls in earlier anchors whose
+  updates overlap it. `projection: "canonical"` still gets one entry per row. The raw rows stay
+  in memory beside the folded entries.
+  - Checked against Paseo's own TypeScript: `examples/projection_pages.rs` prints the pages a
+    grid of tail, older and newer reads gets from a timeline file; the same grid run through
+    `timeline-projection.ts` gives the same lines.
 - **Turn ids are opaque, and the provider's.** `foreground-turn-N` and `autonomous-turn-N` are
   Claude's; Codex sends ids like `codex-turn-0`. When a provider gives none, Paseo's agent
   manager falls back to the active foreground turn id, or else `autonomous-<uuid>`. Burrow

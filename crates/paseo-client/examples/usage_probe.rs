@@ -49,12 +49,23 @@ fn main() {
                     for update in &updates {
                         let entry = &update["report"];
                         println!(
-                            "    {} {} [{}] {} windows",
+                            "    {} {} [{}] {} windows, id {}, fetched {}",
                             entry["sourceId"].as_str().unwrap_or("?"),
                             entry["account"]["label"].as_str().unwrap_or("-"),
                             entry["report"]["status"].as_str().unwrap_or("?"),
                             entry["report"]["windows"].as_array().map_or(0, Vec::len),
+                            entry["id"].as_str().unwrap_or("?"),
+                            entry["fetchedAt"].as_str().unwrap_or("?"),
                         );
+                        for window in entry["report"]["windows"].as_array().into_iter().flatten() {
+                            println!(
+                                "      {} {} used={} resets={}",
+                                window["id"].as_str().unwrap_or("?"),
+                                window["label"].as_str().unwrap_or("?"),
+                                window["usedPct"],
+                                window["resetsAt"],
+                            );
+                        }
                     }
                 }
                 Err(err) => println!("  reports failed: {err}"),

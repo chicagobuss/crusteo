@@ -254,10 +254,25 @@ pub fn run(options: &Options) -> io::Result<Report> {
     }
     let mut report = Report::default();
     let paseo = read_paseo(&options.from, &mut report)?;
-    // New projects are keyed by Burrow's identity, as the daemon keys them.
-    let server_id = std::fs::read_to_string(options.home.join("server-id"))
-        .map(|id| id.trim().to_string())
-        .unwrap_or_default();
+    // A Burrow that has no identity yet takes Paseo's, so clients see the
+    // same host after the switch. New projects are keyed by it, as the
+    // daemon keys them.
+    let read_id = |dir: &Path| {
+        (std::fs::read_to_string(dir.join("server-id")).ok())
+            .map(|id| id.trim().to_string())
+            .filter(|id| !id.is_empty())
+    };
+    let server_id = match (read_id(&options.home), read_id(&options.from)) {
+        (Some(id), _) => id,
+        (None, Some(id)) => {
+            if !options.dry_run {
+                crate::home::write_server_id(&options.home, &id)?;
+            }
+            report.note(format!("server id {id}, Paseo's"));
+            id
+        }
+        (None, None) => String::new(),
+    };
     if options.dry_run {
         let mut store = Store::restore(persist::read(&options.home)?);
         store.server_id = server_id;

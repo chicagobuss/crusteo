@@ -42,6 +42,10 @@ impl Running {
 pub async fn start(daemon: Arc<Daemon>) -> std::io::Result<Running> {
     let listener = TcpListener::bind(daemon.config.listen).await?;
     let local_addr = listener.local_addr()?;
+    let _ = (daemon.local_endpoint).set(crate::daemon::local_endpoint(
+        local_addr,
+        &daemon.config.also_listen,
+    ));
     let (shutdown, shutdown_rx) = watch::channel(false);
     info!(%local_addr, server_id = %daemon.config.server_id, "listening on ws://{local_addr}/ws");
     let mut tasks = vec![tokio::spawn(accept_loop(
@@ -56,6 +60,10 @@ pub async fn start(daemon: Arc<Daemon>) -> std::io::Result<Running> {
             shutdown_rx.clone(),
         )));
     }
+    tasks.push(tokio::spawn(crate::agents::release_idle_loop(
+        daemon.clone(),
+        shutdown_rx.clone(),
+    )));
     Ok(Running {
         daemon,
         local_addr,

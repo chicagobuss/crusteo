@@ -444,6 +444,35 @@ async fn imports_every_shared_providers_agents_once() {
     fs::remove_dir_all(&root).unwrap();
 }
 
+/// A new Burrow takes Paseo's server id, so clients see the same host; one
+/// that has its own keeps it.
+#[test]
+fn a_new_burrow_takes_paseos_server_id() {
+    let root = scratch();
+    let (paseo, claude) = paseo_home(&root);
+    write(&paseo.join("server-id"), "srv_paseo_host\n");
+    let fresh = root.join("fresh");
+    import(&paseo, &fresh, &claude, true);
+    assert!(
+        !fresh.join("server-id").exists(),
+        "a dry run writes nothing"
+    );
+    let report = import(&paseo, &fresh, &claude, false);
+    assert!(report.lines.iter().any(|l| l.contains("srv_paseo_host")));
+    assert_eq!(
+        fs::read_to_string(fresh.join("server-id")).unwrap(),
+        "srv_paseo_host"
+    );
+    let own = root.join("own");
+    write(&own.join("server-id"), "srv_burrows_own");
+    import(&paseo, &own, &claude, false);
+    assert_eq!(
+        fs::read_to_string(own.join("server-id")).unwrap(),
+        "srv_burrows_own"
+    );
+    fs::remove_dir_all(&root).unwrap();
+}
+
 #[test]
 fn refuses_a_home_inside_the_paseo_home() {
     let root = scratch();

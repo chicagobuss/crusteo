@@ -100,6 +100,9 @@ pub struct LaneState {
     pub collapsed: BTreeSet<String>,
     /// Leaves out background workspaces and their agents.
     pub hide_background: bool,
+    /// The lane keys of labels shown as bands: their agents' lanes sit
+    /// together under the label, split by their other labels. See [`LaneBand`].
+    pub bands: BTreeSet<String>,
 }
 
 /// A workspace the column's draft can create an agent in.
@@ -154,6 +157,38 @@ pub struct Lane {
     pub cards: Vec<LaneCard>,
     pub workspaces: Vec<LaneWorkspace>,
     pub collapsed: bool,
+    /// The band this lane sits under, when its agents have a label shown as one.
+    pub band: Option<LaneBand>,
+}
+
+/// A label shown as a band, or, by combinations, several of them together.
+/// Its agents' lanes sit side by side under it, each titled by the agents'
+/// other labels, and those with no other label in one lane of their own.
+/// Collapsed, the whole band goes to one tab.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LaneBand {
+    /// The banded label's lane key, or its labels' combination key.
+    pub key: String,
+    pub title: String,
+    /// Label colour name, for a band of one label.
+    pub color: Option<String>,
+    /// The lane keys of its labels, as [`LaneState::bands`] has them.
+    pub labels: Vec<String>,
+    pub collapsed: bool,
+}
+
+const BAND_PREFIX: &str = "\u{0}band:";
+
+/// What remembers that the band `band` is collapsed, among the collapsed
+/// lane keys; no lane has this key.
+pub fn band_collapse_key(band: &str) -> String {
+    format!("{BAND_PREFIX}{band}")
+}
+
+/// A lane under a band, keyed apart from the lane of the same labels
+/// without one.
+pub fn is_band_key(key: &str) -> bool {
+    key.starts_with(BAND_PREFIX)
 }
 
 impl Lane {
@@ -255,7 +290,9 @@ impl LaneView {
         let mut cols: BTreeMap<String, Acc> = BTreeMap::new();
         let hide = state.hide_background;
         match grouping {
-            LaneGrouping::Label => collect_labels(fleet, &mut cols, state.label_mode, hide),
+            LaneGrouping::Label => {
+                collect_labels(fleet, &mut cols, state.label_mode, &state.bands, hide)
+            }
             LaneGrouping::Project => collect_projects(fleet, &mut cols, hide),
             LaneGrouping::Host => collect_hosts(fleet, &mut cols, hide),
             LaneGrouping::Workspace => collect_workspaces(fleet, &mut cols, hide),
@@ -274,6 +311,7 @@ struct Acc {
     title: String,
     color: Option<String>,
     label_keys: Vec<String>,
+    band: Option<LaneBand>,
     hosts: Vec<HostId>,
     cards: Vec<LaneCard>,
     workspaces: Vec<LaneWorkspace>,
@@ -287,6 +325,7 @@ impl Acc {
             title,
             color,
             label_keys,
+            band: None,
             hosts: Vec::new(),
             cards: Vec::new(),
             workspaces: Vec::new(),
@@ -322,8 +361,9 @@ impl Acc {
     fn finish(mut self, key: String, state: &LaneState) -> Lane {
         self.cards.sort_by(card_order);
         self.workspaces.sort_by(workspace_order);
+        let band = self.band.map(|band| band.in_state(state));
         Lane {
-            collapsed: state.collapsed.contains(&key),
+            collapsed: collapsed_in(state, &key, band.as_ref()),
             key,
             kind: self.kind,
             title: self.title,
@@ -332,8 +372,21 @@ impl Acc {
             hosts: self.hosts,
             cards: self.cards,
             workspaces: self.workspaces,
+            band,
         }
     }
+}
+
+impl LaneBand {
+    fn in_state(mut self, state: &LaneState) -> Self {
+        self.collapsed = state.collapsed.contains(&band_collapse_key(&self.key));
+        self
+    }
+}
+
+/// A lane is hidden when it is collapsed itself or its band is.
+fn collapsed_in(state: &LaneState, key: &str, band: Option<&LaneBand>) -> bool {
+    state.collapsed.contains(key) || band.is_some_and(|band| band.collapsed)
 }
 
 fn lane_workspace(host: &HostId, workspace: &Workspace) -> LaneWorkspace {
@@ -394,6 +447,7 @@ struct Slot {
     title: String,
     color: Option<String>,
     label_keys: Vec<String>,
+    band: Option<LaneBand>,
 }
 impl Slot {
     fn unlabelled() -> Self {
@@ -403,6 +457,7 @@ impl Slot {
             title: "Unlabelled".into(),
             color: None,
             label_keys: vec![],
+            band: None,
         }
     }
     fn background() -> Self {
@@ -412,17 +467,123 @@ impl Slot {
             title: "Background".into(),
             color: None,
             label_keys: vec![],
+            band: None,
         }
     }
     fn column<'a>(&self, cols: &'a mut BTreeMap<String, Acc>) -> &'a mut Acc {
         column_lazy(cols, &self.key, || {
-            Acc::new(
+            let mut acc = Acc::new(
                 self.title.clone(),
                 self.color.clone(),
                 self.kind,
                 self.label_keys.clone(),
-            )
+            );
+            acc.band = self.band.clone();
+            acc
         })
+    }
+
+    /// This lane of an agent's other labels, under `band`.
+    fn in_band(&self, band: &LaneBand, band_keys: &[String]) -> Self {
+        let mut label_keys: Vec<String> =
+            band_keys.iter().chain(&self.label_keys).cloned().collect();
+        label_keys.sort();
+        label_keys.dedup();
+        Self {
+            kind: self.kind,
+            key: format!("{BAND_PREFIX}{}\u{0}{}", band.key, self.key),
+            title: self.title.clone(),
+            color: self.color.clone(),
+            label_keys,
+            band: Some(band.clone()),
+        }
+    }
+
+    /// The lane under `band` for agents with no label but the band's.
+    fn band_only(band: &LaneBand, band_keys: &[String], kind: LaneKind) -> Self {
+        Self {
+            kind,
+            key: format!("{BAND_PREFIX}{}\u{0}\u{0}only", band.key),
+            title: format!("just {}", band.title),
+            color: band.color.clone(),
+            label_keys: band_keys.to_vec(),
+            band: Some(band.clone()),
+        }
+    }
+}
+
+/// An agent's (or workspace's) label lanes from `singles`, its labels' own
+/// lanes in title order, as `mode` says. The labels in `bands` take their
+/// lanes under a band instead: one band per label, or, by combinations, one
+/// for all of them, holding the lanes of the rest of its labels.
+fn arrange(singles: Vec<Slot>, mode: LabelLaneMode, bands: &BTreeSet<String>) -> Vec<Slot> {
+    let (banded, rest): (Vec<Slot>, Vec<Slot>) = singles
+        .into_iter()
+        .partition(|slot| bands.contains(&slot.key));
+    if banded.is_empty() {
+        return combine(rest, mode);
+    }
+    let groups: Vec<Vec<Slot>> = match mode {
+        LabelLaneMode::Combinations => vec![banded],
+        LabelLaneMode::Labels | LabelLaneMode::Both => {
+            banded.into_iter().map(|s| vec![s]).collect()
+        }
+    };
+    let inner = combine(rest, mode);
+    let mut slots = Vec::new();
+    for group in groups {
+        let kind = if group.len() > 1 {
+            LaneKind::Combination
+        } else {
+            LaneKind::Label
+        };
+        let labels = group.iter().map(|slot| slot.key.clone()).collect();
+        let combined = combine(group, LabelLaneMode::Combinations).remove(0);
+        let band = LaneBand {
+            key: combined.key,
+            title: combined.title,
+            color: combined.color,
+            labels,
+            collapsed: false,
+        };
+        let band_keys = combined.label_keys;
+        if inner.is_empty() {
+            slots.push(Slot::band_only(&band, &band_keys, kind));
+        }
+        slots.extend(inner.iter().map(|slot| slot.in_band(&band, &band_keys)));
+    }
+    slots
+}
+
+/// The lanes `singles` give by `mode`: each label's own, their exact
+/// combination, or both. A single label has one lane in every mode.
+fn combine(singles: Vec<Slot>, mode: LabelLaneMode) -> Vec<Slot> {
+    match (mode, singles.len() > 1) {
+        (LabelLaneMode::Labels, _) | (_, false) => singles,
+        (LabelLaneMode::Combinations | LabelLaneMode::Both, true) => {
+            let mut keys: Vec<String> = (singles.iter())
+                .flat_map(|slot| slot.label_keys.iter().cloned())
+                .collect();
+            keys.sort();
+            let encoded = serde_json::to_string(&keys).expect("strings serialize");
+            let title: Vec<&str> = singles.iter().map(|slot| slot.title.as_str()).collect();
+            let combo = Slot {
+                kind: LaneKind::Combination,
+                key: format!("{COMBINATION_PREFIX}{encoded}"),
+                title: title.join(" + "),
+                color: None,
+                label_keys: keys,
+                band: None,
+            };
+            match mode {
+                LabelLaneMode::Both => {
+                    let mut slots = singles;
+                    slots.push(combo);
+                    slots
+                }
+                _ => vec![combo],
+            }
+        }
     }
 }
 
@@ -430,10 +591,11 @@ fn collect_labels(
     fleet: &Fleet,
     cols: &mut BTreeMap<String, Acc>,
     mode: LabelLaneMode,
+    bands: &BTreeSet<String>,
     hide: bool,
 ) {
     if let Some(catalog) = &fleet.labels {
-        return collect_agent_labels(fleet, catalog, cols, mode, hide);
+        return collect_agent_labels(fleet, catalog, cols, mode, bands, hide);
     }
     let labels = LabelIndex::new(fleet);
     let unlabelled = vec![Slot::unlabelled()];
@@ -441,7 +603,7 @@ fn collect_labels(
         // Resolve each workspace only once, then share its slots with agents.
         let mut slots: HashMap<&str, Vec<Slot>> = HashMap::new();
         for workspace in shown_workspaces(host, hide) {
-            let resolved = label_slots(workspace, &labels, mode);
+            let resolved = label_slots(workspace, &labels, mode, bands);
             for slot in &resolved {
                 slot.column(cols).workspace(host.id(), workspace);
             }
@@ -472,6 +634,7 @@ fn collect_agent_labels(
     catalog: &Catalog,
     cols: &mut BTreeMap<String, Acc>,
     mode: LabelLaneMode,
+    bands: &BTreeSet<String>,
     hide: bool,
 ) {
     for host in &fleet.hosts {
@@ -482,7 +645,7 @@ fn collect_agent_labels(
                 .as_ref()
                 .and_then(|id| host.directory.workspaces.get(id));
             let name = workspace_name(workspace);
-            for slot in agent_slots(catalog, workspace, agent, mode) {
+            for slot in agent_slots(catalog, workspace, agent, mode, bands) {
                 slot.column(cols).card(host.id(), agent, name.clone());
             }
             if let Some(workspace) = workspace {
@@ -494,7 +657,7 @@ fn collect_agent_labels(
         }
         for workspace in shown_workspaces(host, hide) {
             let agents = (by_workspace.get(workspace.id.as_str())).map_or(&[][..], Vec::as_slice);
-            for slot in workspace_slots(catalog, workspace, agents, mode) {
+            for slot in workspace_slots(catalog, workspace, agents, mode, bands) {
                 slot.column(cols).workspace(host.id(), workspace);
             }
         }
@@ -508,6 +671,7 @@ fn agent_slots(
     workspace: Option<&Workspace>,
     agent: &Agent,
     mode: LabelLaneMode,
+    bands: &BTreeSet<String>,
 ) -> Vec<Slot> {
     if workspace.is_some_and(|workspace| workspace.background) {
         return vec![Slot::background()];
@@ -516,6 +680,7 @@ fn agent_slots(
         catalog,
         &crate::labels::effective(agent, workspace, catalog),
         mode,
+        bands,
     )
 }
 
@@ -526,15 +691,16 @@ fn workspace_slots(
     workspace: &Workspace,
     agents: &[&Agent],
     mode: LabelLaneMode,
+    bands: &BTreeSet<String>,
 ) -> Vec<Slot> {
     if workspace.background {
         return vec![Slot::background()];
     }
     if agents.is_empty() {
-        return id_slots(catalog, &catalog.from_paseo(&workspace.labels), mode);
+        return id_slots(catalog, &catalog.from_paseo(&workspace.labels), mode, bands);
     }
     let mut slots: Vec<Slot> = (agents.iter())
-        .flat_map(|agent| agent_slots(catalog, Some(workspace), agent, mode))
+        .flat_map(|agent| agent_slots(catalog, Some(workspace), agent, mode, bands))
         .collect();
     slots.sort_by(|a, b| a.key.cmp(&b.key));
     slots.dedup_by(|a, b| a.key == b.key);
@@ -544,7 +710,12 @@ fn workspace_slots(
 /// The lanes for a set of catalog labels: one per label, keyed by its id
 /// and titled and coloured by the catalog, and with combinations as
 /// `mode` says; Unlabelled when there are none.
-fn id_slots(catalog: &Catalog, ids: &[LabelId], mode: LabelLaneMode) -> Vec<Slot> {
+fn id_slots(
+    catalog: &Catalog,
+    ids: &[LabelId],
+    mode: LabelLaneMode,
+    bands: &BTreeSet<String>,
+) -> Vec<Slot> {
     let mut labels: Vec<&crate::labels::Label> =
         ids.iter().filter_map(|id| catalog.get(id)).collect();
     if labels.is_empty() {
@@ -558,32 +729,10 @@ fn id_slots(catalog: &Catalog, ids: &[LabelId], mode: LabelLaneMode) -> Vec<Slot
             title: label.name.clone(),
             color: Some(label.color.clone()),
             label_keys: vec![label.id.to_string()],
+            band: None,
         })
         .collect();
-    match (mode, singles.len() > 1) {
-        (LabelLaneMode::Labels, _) | (_, false) => singles,
-        (LabelLaneMode::Combinations | LabelLaneMode::Both, true) => {
-            let mut keys: Vec<String> = labels.iter().map(|label| label.id.to_string()).collect();
-            keys.sort();
-            let encoded = serde_json::to_string(&keys).expect("strings serialize");
-            let title: Vec<&str> = labels.iter().map(|label| label.name.as_str()).collect();
-            let combo = Slot {
-                kind: LaneKind::Combination,
-                key: format!("{COMBINATION_PREFIX}{encoded}"),
-                title: title.join(" + "),
-                color: None,
-                label_keys: keys,
-            };
-            match mode {
-                LabelLaneMode::Both => {
-                    let mut slots = singles;
-                    slots.push(combo);
-                    slots
-                }
-                _ => vec![combo],
-            }
-        }
-    }
+    arrange(singles, mode, bands)
 }
 
 /// Like [`column`], without allocating when the column already exists.
@@ -786,7 +935,12 @@ pub fn label_set(workspace: &Workspace) -> BTreeMap<String, &str> {
     members
 }
 
-fn label_slots(workspace: &Workspace, labels: &LabelIndex<'_>, mode: LabelLaneMode) -> Vec<Slot> {
+fn label_slots(
+    workspace: &Workspace,
+    labels: &LabelIndex<'_>,
+    mode: LabelLaneMode,
+    bands: &BTreeSet<String>,
+) -> Vec<Slot> {
     // Its labels' lanes would show it twice; the Background lane is enough.
     if workspace.background {
         return vec![Slot::background()];
@@ -795,6 +949,7 @@ fn label_slots(workspace: &Workspace, labels: &LabelIndex<'_>, mode: LabelLaneMo
     if members.is_empty() {
         return vec![Slot::unlabelled()];
     }
+    // In key order, so a combination is titled in that order.
     let singles: Vec<Slot> = members
         .iter()
         .map(|(key, raw)| Slot {
@@ -803,35 +958,10 @@ fn label_slots(workspace: &Workspace, labels: &LabelIndex<'_>, mode: LabelLaneMo
             title: labels.title(key, raw),
             color: labels.color(key),
             label_keys: vec![key.clone()],
+            band: None,
         })
         .collect();
-    // A singleton has one identity in every mode, so Both never duplicates it.
-    match (mode, singles.len() > 1) {
-        (LabelLaneMode::Labels, _) | (_, false) => singles,
-        (LabelLaneMode::Combinations | LabelLaneMode::Both, true) => {
-            let keys: Vec<String> = members.keys().cloned().collect();
-            let encoded = serde_json::to_string(&keys).expect("strings serialize");
-            let combo = Slot {
-                kind: LaneKind::Combination,
-                key: format!("{COMBINATION_PREFIX}{encoded}"),
-                title: singles
-                    .iter()
-                    .map(|slot| slot.title.as_str())
-                    .collect::<Vec<_>>()
-                    .join(" + "),
-                color: None,
-                label_keys: keys,
-            };
-            match mode {
-                LabelLaneMode::Both => {
-                    let mut slots = singles;
-                    slots.push(combo);
-                    slots
-                }
-                _ => vec![combo],
-            }
-        }
-    }
+    arrange(singles, mode, bands)
 }
 
 /// Same fallback as the sidebar: project key, else `host\0projectId`.
@@ -903,8 +1033,32 @@ fn column_urgency(lane: &Lane) -> u8 {
         .unwrap_or(u8::MAX)
 }
 
-fn sort_lanes(lanes: &mut [Lane], state: &LaneState, grouping: LaneGrouping) {
-    lanes.sort_by(|a, b| lane_order(a, b, state, grouping));
+/// Sorts lanes by [`lane_order`], then gathers each band's lanes where its
+/// first one sorted, keeping their order, so a band is never split.
+fn sort_lanes<T: std::borrow::Borrow<Lane>>(
+    lanes: &mut Vec<T>,
+    state: &LaneState,
+    grouping: LaneGrouping,
+) {
+    lanes.sort_by(|a, b| lane_order(a.borrow(), b.borrow(), state, grouping));
+    if !lanes.iter().any(|lane| lane.borrow().band.is_some()) {
+        return;
+    }
+    let mut runs: Vec<(Option<String>, Vec<T>)> = Vec::new();
+    let mut at: HashMap<String, usize> = HashMap::new();
+    for lane in lanes.drain(..) {
+        match lane.borrow().band.as_ref().map(|band| band.key.clone()) {
+            Some(band) => match at.get(&band) {
+                Some(&ix) => runs[ix].1.push(lane),
+                None => {
+                    at.insert(band.clone(), runs.len());
+                    runs.push((Some(band), vec![lane]));
+                }
+            },
+            None => runs.push((None, vec![lane])),
+        }
+    }
+    lanes.extend(runs.into_iter().flat_map(|(_, run)| run));
 }
 
 /// The user's arrangement first, then most urgent, then by title. Total,
@@ -1053,8 +1207,7 @@ impl LaneModel {
             return;
         }
         self.settle(fleet, &touched);
-        let (state, grouping) = (&self.state, self.grouping);
-        self.lanes.sort_by(|a, b| lane_order(a, b, state, grouping));
+        sort_lanes(&mut self.lanes, &self.state, self.grouping);
         self.reindex();
     }
 
@@ -1108,7 +1261,7 @@ impl LaneModel {
                     if let Some(workspace) = workspace {
                         workspaces.insert((host_id.clone(), workspace.id.clone()));
                     }
-                    let mut slots = agent_slots(catalog, workspace, agent, mode);
+                    let mut slots = agent_slots(catalog, workspace, agent, mode, &self.state.bands);
                     slots.sort_by(|a, b| a.key.cmp(&b.key));
                     let card = lane_card(host.id(), agent, workspace_name(workspace));
                     (slots, Some(card))
@@ -1124,8 +1277,7 @@ impl LaneModel {
             return;
         }
         self.settle(fleet, &touched);
-        let (state, grouping) = (&self.state, self.grouping);
-        self.lanes.sort_by(|a, b| lane_order(a, b, state, grouping));
+        sort_lanes(&mut self.lanes, &self.state, self.grouping);
         self.reindex();
     }
 
@@ -1167,7 +1319,7 @@ impl LaneModel {
                     .filter(|agent| agent.workspace_id.as_deref() == Some(id))
                     .filter(|agent| shown_agent(host, agent, hide))
                     .collect();
-                workspace_slots(catalog, workspace, &agents, mode)
+                workspace_slots(catalog, workspace, &agents, mode, &self.state.bands)
             }
             _ => Vec::new(),
         };
@@ -1381,6 +1533,7 @@ impl LaneModel {
         let ix = match self.index.get(&slot.key) {
             Some(&ix) => ix,
             None => {
+                let band = slot.band.clone().map(|band| band.in_state(&self.state));
                 self.lanes.push(Rc::new(Lane {
                     key: slot.key.clone(),
                     kind: slot.kind,
@@ -1390,7 +1543,8 @@ impl LaneModel {
                     hosts: Vec::new(),
                     cards: Vec::new(),
                     workspaces: Vec::new(),
-                    collapsed: self.state.collapsed.contains(&slot.key),
+                    collapsed: collapsed_in(&self.state, &slot.key, band.as_ref()),
+                    band,
                 }));
                 let ix = self.lanes.len() - 1;
                 self.index.insert(slot.key.clone(), ix);
@@ -1452,10 +1606,11 @@ impl LaneModel {
             title,
             color: None,
             label_keys: Vec::new(),
+            band: None,
         };
         let mut slots = match (self.grouping, workspace) {
             (LaneGrouping::Label, Some(workspace)) => {
-                label_slots(workspace, labels, self.state.label_mode)
+                label_slots(workspace, labels, self.state.label_mode, &self.state.bands)
             }
             (LaneGrouping::Label, None) => vec![Slot::unlabelled()],
             (LaneGrouping::Project, Some(workspace)) => {
@@ -1769,6 +1924,121 @@ mod tests {
     }
 
     #[test]
+    fn a_banded_label_gathers_its_agents_lanes_by_their_other_labels() {
+        let fleet = label_mode_fixture();
+        let build = |label_mode, bands: &[&str], collapsed: &[String]| {
+            LaneView::build(
+                &fleet,
+                LaneGrouping::Label,
+                &LaneState {
+                    label_mode,
+                    bands: bands.iter().map(|key| key.to_string()).collect(),
+                    collapsed: collapsed.iter().cloned().collect(),
+                    ..Default::default()
+                },
+            )
+        };
+        let under = |lanes: &[Lane], band: &str| -> Vec<String> {
+            (lanes.iter())
+                .filter(|lane| lane.band.as_ref().is_some_and(|b| b.title == band))
+                .map(|lane| lane.title.clone())
+                .collect()
+        };
+        let agents = |lanes: &[Lane], band: &str, title: &str| -> Vec<String> {
+            let lane = (lanes.iter())
+                .find(|lane| {
+                    lane.title == title && lane.band.as_ref().is_some_and(|b| b.title == band)
+                })
+                .unwrap();
+            lane.cards
+                .iter()
+                .map(|card| card.agent_id.clone())
+                .collect()
+        };
+        // Each band's lanes sit together, wherever its first one sorts.
+        let together = |lanes: &[Lane]| {
+            let keys: Vec<Option<&str>> = (lanes.iter())
+                .map(|lane| lane.band.as_ref().map(|band| band.key.as_str()))
+                .collect();
+            for band in keys.iter().flatten() {
+                let first = keys.iter().position(|k| *k == Some(band)).unwrap();
+                let last = keys.iter().rposition(|k| *k == Some(band)).unwrap();
+                assert!(
+                    keys[first..=last].iter().all(|k| *k == Some(band)),
+                    "{keys:?}"
+                );
+            }
+        };
+
+        // By label: A's agents go under A, by their other labels; an agent
+        // with A alone in a lane of its own. A has no lane apart from the band.
+        let labels = build(LabelLaneMode::Labels, &["a"], &[]);
+        together(&labels);
+        assert!(labels.iter().all(|lane| lane.key != "a"));
+        let mut titles = under(&labels, "A");
+        titles.sort();
+        assert_eq!(titles, ["B", "c", "just A"]);
+        assert_eq!(agents(&labels, "A", "just A"), ["single"]);
+        assert_eq!(agents(&labels, "A", "B").len(), 3); // ab on two hosts, and abc.
+        let b = labels
+            .iter()
+            .find(|lane| lane.title == "B" && lane.band.is_some())
+            .unwrap();
+        assert_eq!(b.label_keys, ["a", "b"]);
+        assert!(
+            labels
+                .iter()
+                .any(|lane| lane.key == UNLABELLED && lane.band.is_none())
+        );
+
+        // By combination: the rest of an agent's labels make one lane.
+        let exact = build(LabelLaneMode::Combinations, &["a"], &[]);
+        together(&exact);
+        let mut titles = under(&exact, "A");
+        titles.sort();
+        assert_eq!(titles, ["B", "B + c", "just A"]);
+        assert_eq!(agents(&exact, "A", "B + c"), ["abc"]);
+
+        // Two bands: by label an agent with both shows under each, by
+        // combination under one band of the two.
+        let two = build(LabelLaneMode::Labels, &["a", "b"], &[]);
+        together(&two);
+        assert!(agents(&two, "A", "just A").contains(&"ab".to_string()));
+        assert!(agents(&two, "B", "just B").contains(&"ab".to_string()));
+        let joined = build(LabelLaneMode::Combinations, &["a", "b"], &[]);
+        together(&joined);
+        assert_eq!(agents(&joined, "A + B", "just A + B").len(), 2);
+        assert_eq!(agents(&joined, "A + B", "c"), ["abc"]);
+        assert_eq!(agents(&joined, "A", "just A"), ["single"]);
+
+        // A collapsed band hides all of its lanes and says so; others stay.
+        let band = labels.iter().find_map(|lane| lane.band.clone()).unwrap();
+        let folded = build(
+            LabelLaneMode::Labels,
+            &["a"],
+            &[band_collapse_key(&band.key)],
+        );
+        for lane in &folded {
+            assert_eq!(lane.collapsed, lane.band.is_some(), "{}", lane.title);
+            assert_eq!(
+                lane.band.as_ref().is_some_and(|b| b.collapsed),
+                lane.band.is_some()
+            );
+        }
+        assert!(
+            folded
+                .iter()
+                .all(|lane| lane.key != band_collapse_key(&band.key))
+        );
+        assert!(
+            folded
+                .iter()
+                .filter(|lane| lane.band.is_some())
+                .all(|lane| is_band_key(&lane.key))
+        );
+    }
+
+    #[test]
     fn combination_identity_is_canonical_collision_free_and_preserves_state() {
         let fleet = label_mode_fixture();
         let labels = LabelIndex::new(&fleet);
@@ -1777,6 +2047,7 @@ mod tests {
                 &workspace("w", "p", "w", names),
                 &labels,
                 LabelLaneMode::Combinations,
+                &BTreeSet::new(),
             )
             .remove(0)
         };
@@ -1793,6 +2064,7 @@ mod tests {
             order: vec![ab.key.clone()],
             collapsed: BTreeSet::from([ab.key.clone()]),
             hide_background: false,
+            bands: BTreeSet::new(),
         };
         let both = LaneView::build(&fleet, LaneGrouping::Label, &state);
         assert_eq!(both[0].key, ab.key);

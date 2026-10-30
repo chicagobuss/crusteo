@@ -51,6 +51,9 @@ enum Row {
         /// The first item of the item's turn, whose text a selection
         /// started in it stays within.
         turn: usize,
+        /// For the last item of a step, the item the step began with, whose
+        /// time it shows.
+        stamp: Option<usize>,
     },
     /// After a finished turn: items `start..=end`.
     TurnFooter {
@@ -868,9 +871,15 @@ impl Conversation {
         };
         // Each finished turn ends in a footer, including the turns an agent
         // runs on its own between messages.
-        let mut turns = fleet::timeline::finished_turns(&items, timeline.is_running())
+        let finished = fleet::timeline::finished_turns(&items, timeline.is_running());
+        // Each step shows when it began at the right of its last row, but
+        // for a turn's last, whose footer shows the time.
+        let stamps: HashMap<usize, usize> = fleet::timeline::steps(&items)
             .into_iter()
-            .peekable();
+            .filter(|(_, end)| !finished.iter().any(|(_, last)| last == end))
+            .map(|(start, end)| (end, start))
+            .collect();
+        let mut turns = finished.into_iter().peekable();
         let turn_starts = fleet::timeline::turn_starts(&items);
         for (index, item) in items.iter().enumerate() {
             if !is_hidden(&item.kind) {
@@ -883,8 +892,15 @@ impl Conversation {
                     16.
                 };
                 let turn = turn_starts[index];
-                rows.push(Row::Item { index, gap, turn });
-                prints.push(fingerprint(item, self.expanded.borrow().contains(&item.id)));
+                let stamp = stamps.get(&index).copied();
+                rows.push(Row::Item {
+                    index,
+                    gap,
+                    turn,
+                    stamp,
+                });
+                let print = fingerprint(item, self.expanded.borrow().contains(&item.id));
+                prints.push(print ^ stamp.map_or(0, |start| hash_str(&format!("stamp-{start}"))));
             }
             if let Some((start, end)) = turns.next_if(|(_, end)| *end == index) {
                 rows.push(Row::TurnFooter { start, end });
@@ -1905,11 +1921,18 @@ fn render_row(
                 cwd,
             )
         }
-        Row::Item { index, gap, .. } => {
+        Row::Item {
+            index, gap, stamp, ..
+        } => {
             let Some(item) = timeline.items().nth(*index) else {
                 return div().into_any_element();
             };
             let pending = matches!(&item.kind, ItemKind::User { client_message_id: Some(id), .. } if timeline.pending_sends.contains(id));
+            // When the step began, shown at the right of its last line, so
+            // it costs no height.
+            let ago = (stamp.and_then(|start| timeline.items().nth(start)))
+                .map(|first| crate::app::store::time_ago(&first.timestamp))
+                .filter(|ago| !ago.is_empty());
             let images = view.read(cx).images.clone();
             let body = match &item.kind {
                 ItemKind::User {
@@ -2141,6 +2164,25 @@ fn render_row(
                         .child(div().flex_1().h(px(1.)).bg(p.border))
                         .into_any_element()
                 }
+            };
+            let body = match ago {
+                Some(ago) => div()
+                    .flex()
+                    .items_end()
+                    .gap(px(8.))
+                    .child(div().flex_1().min_w(px(0.)).child(body))
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .h(px(22.))
+                            .flex()
+                            .items_center()
+                            .text_size(size::sm())
+                            .text_color(p.extra_muted)
+                            .child(ago),
+                    )
+                    .into_any_element(),
+                None => body,
             };
             div().pb(px(*gap)).child(body).into_any_element()
         }

@@ -6,16 +6,16 @@ for which versions, and how each claim was checked. "Checked" here means one of 
 run against the real thing, covered by automated tests, or read from Paseo's source. The tables
 say which. The sections after them go into detail, area by area.
 
-Every wire change from Paseo 0.10.3 to 0.13.2 is additive, so one Burrow serves clients of all
-those versions. It advertises only the feature flags it implements (`server_info.features`), and
+Every wire change from Paseo 0.10.3 to 0.14.0-beta.2 is additive, so one Burrow serves clients of
+all those versions. It advertises only the feature flags it implements (`server_info.features`), and
 clients hide or refuse the rest.
 
 ## At a glance
 
 | Direction | Versions | State | How it was checked |
 |---|---|---|---|
-| Paseo's CLI → Burrow | 0.12.0, 0.13.2 | Every agent command works. `paseo host …` (connected hosts) does not | [`scripts/paseo-cli-compat.sh`](../../scripts/paseo-cli-compat.sh) against a Burrow with the echo provider: 19 of 19 as expected on both versions (2026-10-27) |
-| Paseo's app → Burrow | 0.13.2 (its web build) | The core flows work ([below](#paseos-app-against-burrow)). Terminals, diffs, file editing, schedules, voice, connected hosts and relay pairing do not | Walked through by hand against a throwaway Burrow (2026-10-27). Older app versions were not checked again |
+| Paseo's CLI → Burrow | 0.11.4, 0.12.0, 0.13.2, 0.14.0-beta.2 | Every agent command works, with or without `--host`, from a shell or from inside an agent. `paseo host …` (connected hosts), schedules and terminals do not ([below](#what-agents-and-tools-on-the-host-rely-on)) | [`scripts/paseo-cli-compat.sh`](../../scripts/paseo-cli-compat.sh) against a Burrow with the echo provider: 19 of 19 as expected on each version (0.12.0 and 0.13.2 on 2026-10-27, 0.14.0-beta.2 on 2026-10-28). Real Claude and Codex agents running the CLI inside their own sessions, on two hosts (2026-10-28) |
+| Paseo's app → Burrow | 0.13.2 (its web build) | The core flows work ([below](#paseos-app-against-burrow)). Terminals, diffs, file editing, schedules, voice, connected hosts and relay pairing do not | Walked through by hand against a throwaway Burrow (2026-10-27). 0.14's app was not walked through; what it adds that Burrow serves (whole-turn pages) is covered by `burrow-daemon` tests |
 | crusteo and Reef → Paseo's daemon | 0.11.0, 0.12.0, 0.13.2 in daily use | Everything crusteo and Reef use | Daily use on a mixed fleet; `fleet` and `reef` tests against fake daemons in Paseo's shapes |
 | crusteo and Reef → Burrow | Burrow | Everything, and what Burrow adds (prompt images kept for every client, the label catalog in reef mode) | `burrow-daemon` tests drive Burrow with crusteo's own `paseo-client` and `fleet`; `reef` tests run a real Burrow; daily use |
 | Paseo's state (`~/.paseo`) → Burrow | 0.11.4, 0.13.0, and a desktop-app install | `burrow import-paseo` brings Claude, Codex, Cursor, pi and Antigravity agents (sessions resume), projects, workspaces and labels | Hosts moved over, one with 83 agents from 0.13.0; `burrow-daemon/tests/import_paseo.rs` |
@@ -28,22 +28,74 @@ clients hide or refuse the rest.
 CLI and says whether it did what it should. Its header shows how to install a CLI version on its
 own and start a Burrow that runs no model.
 
-| Command | 0.12.0 | 0.13.2 |
-|---|---|---|
-| `ls -g`, `ls -a -g` (archived agents too) | works | works |
-| `run` (waits for the reply), `run --no-wait` | works | works |
-| `run --new-workspace worktree` (a worktree, its `paseo.json` setup) | works | works |
-| `send` (waits for the reply), `send --no-wait` then `wait` | works | works |
-| `send` from inside an agent (`PASEO_AGENT_ID`: shown as from that agent) | works | works |
-| `run` from inside an agent (a child), `agent detach` | works | works |
-| `logs`, `inspect`, `stop`, `archive` | works | works |
-| `delete <id>`, `delete --all` | works | works |
-| `host ls` | no such command | refused: "Update the managing daemon to use connected hosts" |
+| Command | 0.12.0 | 0.13.2 | 0.14.0-beta.2 |
+|---|---|---|---|
+| `ls -g`, `ls -a -g` (archived agents too) | works | works | works |
+| `run` (waits for the reply), `run --no-wait` | works | works | works |
+| `run --new-workspace worktree` (a worktree, its `paseo.json` setup) | works | works | works |
+| `send` (waits for the reply), `send --no-wait` then `wait` | works | works | works |
+| `send` from inside an agent (`PASEO_AGENT_ID`: shown as from that agent) | works | works | works |
+| `run` from inside an agent (a child), `agent detach` | works | works | works |
+| `logs`, `inspect`, `stop`, `archive` | works | works | works |
+| `delete <id>`, `delete --all` | works | works | works |
+| `status`, `daemon status`, `provider models`, `provider diagnostic`, `agent update --thinking` | n/c | n/c | works |
+| `host ls` | no such command | refused: "Update the managing daemon to use connected hosts" | refused, the same |
+
+n/c: not checked. The script passes `--host` to every command and sets `PASEO_AGENT_ID` itself for
+the two "inside an agent" rows, so it says nothing about what an agent's own environment gives it.
+That is checked separately ([below](#what-agents-and-tools-on-the-host-rely-on)).
 
 Before 2026-10-27 the waits, sends from an agent, `delete --all`, `detach` and `ls -a` failed:
 Burrow did not answer `wait_for_finish_request`, `fetch_agent_history_request` or
 `agent.detach.request`, did not advertise `agentMessageProvenance`, and left archived agents out
 of `includeArchived` reads.
+
+## What agents and tools on the host rely on
+
+Agents, people's shells, cron jobs and hooks use the daemon through more than the protocol: the
+environment it starts agents in, the files in `~/.paseo` that Paseo's CLI reads, and how it ends
+an agent's processes. Before 2026-10-28 Burrow did none of this, and agents on hosts that had moved
+to Burrow lost messages to each other.
+
+| What | Paseo | Burrow |
+|---|---|---|
+| An agent's environment | `PASEO_AGENT_ID`, `PASEO_AGENT_CWD`, and the daemon's `PASEO_HOME` | The two ids, and `PASEO_HOST` at Burrow's own loopback address in place of `PASEO_HOME` (both set makes the CLI refuse to choose). `PASEO_HOME` and what a Paseo agent, terminal or the desktop app sets are taken out, as Paseo takes them out. On macOS, the Paseo app's CLI folder is put on `PATH` when no `paseo` is on it |
+| What that changes for a `paseo` command an agent runs | It reaches its daemon with no `--host`; `send` is from that agent and steers a busy target; `run` makes a child of it in its workspace; `heartbeat` works | The same. Without the ids a send arrived from nobody and *interrupted* a busy target's turn, and `run` made an unparented agent in a new workspace |
+| `paseo run --env K=V` | Set in the agent's environment | The same, kept with the agent for its next start |
+| `$PASEO_HOME/paseo.pid` | Written by the supervisor; every CLI command without `--host` finds the daemon through it (0.13 on) | Written while Burrow runs, in Paseo's format, and removed when it stops ([install.md](install.md#paseos-daemon-lock)). Never over a live Paseo daemon's lock. Without it every bare command said "Daemon is not running … Start with: `paseo daemon start`" |
+| `paseo daemon start` | Starts the daemon | Finds Burrow running and starts nothing |
+| `paseo daemon stop` | `SIGTERM` to the lock's pid | The same: it stops Burrow |
+| Ending an agent's CLI | `SIGTERM` to its process tree, `SIGKILL` two seconds later | The same, to its tree and its own process group, while the CLI still runs. Its MCP servers, running tools and background tasks used to outlive it. A tool already handed to init (`nohup … &` from a shell that has exited) is out of reach under both |
+| Agents' CLIs when the daemon stops | Ended with it | Ended before Burrow exits, which a service manager no longer does for them: each leads its own process group |
+
+Checked with Paseo's 0.14.0-beta.2 CLI (and a host's own 0.11.4) on two hosts, with no `--host` and
+no `PASEO_*` in the environment, from a shell and from `env -i`: `ls`, `status`, `daemon status`,
+`provider ls/models/diagnostic`, `daemon pair` ("Relay pairing is disabled") and `daemon start`.
+Then real agents: a Claude agent ran the CLI inside its own session (`ls`, `inspect` of itself,
+`send` to a Codex agent in the middle of a turn, `run` of a child), and its message joined the
+running turn as a message from it, the child was its own in its workspace, a background task it
+started ended when it was archived, and the agents' CLIs ended with a Burrow restart.
+
+Still missing, by how often they come up:
+- **Schedules and heartbeats** (`paseo schedule …`, `paseo heartbeat`): not served, and
+  `import-paseo` leaves `~/.paseo/schedules/` behind.
+- **Push notifications** to Paseo's phone app: push tokens are accepted and nothing is sent.
+- **Live git state** of workspaces: branch, diff counts and PR state are read when a workspace is
+  made and not again; a worktree removed by hand stays listed.
+- **Requests not answered:** `workspace rename`, `project rename`, `worktree create` and `worktree
+  archive` (`run --new-workspace worktree` and `workspace archive` do the same), terminals, `import`,
+  `usage`, plugins, Hub, `reload` (the daemon's config), and `daemon stop` and `restart` given
+  `--host`.
+- **`run --output-schema`** is not enforced by the provider; only the CLI's own retry applies.
+- **Paseo's daemon settings** in `~/.paseo/config.json` are not read: a daemon-wide system
+  prompt, per-provider `env` and `command` overrides, and `daemon.auth.password`. A password
+  set for Paseo does not protect Burrow, which accepts every client.
+- **MCP servers** a client asks for are not passed to the agent; Burrow no longer says it supports
+  them.
+- **Paseo's orchestration skills** in `~/.claude`, `~/.codex` and `~/.agents` are not kept up to
+  date.
+- **Logs:** Burrow logs to stderr. Under launchd and SysV init its log file is not rotated, and
+  `daemon status` names `~/.paseo/daemon.log`, which Burrow does not write.
 
 ## Paseo's app against Burrow
 
@@ -73,10 +125,11 @@ folder and connected to a throwaway Burrow by **Direct connection**. Burrow was 
 This walkthrough found and fixed `providersSnapshot`. Burrow answered the request, but did not
 advertise the flag the app waits for.
 
-## What changed in Paseo 0.12.0 → 0.13.2, and 0.14.0-beta.1
+## What changed in Paseo 0.12.0 → 0.13.2 → 0.14.0-beta.2
 
-Read from `git diff v0.12.0 v0.13.2` of Paseo's `packages/protocol`, `client`, `cli`, `app` and
-`server`. `protocolVersion` is still 1.
+Read from `git diff v0.12.0 v0.13.2` and `git diff v0.13.2 v0.14.0-beta.2` of Paseo's
+`packages/protocol`, `client`, `cli`, `app` and `server`, and from 0.14's changelog.
+`protocolVersion` is still 1.
 
 | Change | Who needs it | Burrow |
 |---|---|---|
@@ -89,8 +142,14 @@ Read from `git diff v0.12.0 v0.13.2` of Paseo's `packages/protocol`, `client`, `
 | `checkoutDiffAll` ("All changes" in review) | App | Not done; Burrow serves no diffs |
 | `fileByteWrites` | App file editor | Not done; Burrow edits no files |
 | Hello `sessionPermissions`, `routed`, `producer` | Connected hosts | Ignored |
-| 0.14 beta: `wholeTurnTimeline` | App | Not advertised; the app falls back |
-| 0.14 beta: `speechSettings`, `idleRuntimeCleanupSetting` | App settings cards | Not done |
+| 0.14: `wholeTurnTimeline`, `wholeTurns` on `fetch_agent_timeline_request` | App: folding finished turns (its client asks only a host that advertises it) | Done: a tail or older page starts at a turn's first row, and an older page runs to the end of its last turn. A turn is rows with one turn id, or without ids, a prompt, an agent message or a heartbeat and what follows |
+| 0.14: idle runtimes released after an hour (#7782) | Hosts with many agents | Done: an idle agent with a session to resume, no subagent busy and no ACP terminal running has its CLI stopped after an hour; its next prompt resumes the session. `idleRuntimeCleanupSetting` (the on/off switch in the app) is not advertised: Burrow has no daemon config requests |
+| 0.14: Claude launched as `CLAUDE_CODE_ENTRYPOINT=Paseo`, not `sdk-ts` (#7976) | Subscription limits | Done as `Burrow`, after clearing a parent Claude session's variables, as Paseo does |
+| 0.14: `speechSettings`, `speech.local_models.*` | App voice settings | Not done; Burrow has no voice |
+| 0.14: `terminalsSurviveRestart`, `killTerminals`/`keepTerminals`, `terminalCleanupUnconfirmed` | App terminals | Not done; Burrow has no terminals |
+| 0.14: `cachedClientBundles`, plugin tools and MCP servers | Plugins | Not done; Burrow has no plugins |
+| 0.14: `envOverrides`, `features` in daemon config | App settings | Not done |
+| After 0.14.0-beta.2 (Paseo's `main`): `resumeOnStartupSetting`, `resumePrompt` | Agents running when the daemon stopped | Not done yet; waits for a release |
 
 No timeline item types or agent snapshot fields changed in that range.
 
@@ -675,8 +734,6 @@ them, on purpose:
 
 ## Open incompatibilities
 
-- **Timeline projection.** History pages serve one entry per row; Paseo folds tool lifecycles
-  and adjacent text into one entry. Clients render both the same, but the page sizes differ.
 - **Interrupts.** Burrow interrupts with `cancel_queued: true`, which also withdraws
   messages still queued in the CLI. It does not withdraw single messages
   (`cancel_async_message`), which Paseo does before the CLI has started a turn.

@@ -34,6 +34,17 @@ use crate::tools;
 /// Paseo opens a new assistant message of a turn with this rule.
 const MESSAGE_BOUNDARY: &str = "\n\n---\n\n";
 
+/// How long to wait before each new try at resuming a thread that another
+/// app-server still has open. Codex lets one app-server write a thread at a
+/// time; one that was just told to stop (a CLI upgrade, a daemon restart)
+/// lets go within moments.
+const WRITER_RETRIES: [std::time::Duration; 4] = [
+    std::time::Duration::from_millis(250),
+    std::time::Duration::from_millis(500),
+    std::time::Duration::from_secs(1),
+    std::time::Duration::from_secs(2),
+];
+
 /// The client Paseo names itself: Codex treats this name as
 /// non-originating, so requests keep Codex's own CLI identity.
 pub fn initialize_params() -> Value {
@@ -163,6 +174,10 @@ pub struct Session<L: Launcher> {
     permissions: HashMap<String, Permission>,
     tracking: Tracking,
     latest_usage: Option<Value>,
+    /// Tries made at a thread another app-server holds, and when the next
+    /// one is due.
+    writer_retries: usize,
+    resume_at: Option<tokio::time::Instant>,
 }
 
 impl<L: Launcher> Session<L> {
@@ -202,6 +217,8 @@ impl<L: Launcher> Session<L> {
             permissions: HashMap::new(),
             tracking: Tracking::default(),
             latest_usage: None,
+            writer_retries: 0,
+            resume_at: None,
         }
     }
 
@@ -247,6 +264,8 @@ impl<L: Launcher> Session<L> {
         self.next_id = 0;
         self.requests.clear();
         self.setup = Setup::default();
+        self.writer_retries = 0;
+        self.resume_at = None;
         self.request("initialize", initialize_params(), Request::Initialize);
         Ok(())
     }
@@ -263,6 +282,13 @@ impl<L: Launcher> Session<L> {
             let output = async {
                 match self.transport.as_mut() {
                     Some(transport) => transport.output.recv().await,
+                    None => std::future::pending().await,
+                }
+            };
+            let resume_at = self.resume_at;
+            let resume_due = async move {
+                match resume_at {
+                    Some(at) => tokio::time::sleep_until(at).await,
                     None => std::future::pending().await,
                 }
             };
@@ -286,6 +312,12 @@ impl<L: Launcher> Session<L> {
                     None | Some(Command::Shutdown) => break,
                     Some(command) => self.on_command(command),
                 },
+                () = resume_due => {
+                    self.resume_at = None;
+                    if self.transport.is_some() && !self.restart_needed {
+                        self.resume_thread();
+                    }
+                }
             }
         }
         self.close().await;
@@ -852,6 +884,20 @@ impl<L: Launcher> Session<L> {
                         json!({"threadId": thread}),
                         Request::ThreadUnarchive,
                     );
+                    return;
+                }
+                if message.contains("already has an active writer") {
+                    if let Some(wait) = WRITER_RETRIES.get(self.writer_retries) {
+                        debug!(%message, ?wait, "the thread is still open elsewhere; trying again");
+                        self.writer_retries += 1;
+                        self.resume_at = Some(tokio::time::Instant::now() + *wait);
+                        return;
+                    }
+                    self.setup_failed(format!(
+                        "Failed to resume Codex thread {thread}: {message}. Another Codex has \
+                         it open, such as the Codex app or another daemon on this machine; close \
+                         it there and send again"
+                    ));
                     return;
                 }
                 self.setup_failed(format!("Failed to resume Codex thread {thread}: {message}"));

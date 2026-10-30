@@ -41,6 +41,12 @@ pub struct Pool {
     /// The account's plan, such as "max" or "team", when the source says.
     pub plan: String,
     pub status: String,
+    /// Who the account is, as a usage feed fingerprints it
+    /// ([`email_fingerprint`]), when the source can say; empty otherwise.
+    /// Two pools with the same one are the same account whatever their
+    /// numbers say, such as when one source has read a reset and the other
+    /// not yet.
+    pub fingerprint: String,
     pub windows: Vec<Window>,
     /// The latest read of this account failed. Its windows, if it has
     /// any, are then the last successful read's, kept on screen as Paseo
@@ -71,7 +77,12 @@ pub struct Failure {
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Window {
     pub key: String,
+    /// The name it is shown by, with its scope when it has one: "weekly
+    /// Fable", "Gemini Models (weekly) Gemini Flash, Gemini Pro".
     pub label: String,
+    /// What the limit is narrowed to, as a feed names it: one model, or
+    /// the models a group covers. Empty when it is not narrowed.
+    pub scope: String,
     pub used_percent: f64,
     pub remaining_percent: f64,
     pub window_seconds: f64,
@@ -285,9 +296,10 @@ pub fn constraining_window(pool: &Pool, now_unix: i64) -> Option<&Window> {
     })
 }
 
-/// The pace dial's needle, in degrees from straight up: on pace is
-/// vertical, ten times affordable or better is -90, ten times too fast or
-/// worse is +90, on a log scale so both get equal travel.
+/// The pace dial's needle, in degrees from straight up, on a log scale:
+/// on pace is vertical, 99 times affordable or better is -90 (as far as
+/// pace is shown, so 10× and 30× room read apart), ten times too fast or
+/// worse is +90.
 pub fn needle_degrees(pace: &Pace) -> Option<f64> {
     if pace.used == 0. {
         return Some(-90.);
@@ -295,7 +307,11 @@ pub fn needle_degrees(pace: &Pace) -> Option<f64> {
     let ratio = pace
         .ratio
         .filter(|ratio| ratio.is_finite() && *ratio > 0.)?;
-    Some(-ratio.log10().clamp(-1., 1.) * 90.)
+    Some(if ratio >= 1. {
+        -(ratio.ln() / 99f64.ln()).min(1.) * 90.
+    } else {
+        -ratio.log10().max(-1.) * 90.
+    })
 }
 
 /// How hard it can be pushed: "1.5x your pace available", "5.5x too fast".
@@ -304,18 +320,37 @@ pub fn ratio_text(pace: &Pace) -> Option<String> {
         return Some("unused so far".into());
     }
     let ratio = pace.ratio.filter(|ratio| ratio.is_finite())?;
-    let show = |value: f64| {
-        if value >= 10. {
-            format!("{}", value.round())
-        } else {
-            format!("{value:.1}")
-        }
-    };
     Some(if ratio >= 1. {
-        format!("{}x your pace available", show(ratio.min(99.)))
+        format!("{}x your pace available", times(ratio))
     } else {
-        format!("{}x too fast", show((1. / ratio).min(99.)))
+        format!("{}x too fast", times(1. / ratio))
     })
+}
+
+/// [`ratio_text`] for a table cell: "1.8× room", "1.6× too fast", "on
+/// pace" within a twentieth either way, "unused".
+pub fn pace_brief(pace: &Pace) -> Option<String> {
+    if pace.used == 0. {
+        return Some("unused".into());
+    }
+    let ratio = pace.ratio.filter(|ratio| ratio.is_finite())?;
+    Some(if (0.95..1.05).contains(&ratio) {
+        "on pace".into()
+    } else if ratio >= 1. {
+        format!("{}× room", times(ratio))
+    } else {
+        format!("{}× too fast", times(1. / ratio))
+    })
+}
+
+/// A pace multiple: a tenth below ten, whole above, at most 99.
+fn times(value: f64) -> String {
+    let value = value.min(99.);
+    if value >= 10. {
+        format!("{}", value.round())
+    } else {
+        format!("{value:.1}")
+    }
 }
 
 pub fn fuel_band(remaining_percent: f64) -> FuelBand {
@@ -373,12 +408,36 @@ fn days_from_civil(mut year: i32, month: u32, day: u32) -> i64 {
     era as i64 * 146_097 + doe as i64 - 719_468
 }
 
+/// The fingerprint a usage feed gives an account its provider knows by
+/// email: a namespace, `:`, and the first 24 hex digits of the SHA-256 of
+/// the namespace, `:` and the email. None for providers whose accounts are
+/// not one per email (a Claude login can be a person's and a team's) and
+/// for labels that are not emails.
+pub fn email_fingerprint(provider: &str, label: &str) -> Option<String> {
+    use sha2::{Digest, Sha256};
+    let namespace = match provider {
+        "codex" => "openai",
+        "gemini" => "gemini",
+        _ => return None,
+    };
+    let email = label.trim();
+    if !email.contains('@') || email.contains(char::is_whitespace) {
+        return None;
+    }
+    let digest = Sha256::digest(format!("{namespace}:{email}").as_bytes());
+    let hex: String = digest[..12]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    Some(format!("{namespace}:{hex}"))
+}
+
 /// Whether two pools are the same account seen twice, such as by two
-/// sources or through two hosts: the same id, or the same provider and a window that
-/// resets at the same moment with the same use. Windows without a reset
-/// time match only on the same key and use.
+/// sources or through two hosts: the same id or fingerprint, or the same
+/// provider and a window that resets at the same moment with the same use.
+/// Windows without a reset time match only on the same key and use.
 pub fn same_account(a: &Pool, b: &Pool) -> bool {
-    if a.id == b.id {
+    if a.id == b.id || (!a.fingerprint.is_empty() && a.fingerprint == b.fingerprint) {
         return true;
     }
     a.provider == b.provider

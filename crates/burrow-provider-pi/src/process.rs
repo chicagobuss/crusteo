@@ -3,11 +3,13 @@
 //! Records split only on LF, as pi's RPC docs require (a JSON string may
 //! hold U+2028). Dropping the input sender closes stdin, which is pi's
 //! orderly shutdown; a pi that has not exited shortly after its output is
-//! no longer read is killed.
+//! no longer read is killed. pi runs in a process group of its own, which
+//! ends with it ([`burrow_provider::group`]).
 
 use std::process::Stdio;
 use std::time::Duration;
 
+use burrow_provider::group;
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
@@ -43,9 +45,8 @@ impl JsonProcess {
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true);
-        let mut child = command.spawn()?;
+            .stderr(Stdio::piped());
+        let mut child = group::spawn(&mut command)?;
         let mut stdin = child.stdin.take().expect("piped stdin");
         let stdout = child.stdout.take().expect("piped stdout");
         let stderr = child.stderr.take().expect("piped stderr");
@@ -92,9 +93,11 @@ impl JsonProcess {
                 buffer.clear();
                 let read = tokio::select! {
                     read = reader.read_until(b'\n', &mut buffer) => read,
-                    // Nobody listens any more: stop, and stop pi.
+                    // Nobody listens any more: stop, and stop pi with what it
+                    // started.
                     _ = output_tx.closed() => {
                         listening = false;
+                        child.end();
                         break;
                     }
                 };
@@ -117,6 +120,7 @@ impl JsonProcess {
                 };
                 if output_tx.send(output).is_err() {
                     listening = false;
+                    child.end();
                     break;
                 }
             }

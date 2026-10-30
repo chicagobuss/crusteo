@@ -159,7 +159,23 @@ fn demo_usage(daemon: &fake::FakeDaemon, prefix: &str) {
                 "gemini",
                 "sam@home.example",
                 "AI Pro",
-                &[("daily", "Daily", 12., 9 * HOUR)],
+                // Grouped by model as Gemini's limits are.
+                &[
+                    (
+                        "gemini-weekly",
+                        "Gemini Models (weekly)",
+                        42.,
+                        3 * 24 * HOUR,
+                    ),
+                    ("gemini-5h", "Gemini Models (5h)", 0., 5 * HOUR),
+                    (
+                        "3p-weekly",
+                        "Claude and GPT models (weekly)",
+                        0.,
+                        7 * 24 * HOUR,
+                    ),
+                    ("argon-weekly", "Gemini 4 Argon (weekly)", 75., 58 * HOUR),
+                ],
             ),
             shared,
         ],

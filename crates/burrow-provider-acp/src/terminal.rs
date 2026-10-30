@@ -79,6 +79,11 @@ fn invocation(command: &str, args: &[String]) -> (String, Vec<String>, bool) {
 }
 
 impl Terminals {
+    /// Whether any terminal has not exited yet.
+    pub fn running(&self) -> bool {
+        self.entries.values().any(|entry| entry.exit.is_none())
+    }
+
     /// Starts the terminal `params` asks for. Returns its id.
     pub fn create(
         &mut self,
@@ -335,6 +340,7 @@ mod tests {
                 tx,
             )
             .unwrap();
+        assert!(terminals.running(), "running until it exits");
         assert_eq!(terminals.wait(&id, json!(7)), Wait::Later);
         let answered = loop {
             let event = rx.recv().await.unwrap();
@@ -345,6 +351,7 @@ mod tests {
         };
         assert_eq!(answered[0].0, json!(7));
         assert_eq!(answered[0].1["exitCode"], 3);
+        assert!(!terminals.running());
         // The exit is reported after the output, cut to the byte limit.
         let output = terminals.output(&id).unwrap();
         assert_eq!(output["exitStatus"]["exitCode"], 3);

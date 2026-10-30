@@ -51,6 +51,10 @@ pub struct FetchTimelineRequest {
     pub projection: Option<Projection>,
     #[serde(default)]
     pub merge_window: Option<bool>,
+    /// Tail and older pages keep turns whole (Paseo 0.14,
+    /// `wholeTurnTimeline`).
+    #[serde(default)]
+    pub whole_turns: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

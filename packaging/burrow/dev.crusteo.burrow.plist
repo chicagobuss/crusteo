@@ -2,7 +2,8 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
   Burrow as a launchd agent on macOS: started at login, restarted if it
-  stops. See docs/burrow/install.md (INSTALL.md in the release archive).
+  stops. Upgrade it with upgrade-macos.sh, which also signs it so macOS
+  keeps its Local Network access across upgrades. See docs/burrow/install.md (INSTALL.md in the release archive).
 
     cp dev.crusteo.burrow.plist ~/Library/LaunchAgents/
     launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/dev.crusteo.burrow.plist

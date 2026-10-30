@@ -6,6 +6,7 @@ use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use burrow_provider::group;
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
@@ -49,15 +50,15 @@ fn record(trace: &Trace, dir: &str, frame: &Value) {
     }
 }
 
-/// Starts `command` with piped stdio. With `trace`, every frame is also
+/// Starts `command` with piped stdio, in a process group of its own that
+/// ends with it ([`burrow_provider::group`]). With `trace`, every frame is also
 /// written there as `{"dir":"in"|"out","frame":...}`.
 pub fn spawn(mut command: Command, trace: Option<&Path>) -> std::io::Result<Transport> {
     command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
-    let mut child = command.spawn()?;
+        .stderr(Stdio::piped());
+    let mut child = group::spawn(&mut command)?;
     let mut stdin = child.stdin.take().expect("piped stdin");
     let stdout = child.stdout.take().expect("piped stdout");
     let stderr = child.stderr.take().expect("piped stderr");
@@ -99,8 +100,8 @@ pub fn spawn(mut command: Command, trace: Option<&Path>) -> std::io::Result<Tran
         let _ = stderr_tx.send(tail);
     });
 
-    // Owns the child: reads stdout until it closes, or kills the child once
-    // nobody reads any more.
+    // Owns the child: reads stdout until it closes, or ends the child's group
+    // once nobody reads any more.
     tokio::spawn(async move {
         let mut lines = BufReader::new(stdout).lines();
         loop {
@@ -120,7 +121,7 @@ pub fn spawn(mut command: Command, trace: Option<&Path>) -> std::io::Result<Tran
                             }
                         };
                         if output_tx.send(output).is_err() {
-                            return; // the child is killed on drop
+                            return; // the child's group ends on drop
                         }
                     }
                     Ok(None) | Err(_) => break,

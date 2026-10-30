@@ -124,6 +124,47 @@ fn reorder_visible_lanes(
     Some(order)
 }
 
+/// `keys`, every lane in order with its band's key, with the lanes of the
+/// band `run` moved past the next lane or band on the `step` side, skipping
+/// those wholly collapsed. `None` when nothing moves.
+fn move_run(
+    keys: &[(String, Option<String>)],
+    run: &str,
+    step: isize,
+    collapsed: &BTreeSet<String>,
+) -> Option<Vec<String>> {
+    // Each band's lanes are one unit; every other lane its own.
+    let mut units: Vec<(Option<&str>, Vec<&str>)> = Vec::new();
+    for (key, band) in keys {
+        match (band.as_deref(), units.last_mut()) {
+            (Some(band), Some((Some(last), lanes))) if *last == band => lanes.push(key),
+            (band, _) => units.push((band, vec![key])),
+        }
+    }
+    let hidden = |unit: &(Option<&str>, Vec<&str>)| {
+        unit.0
+            .is_some_and(|band| collapsed.contains(&fleet::lanes::band_collapse_key(band)))
+            || unit.1.iter().all(|key| collapsed.contains(*key))
+    };
+    let from = units.iter().position(|unit| unit.0 == Some(run))?;
+    let mut to = from;
+    loop {
+        to = to.checked_add_signed(step.signum())?;
+        if !hidden(units.get(to)?) {
+            break;
+        }
+    }
+    let unit = units.remove(from);
+    units.insert(to, unit);
+    Some(
+        units
+            .into_iter()
+            .flat_map(|(_, lanes)| lanes)
+            .map(str::to_string)
+            .collect(),
+    )
+}
+
 /// `keys` with `key` moved to where `target` is: after it when it was to
 /// the left, before it when it was to the right. `None` when nothing moves.
 pub(crate) fn move_lane_to(keys: &[String], key: &str, target: &str) -> Option<Vec<String>> {
@@ -233,6 +274,8 @@ pub struct Nav {
     /// Column keys in the user's order. Empty means the default sort.
     pub lane_order: Vec<String>,
     pub lane_collapsed: BTreeSet<String>,
+    /// Lane keys of labels shown as bands over their agents' lanes.
+    pub lane_bands: BTreeSet<String>,
     /// Lanes column width, before fitting to the view.
     pub lane_width: f32,
     pub lane_fit: bool,
@@ -365,6 +408,7 @@ impl Nav {
             lane_label_mode: LabelLaneMode::parse(&ui.lane_label_mode),
             lane_order: ui.lane_order,
             lane_collapsed: ui.lane_collapsed.into_iter().collect(),
+            lane_bands: ui.lane_bands.into_iter().collect(),
             lane_width: ui
                 .lane_width
                 .unwrap_or(LANE_WIDTH_DEFAULT)
@@ -489,6 +533,7 @@ impl Nav {
             lane_label_mode: self.lane_label_mode.as_str().to_string(),
             lane_order: self.lane_order.clone(),
             lane_collapsed: self.lane_collapsed.iter().cloned().collect(),
+            lane_bands: self.lane_bands.iter().cloned().collect(),
             lane_width: Some(self.lane_width),
             lane_fit: self.lane_fit,
             follow_relabel: Some(self.follow_relabel),
@@ -993,12 +1038,14 @@ impl Nav {
             |key: &String| fleet::lanes::key_with_ids(catalog, key).unwrap_or_else(|| key.clone());
         let order: Vec<String> = self.lane_order.iter().map(map).collect();
         let collapsed: BTreeSet<String> = self.lane_collapsed.iter().map(map).collect();
+        let bands: BTreeSet<String> = self.lane_bands.iter().map(map).collect();
         let colors: BTreeMap<String, String> = (self.lane_color_choices.iter())
             .map(|(key, color)| (map(key), color.clone()))
             .collect();
         let labels: BTreeSet<String> = self.lane_filter.labels.iter().map(map).collect();
         if order == self.lane_order
             && collapsed == self.lane_collapsed
+            && bands == self.lane_bands
             && colors == self.lane_color_choices
             && labels == self.lane_filter.labels
         {
@@ -1006,6 +1053,7 @@ impl Nav {
         }
         self.lane_order = order;
         self.lane_collapsed = collapsed;
+        self.lane_bands = bands;
         self.lane_color_choices = colors;
         self.lane_filter.labels = labels;
         self.save();
@@ -1117,6 +1165,37 @@ impl Nav {
             self.save();
             cx.notify();
         }
+    }
+
+    /// Shows the label whose lane key is `key` as a band, or stops.
+    pub fn set_lane_band(&mut self, key: &str, band: bool, cx: &mut Context<Self>) {
+        let changed = if band {
+            self.lane_bands.insert(key.to_string())
+        } else {
+            self.lane_bands.remove(key)
+        };
+        if changed {
+            self.save();
+            cx.notify();
+        }
+    }
+
+    /// Moves the run of lanes `run` (a band's, in `keys`, the lanes in their
+    /// current order) past the next lane or band on the `step` side that is
+    /// not collapsed. Every lane then sticks in that order.
+    pub fn move_lane_run(
+        &mut self,
+        keys: &[(String, Option<String>)],
+        run: &str,
+        step: isize,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(order) = move_run(keys, run, step, &self.lane_collapsed) else {
+            return;
+        };
+        self.lane_order = order;
+        self.save();
+        cx.notify();
     }
 
     /// `keys` is the current visual order. The moved column, and every
@@ -1377,5 +1456,40 @@ mod visible_order_tests {
         assert!(reorder_visible_lanes(&keys, "b", 1, &collapsed).is_none());
         assert!(reorder_visible_lanes(&keys, "hidden", 1, &collapsed).is_none());
         assert!(reorder_visible_lanes(&keys, "missing", 1, &collapsed).is_none());
+    }
+
+    #[test]
+    fn a_band_moves_as_one_past_a_lane_or_a_band_and_over_hidden_ones() {
+        let lane = |key: &str, band: Option<&str>| (key.to_string(), band.map(str::to_string));
+        let keys = [
+            lane("a", None),
+            lane("g1", Some("g")),
+            lane("g2", Some("g")),
+            lane("h", None),
+            lane("p1", Some("p")),
+            lane("q1", Some("q")),
+        ];
+        let none = BTreeSet::new();
+        assert_eq!(
+            move_run(&keys, "g", -1, &none).unwrap(),
+            ["g1", "g2", "a", "h", "p1", "q1"]
+        );
+        assert_eq!(
+            move_run(&keys, "g", 1, &none).unwrap(),
+            ["a", "h", "g1", "g2", "p1", "q1"]
+        );
+        // Past a whole band, not into it.
+        assert_eq!(
+            move_run(&keys, "p", 1, &none).unwrap(),
+            ["a", "g1", "g2", "h", "q1", "p1"]
+        );
+        // A collapsed lane, or band, is passed over to the next one shown.
+        let hidden = BTreeSet::from(["h".to_string(), fleet::lanes::band_collapse_key("p")]);
+        assert_eq!(
+            move_run(&keys, "g", 1, &hidden).unwrap(),
+            ["a", "h", "p1", "q1", "g1", "g2"]
+        );
+        assert!(move_run(&keys, "q", 1, &none).is_none());
+        assert!(move_run(&keys, "missing", 1, &none).is_none());
     }
 }

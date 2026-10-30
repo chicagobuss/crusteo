@@ -7,9 +7,10 @@
 
 use std::process::Stdio;
 
+use burrow_provider::group::{self, Grouped};
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{Child, Command};
+use tokio::process::Command;
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
@@ -32,7 +33,8 @@ pub enum Output {
 pub struct JsonProcess {
     pub input: mpsc::UnboundedSender<Value>,
     pub output: mpsc::UnboundedReceiver<Output>,
-    pub child: Child,
+    /// Its process group ends when it is dropped.
+    pub child: Grouped,
 }
 
 impl JsonProcess {
@@ -40,9 +42,8 @@ impl JsonProcess {
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true);
-        let mut child = command.spawn()?;
+            .stderr(Stdio::piped());
+        let mut child = group::spawn(&mut command)?;
         let mut stdin = child.stdin.take().expect("piped stdin");
         let stdout = child.stdout.take().expect("piped stdout");
         let stderr = child.stderr.take().expect("piped stderr");

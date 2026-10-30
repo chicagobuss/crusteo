@@ -240,6 +240,7 @@ mod tests {
             hosts: vec![HostId::new("mac")],
             workspaces: vec![],
             collapsed: false,
+            band: None,
             cards: vec![LaneCard {
                 host: HostId::new("mac"),
                 agent_id: "a".into(),

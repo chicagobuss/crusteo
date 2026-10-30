@@ -7,7 +7,7 @@ use gpui_kit::component::input::{InputEvent, TextareaState};
 use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_kit::component::{Icon, Sizable};
 use gpui_kit::gpui::{
-    App, AppContext, ClickEvent, Context, Entity, Focusable, InteractiveElement, IntoElement,
+    App, AppContext, ClickEvent, Context, Entity, Focusable, Hsla, InteractiveElement, IntoElement,
     ParentElement, Render, SharedString, StatefulInteractiveElement, Styled, Window, div, px,
 };
 use gpui_kit::prelude::FluentBuilder;
@@ -458,11 +458,21 @@ impl Render for Composer {
                 self.core.usage.read(cx).snapshot.as_ref(),
             )
         });
-        let usage = agent.as_ref().and_then(|a| {
-            let used = a.raw["lastUsage"]["contextWindowUsedTokens"].as_f64()?;
-            let max = a.raw["lastUsage"]["contextWindowMaxTokens"].as_f64()?;
-            (max > 0.).then(|| format!("{:.0}% context", used / max * 100.))
-        });
+        // Amber from 80% full and red from 90%, as Skiff shows it: by then
+        // the agent is near compacting or running out of room.
+        let usage = agent
+            .as_ref()
+            .and_then(|a| a.context_percent())
+            .map(|full| {
+                let color: Hsla = if full >= 90. {
+                    p.status_danger.into()
+                } else if full >= 80. {
+                    p.status_warning.into()
+                } else {
+                    p.extra_muted.into()
+                };
+                (format!("{full:.0}% context"), color)
+            });
 
         let core = self.core.clone();
         let host = self.host.clone();
@@ -773,11 +783,11 @@ impl Render for Composer {
                                                 .child(model.clone()),
                                         )
                                     })
-                                    .when_some(usage, |d, usage| {
+                                    .when_some(usage, |d, (usage, color)| {
                                         d.child(
                                             div()
                                                 .text_size(size::sm())
-                                                .text_color(p.extra_muted)
+                                                .text_color(color)
                                                 .child(usage),
                                         )
                                     })

@@ -971,9 +971,9 @@ pub fn exchange(agent_id: &str) -> Value {
         "direction": "tail",
         "reset": true,
         "epoch": "stress",
-        "window": { "maxSeq": base + 5 },
+        "window": { "maxSeq": base + 7 },
         "startCursor": { "seq": 1 },
-        "endCursor": { "seq": base + 5 },
+        "endCursor": { "seq": base + 7 },
         "hasOlder": false,
         "hasNewer": false,
         "entries": [
@@ -991,7 +991,12 @@ pub fn exchange(agent_id: &str) -> Value {
                 "text": reply,
                 "messageId": "stress-reply-1",
             })),
-            entry(3, "stress-turn-2", "09:30", json!({
+            entry(3, "stress-turn-2", "09:28", json!({
+                "type": "assistant_message",
+                "text": "Running the nightly benchmark against the streaming parser.",
+                "messageId": "stress-step-2",
+            })),
+            entry(4, "stress-turn-2", "09:30", json!({
                 "type": "tool_call",
                 "callId": "stress-call-1",
                 "name": "Bash",
@@ -999,12 +1004,17 @@ pub fn exchange(agent_id: &str) -> Value {
                 "status": "completed",
                 "error": null,
             })),
-            entry(4, "stress-turn-2", "10:05", json!({
+            entry(5, "stress-turn-2", "09:47", json!({
+                "type": "assistant_message",
+                "text": "The benchmark is still compiling; there are no numbers yet, and nothing has failed so far.",
+                "messageId": "stress-step-3",
+            })),
+            entry(6, "stress-turn-2", "10:05", json!({
                 "type": "assistant_message",
                 "text": "The nightly benchmark finished: still 0.3 s, so the change holds.",
                 "messageId": "stress-reply-2",
             })),
-            entry(5, "stress-turn-3", "20:00", json!({
+            entry(7, "stress-turn-3", "20:00", json!({
                 "type": "assistant_message",
                 "text": "Quota at 09:20: plenty left for the pull request.",
                 "messageId": "stress-reply-3",

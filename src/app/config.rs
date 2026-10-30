@@ -135,6 +135,8 @@ pub struct UiState {
     pub lane_order: Vec<String>,
     /// Column keys the user collapsed to a strip.
     pub lane_collapsed: Vec<String>,
+    /// Lane keys of labels shown as bands.
+    pub lane_bands: Vec<String>,
     /// Lanes column width the user picked; `None` means the default.
     pub lane_width: Option<f32>,
     /// Lanes columns shrink, down to a floor, so all of them fit in view.

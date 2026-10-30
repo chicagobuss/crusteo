@@ -1042,6 +1042,11 @@ pub fn seed_many(daemon: &FakeDaemon, prefix: &str, count: usize) {
             extra = json!({"requiresAttention": true, "attentionReason": "permission",
                 "pendingPermissions": [shell_permission(&format!("perm_{prefix}_m{i}"), "make deploy-preview")]});
         }
+        // How full each one's context is, from a fifth up to nearly full.
+        extra["lastUsage"] = json!({
+            "contextWindowUsedTokens": 40_000 + (i * 37 + shift) % 8 * 20_000,
+            "contextWindowMaxTokens": 200_000,
+        });
         daemon.upsert_agent(agent(
             &id,
             &format!("wks_{prefix}_m{}", i % PROJECTS.len()),

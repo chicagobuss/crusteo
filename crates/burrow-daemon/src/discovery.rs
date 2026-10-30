@@ -63,6 +63,20 @@ pub async fn start(daemon: &Arc<Daemon>, discoveries: Vec<Discovery>) {
     });
 }
 
+/// Each provider looked for: its id, its CLI as given, and what the CLI's
+/// `--version` said last (`None`: it would not run).
+pub async fn watched(daemon: &Daemon) -> Vec<(String, Option<std::path::PathBuf>, Option<String>)> {
+    (daemon.agents.watched.lock().await.iter())
+        .map(|w| {
+            (
+                w.discovery.id.clone(),
+                w.discovery.program.clone(),
+                w.stamp.clone(),
+            )
+        })
+        .collect()
+}
+
 /// Looks at the providers (`only` those named), finding again those whose
 /// CLI changed, or all of them when `probe`. Publishes the providers
 /// snapshot when what they offer changed, or always when `announce`.

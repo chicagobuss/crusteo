@@ -152,6 +152,7 @@ mod tests {
                             remaining_percent: 100. - used,
                             window_seconds: 604_800.,
                             resets_at: *resets,
+                            ..Default::default()
                         }],
                         ..Default::default()
                     })

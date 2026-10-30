@@ -2,9 +2,12 @@
 //! churn goes through the real directory reducers, and after every step the
 //! patched lanes are compared with `LaneView::build` on the same fleet.
 
-use fleet::lanes::{LabelLaneMode, Lane, LaneGrouping, LaneModel, LaneState, LaneView};
+use fleet::lanes::{
+    LabelLaneMode, Lane, LaneGrouping, LaneModel, LaneState, LaneView, band_collapse_key,
+};
 use fleet::{DirChange, Fleet, HostConfig, HostId, labels};
 use serde_json::{Value, json};
+use std::collections::BTreeSet;
 
 /// xorshift64*: deterministic, so a failure reproduces from its seed.
 struct Rng(u64);
@@ -279,7 +282,32 @@ fn unwrap(lanes: &[std::rc::Rc<Lane>]) -> Vec<Lane> {
 }
 
 fn check(grouping: LaneGrouping, mode: LabelLaneMode, seed: u64, hide_background: bool) {
-    check_in(World::new(seed), grouping, mode, seed, hide_background);
+    for banded in [false, true] {
+        check_in(
+            World::new(seed),
+            grouping,
+            mode,
+            seed,
+            hide_background,
+            banded,
+        );
+    }
+}
+
+/// The lane keys of two labels, search and ux, as bands; one of them
+/// collapsed.
+fn bands(world: &World) -> (BTreeSet<String>, String) {
+    let lanes = LaneView::build(&world.fleet, LaneGrouping::Label, &LaneState::default());
+    let key = |title: &str| {
+        (lanes.iter())
+            .find(|lane| lane.title == title)
+            .map_or_else(|| title.to_string(), |lane| lane.key.clone())
+    };
+    let ux = key("ux");
+    (
+        BTreeSet::from([key("search"), ux.clone()]),
+        band_collapse_key(&ux),
+    )
 }
 
 fn check_in(
@@ -288,14 +316,31 @@ fn check_in(
     mode: LabelLaneMode,
     seed: u64,
     hide_background: bool,
+    banded: bool,
 ) {
+    let (bands, collapsed_band) = if banded {
+        bands(&world)
+    } else {
+        Default::default()
+    };
     let state = LaneState {
         label_mode: mode,
         // A user arrangement for some lanes, and one collapsed.
         order: vec!["search".into(), "web".into()],
-        collapsed: ["infra".to_string()].into_iter().collect(),
+        collapsed: ["infra".to_string(), collapsed_band]
+            .into_iter()
+            .filter(|key| !key.is_empty())
+            .collect(),
         hide_background,
+        bands,
     };
+    if banded && grouping == LaneGrouping::Label {
+        let lanes = LaneView::build(&world.fleet, grouping, &state);
+        assert!(
+            lanes.iter().any(|lane| lane.band.is_some()),
+            "{mode:?} seed {seed}: no lane under a band"
+        );
+    }
     let mut model = LaneModel::build(&world.fleet, grouping, &state);
     for step in 0..600 {
         let changes = world.step();
@@ -336,13 +381,16 @@ fn incremental_lanes_equal_a_full_build_in_reef_mode() {
     for seed in [1, 7, 42, 1234, 99_991] {
         for hide in [false, true] {
             for mode in LabelLaneMode::ALL {
-                check_in(
-                    World::with(seed, true),
-                    LaneGrouping::Label,
-                    mode,
-                    seed,
-                    hide,
-                );
+                for banded in [false, true] {
+                    check_in(
+                        World::with(seed, true),
+                        LaneGrouping::Label,
+                        mode,
+                        seed,
+                        hide,
+                        banded,
+                    );
+                }
             }
             // Other groupings ignore the catalog.
             check_in(
@@ -351,6 +399,7 @@ fn incremental_lanes_equal_a_full_build_in_reef_mode() {
                 LabelLaneMode::Labels,
                 seed,
                 hide,
+                false,
             );
         }
     }

@@ -170,6 +170,7 @@ impl Provider for PiProvider {
             binary: self.binary.clone(),
             cwd: PathBuf::from(&spec.cwd),
             env: spec.env.clone(),
+            unset: spec.unset.clone(),
             trace: self.trace_dir.as_ref().map(|dir| {
                 let name = format!("pi-{}.jsonl", uuid::Uuid::new_v4().simple());
                 dir.join(name)
@@ -197,6 +198,7 @@ struct CliLauncher {
     binary: PathBuf,
     cwd: PathBuf,
     env: Vec<(String, String)>,
+    unset: Vec<String>,
     trace: Option<PathBuf>,
 }
 
@@ -232,6 +234,9 @@ impl Launcher for CliLauncher {
             .args(arguments(resume, settings))
             .current_dir(&self.cwd)
             .env_remove("NODE_OPTIONS");
+        for key in &self.unset {
+            command.env_remove(key);
+        }
         for (key, value) in &self.env {
             command.env(key, value);
         }

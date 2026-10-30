@@ -264,13 +264,18 @@ pub fn server_id(home: &Path) -> std::io::Result<String> {
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
         Err(err) => return Err(err),
     }
-    std::fs::create_dir_all(home)?;
     let id = ids::server_id();
-    // Write then rename, so a crash never leaves a half-written identity.
-    let temp = home.join("server-id.tmp");
-    std::fs::write(&temp, &id)?;
-    std::fs::rename(&temp, &path)?;
+    write_server_id(home, &id)?;
     Ok(id)
+}
+
+/// Writes `<home>/server-id`. Write then rename, so a crash never leaves a
+/// half-written identity.
+pub fn write_server_id(home: &Path, id: &str) -> std::io::Result<()> {
+    std::fs::create_dir_all(home)?;
+    let temp = home.join("server-id.tmp");
+    std::fs::write(&temp, id)?;
+    std::fs::rename(&temp, home.join("server-id"))
 }
 
 #[cfg(test)]

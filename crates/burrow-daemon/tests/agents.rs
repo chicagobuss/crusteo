@@ -428,6 +428,48 @@ async fn a_question_takes_answers_by_header_and_refuses_empty_ones() {
     h.stop().await;
 }
 
+/// As Paseo 0.14 releases idle runtimes: an idle agent's CLI stops, the
+/// agent stays idle, and its next prompt resumes the session in a new one.
+/// A busy agent keeps its CLI.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_idle_agent_lets_its_cli_go_and_resumes_on_the_next_prompt() {
+    use burrow_daemon::agents::release_idle;
+    use std::time::Duration;
+    let h = harness().await;
+    let agent = h.create().await;
+    let wait = || h.request(json!({"type": "wait_for_finish_request", "agentId": agent}));
+    h.send(&agent, "hi", "m-1", None).await;
+    assert_eq!(wait().await["status"], "idle");
+    assert!(
+        release_idle(&h.daemon, Duration::from_secs(3600))
+            .await
+            .is_empty(),
+        "not idle for long enough"
+    );
+    assert_eq!(
+        release_idle(&h.daemon, Duration::ZERO).await,
+        std::slice::from_ref(&agent)
+    );
+    assert!(!h.daemon.agents.is_live(&agent), "its CLI is gone");
+    let fetched = h
+        .request(json!({"type": "fetch_agent_request", "agentId": agent}))
+        .await;
+    assert_eq!(fetched["agent"]["status"], "idle", "{fetched}");
+
+    h.send(&agent, "again", "m-2", None).await;
+    let done = wait().await;
+    assert_eq!(done["lastMessage"], "echo: again", "{done}");
+    assert!(h.daemon.agents.is_live(&agent));
+
+    h.send(&agent, "slow x", "m-3", None).await;
+    assert!(
+        release_idle(&h.daemon, Duration::ZERO).await.is_empty(),
+        "a running turn keeps its CLI"
+    );
+    h.request(json!({"type": "cancel_agent_request", "agentId": agent}))
+        .await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn waiting_for_an_agent_answers_as_paseo_does() {
     let h = harness().await;
@@ -782,17 +824,14 @@ async fn an_agent_resumes_after_a_restart_with_its_timeline_intact() {
         .collect();
     turns.dedup();
     assert_eq!(turns, ["foreground-turn-1", "foreground-turn-2"]);
-    let seqs: Vec<u64> = after["entries"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|e| e["seqStart"].as_u64().unwrap())
+    // Folded entries between them cover every seq, from 1 on.
+    let mut seqs: Vec<u64> = (after["entries"].as_array().unwrap().iter())
+        .flat_map(|e| e["sourceSeqRanges"].as_array().unwrap().clone())
+        .flat_map(|r| r["startSeq"].as_u64().unwrap()..=r["endSeq"].as_u64().unwrap())
         .collect();
-    assert_eq!(
-        seqs,
-        (1..=seqs.len() as u64).collect::<Vec<_>>(),
-        "seqs continue"
-    );
+    seqs.sort_unstable();
+    let last = after["window"]["maxSeq"].as_u64().unwrap();
+    assert_eq!(seqs, (1..=last).collect::<Vec<_>>(), "seqs continue");
     let resumed = h
         .request(json!({"type": "fetch_agent_request", "agentId": agent}))
         .await;
@@ -1174,10 +1213,17 @@ async fn a_provider_that_finishes_loading_is_pushed_to_subscribers() {
 }
 
 /// The echo provider as one install of a CLI: its models are those its
-/// version offers, and it counts the sessions it starts.
+/// version offers, and it counts the sessions it starts. Like a real CLI,
+/// a session takes a moment to end once told to stop (`ended` is set when
+/// it has); `after` is the install it replaces, and a session started
+/// while one of that install's is still ending sets `overlapped`, as Codex
+/// refuses a thread another app-server still has open.
 struct Install {
     models: Vec<&'static str>,
     starts: Arc<std::sync::atomic::AtomicUsize>,
+    ended: Arc<std::sync::atomic::AtomicBool>,
+    after: Option<Arc<std::sync::atomic::AtomicBool>>,
+    overlapped: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl burrow_provider::Provider for Install {
@@ -1198,9 +1244,35 @@ impl burrow_provider::Provider for Install {
         &self,
         spec: burrow_provider::SessionSpec,
     ) -> Result<burrow_provider::Session, burrow_provider::ProviderError> {
-        self.starts
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        EchoProvider::default().start(spec)
+        use std::sync::atomic::Ordering;
+        self.starts.fetch_add(1, Ordering::SeqCst);
+        if self
+            .after
+            .as_ref()
+            .is_some_and(|old| !old.load(Ordering::SeqCst))
+        {
+            self.overlapped.store(true, Ordering::SeqCst);
+        }
+        let mut inner = EchoProvider::default().start(spec)?;
+        let (events, receiver) = tokio::sync::mpsc::unbounded_channel();
+        let ended = self.ended.clone();
+        tokio::spawn(async move {
+            while let Some(event) = inner.events.recv().await {
+                if matches!(event, burrow_provider::ProviderEvent::Exited { .. }) {
+                    // The CLI takes a moment to exit.
+                    tokio::time::sleep(Duration::from_millis(300)).await;
+                    ended.store(true, Ordering::SeqCst);
+                }
+                if events.send(event).is_err() {
+                    break;
+                }
+            }
+            ended.store(true, Ordering::SeqCst);
+        });
+        Ok(burrow_provider::Session {
+            commands: inner.commands,
+            events: receiver,
+        })
     }
 }
 
@@ -1223,8 +1295,11 @@ async fn an_upgraded_cli_is_offered_without_a_restart() {
     let version = Arc::new(Mutex::new("1.0.0".to_string()));
     let finds = Arc::new(AtomicUsize::new(0));
     let (old_starts, new_starts) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+    let old_ended = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let overlapped = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let discovery = burrow_provider::Discovery {
         id: "upgraded".into(),
+        program: None,
         stamp: Box::new({
             let version = version.clone();
             move || Some(version.lock().unwrap().clone())
@@ -1232,16 +1307,23 @@ async fn an_upgraded_cli_is_offered_without_a_restart() {
         find: Box::new({
             let (version, finds) = (version.clone(), finds.clone());
             let (old_starts, new_starts) = (old_starts.clone(), new_starts.clone());
+            let (old_ended, overlapped) = (old_ended.clone(), overlapped.clone());
             move || {
                 finds.fetch_add(1, Ordering::SeqCst);
                 let install = match version.lock().unwrap().as_str() {
                     "1.0.0" => Install {
                         models: vec!["m-1"],
                         starts: old_starts.clone(),
+                        ended: old_ended.clone(),
+                        after: None,
+                        overlapped: overlapped.clone(),
                     },
                     _ => Install {
                         models: vec!["m-1", "m-2"],
                         starts: new_starts.clone(),
+                        ended: Arc::default(),
+                        after: Some(old_ended.clone()),
+                        overlapped: overlapped.clone(),
                     },
                 };
                 Some(Arc::new(install) as Arc<dyn burrow_provider::Provider>)
@@ -1289,6 +1371,10 @@ async fn an_upgraded_cli_is_offered_without_a_restart() {
     assert!(seen.iter().any(|m| stream_event(m, "turn_completed")));
     assert_eq!(old_starts.load(Ordering::SeqCst), 1);
     assert_eq!(new_starts.load(Ordering::SeqCst), 1);
+    assert!(
+        !overlapped.load(Ordering::SeqCst),
+        "the new CLI started while the old one still had the session"
+    );
 
     // A client's refresh probes the unchanged CLI, and the snapshot follows.
     let reply = h
@@ -1300,5 +1386,139 @@ async fn an_upgraded_cli_is_offered_without_a_restart() {
     })
     .await;
     assert_eq!(finds.load(Ordering::SeqCst), 3);
+    h.stop().await;
+}
+
+/// Keeps every session spec it is given, and runs no turns.
+struct Recording(Arc<std::sync::Mutex<Vec<burrow_provider::SessionSpec>>>);
+
+impl burrow_provider::Provider for Recording {
+    fn info(&self) -> burrow_provider::ProviderInfo {
+        burrow_provider::ProviderInfo {
+            id: "recording".into(),
+            label: "Recording".into(),
+            models: vec![burrow_provider::Model {
+                id: "r-1".into(),
+                label: "R 1".into(),
+                is_default: true,
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    fn start(
+        &self,
+        spec: burrow_provider::SessionSpec,
+    ) -> Result<burrow_provider::Session, burrow_provider::ProviderError> {
+        self.0.lock().unwrap().push(spec);
+        let (commands, mut command_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (_events, event_rx) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            let _events = _events;
+            while let Some(command) = command_rx.recv().await {
+                if matches!(command, burrow_provider::Command::Shutdown) {
+                    break;
+                }
+            }
+        });
+        Ok(burrow_provider::Session {
+            commands,
+            events: event_rx,
+        })
+    }
+}
+
+/// An agent's CLI gets what Paseo gives its agents, so the `paseo` CLI it
+/// runs finds Burrow, speaks as that agent and makes its children its own:
+/// found unset under Burrow on 2026-10-28, when a handoff was lost.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_agents_cli_knows_who_it_is_and_where_its_daemon_is() {
+    let h = harness().await;
+    let specs = Arc::new(std::sync::Mutex::new(Vec::new()));
+    h.daemon.agents.register(Arc::new(Recording(specs.clone())));
+    let cwd = h.cwd.to_string_lossy().to_string();
+    let reply = h
+        .request(json!({"type": "create_agent_request", "labels": {},
+            "config": {"provider": "recording", "cwd": cwd, "env": {"TASK": "x", "PASEO_AGENT_ID": "spoofed"}}}))
+        .await;
+    let agent = reply["agent"]["id"].as_str().expect("created").to_string();
+    let spec = specs
+        .lock()
+        .unwrap()
+        .last()
+        .cloned()
+        .expect("a session started");
+    let env: std::collections::HashMap<&str, &str> = spec
+        .env
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
+    assert_eq!(
+        env["PASEO_AGENT_ID"], agent,
+        "its own id, whatever was asked for"
+    );
+    assert_eq!(env["PASEO_AGENT_CWD"], cwd);
+    assert_eq!(
+        env["PASEO_HOST"],
+        h.running.local_addr.to_string(),
+        "where it listens"
+    );
+    assert_eq!(env["TASK"], "x", "paseo run --env");
+    assert!(spec.unset.iter().any(|k| k == "PASEO_HOME"));
+    // The env asked for is the agent's for good: it comes back on resume.
+    let stored = h
+        .daemon
+        .read(|store| store.provider_config(&agent).cloned())
+        .unwrap();
+    assert_eq!(stored["env"]["TASK"], "x");
+    h.stop().await;
+}
+
+/// `paseo status`, `paseo daemon pair`, `paseo provider models` and
+/// `paseo provider diagnostic`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_daemon_says_what_it_is_and_what_its_providers_offer() {
+    let h = harness().await;
+    let specs = Arc::new(std::sync::Mutex::new(Vec::new()));
+    h.daemon.agents.register(Arc::new(Recording(specs)));
+    let status = h
+        .request(json!({"type": "daemon.get_status.request"}))
+        .await;
+    assert_eq!(status["serverId"], h.daemon.config.server_id.as_str());
+    assert_eq!(status["pid"], std::process::id());
+    assert_eq!(status["listen"], h.running.local_addr.to_string());
+    let offered: Vec<&str> = (status["providers"].as_array().unwrap().iter())
+        .map(|p| p["provider"].as_str().unwrap())
+        .collect();
+    assert!(
+        offered.contains(&"echo") && offered.contains(&"recording"),
+        "{status}"
+    );
+
+    let pairing = h
+        .request(json!({"type": "daemon.get_pairing_offer.request"}))
+        .await;
+    assert_eq!(pairing["relayEnabled"], false);
+
+    let models = h
+        .request(json!({"type": "list_provider_models_request", "provider": "recording"}))
+        .await;
+    assert_eq!(models["models"][0]["id"], "r-1", "{models}");
+    assert!(models["error"].is_null());
+    let missing = h
+        .request(json!({"type": "list_provider_models_request", "provider": "nobody"}))
+        .await;
+    assert!(missing["error"].as_str().unwrap().contains("not available"));
+
+    let diagnostic = h
+        .request(json!({"type": "provider_diagnostic_request", "provider": "recording"}))
+        .await;
+    let text = diagnostic["diagnostic"].as_str().unwrap();
+    assert!(
+        text.contains("Available: yes") && text.contains("Models: 1"),
+        "{text}"
+    );
+
     h.stop().await;
 }

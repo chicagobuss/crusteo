@@ -31,7 +31,7 @@ use crate::daemon::Daemon;
 use crate::labels::LabelError;
 use crate::store::Store;
 use crate::subscriptions::{AgentView, SESSION_EVENTS, Subscription, Subscriptions};
-use crate::workspace_requests;
+use crate::{daemon_requests, workspace_requests};
 
 /// Session messages that never get a reply. Phase 0 accepts and ignores them.
 const FIRE_AND_FORGET: &[&str] = &[
@@ -116,6 +116,9 @@ pub fn handle(
         }
         other if workspace_requests::KINDS.contains(&other) => {
             workspace_requests::handle(daemon, other, &message, late).ok_or(Failure::Schema)
+        }
+        other if daemon_requests::KINDS.contains(&other) => {
+            daemon_requests::handle(daemon, other, &message, late).ok_or(Failure::Schema)
         }
         other if FIRE_AND_FORGET.contains(&other) => Ok(Vec::new()),
         _ => Err(Failure::Schema),
@@ -702,17 +705,22 @@ fn fetch_timeline(daemon: &Daemon, request: FetchTimelineRequest) -> Vec<Value> 
         }
         ((), Vec::new())
     });
+    let projection = request.projection.unwrap_or_default();
     let response = daemon.read(|store| {
         let agent = store.find_agent(&request.agent_id)?;
-        let page = store
-            .timeline(&agent.id)?
-            .fetch(direction, request.cursor.as_ref(), limit);
+        let page = store.timeline(&agent.id)?.fetch(
+            direction,
+            request.cursor.as_ref(),
+            limit,
+            request.whole_turns == Some(true),
+            projection == Projection::Projected,
+        );
         Some(FetchTimelineResponse {
             request_id: request.request_id.clone(),
             agent_id: request.agent_id.clone(),
             agent: Some(agent.clone()),
             direction,
-            projection: Projection::Projected,
+            projection,
             epoch: page.epoch,
             reset: page.reset,
             stale_cursor: page.stale_cursor,

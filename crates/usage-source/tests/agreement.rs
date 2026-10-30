@@ -73,4 +73,9 @@ fn the_fixture_shows_each_account_once_named_by_the_feed() {
     assert_eq!(claude["windows"][1]["name"], "weekly Global");
     assert_eq!(rows[3]["account"], "home");
     assert_eq!(rows[2]["use_before"]["window"], "Gemini models (5h)");
+    let gemini: Vec<&str> = (rows[2]["groups"].as_array().unwrap().iter())
+        .map(|group| group["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(gemini, ["Gemini models", "Gemini 4 Argon"]);
+    assert_eq!(rows[2]["binding"], "argon-weekly");
 }

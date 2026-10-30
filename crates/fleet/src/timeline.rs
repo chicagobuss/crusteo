@@ -1327,6 +1327,34 @@ pub fn turn_footer(items: &[&Item], start: usize, end: usize) -> Footer {
     }
 }
 
+/// The steps among `items`, as the index of the item each began with and of
+/// its last item shown: an agent's message and the tool calls, thinking and
+/// task changes under it, or a run of those with no message above. Anything
+/// else (a prompt, a notice) and a new turn end the step before it; items a
+/// conversation leaves out belong to none.
+pub fn steps(items: &[&Item]) -> Vec<(usize, usize)> {
+    let turns = turn_starts(items);
+    let mut steps = Vec::new();
+    let mut open: Option<(usize, usize)> = None;
+    for (index, item) in items.iter().enumerate() {
+        if crate::display::hidden_in_stream(&item.kind) {
+            continue;
+        }
+        if open.is_some_and(|(start, _)| turns[start] != turns[index]) {
+            steps.extend(open.take());
+        }
+        match &item.kind {
+            ItemKind::Assistant { .. } => steps.extend(open.replace((index, index))),
+            ItemKind::Tool(_) | ItemKind::Thought { .. } | ItemKind::Todo { .. } => {
+                open = Some((open.map_or(index, |(start, _)| start), index));
+            }
+            _ => steps.extend(open.take()),
+        }
+    }
+    steps.extend(open);
+    steps
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1404,6 +1432,31 @@ mod tests {
         let items: Vec<&Item> = items.iter().collect();
         assert_eq!(finished_turns(&items, false), [(0, 0), (1, 3)]);
         assert_eq!(turn_starts(&items), [0, 1, 1, 1, 4, 5]);
+    }
+
+    #[test]
+    fn a_step_is_a_message_and_the_work_under_it() {
+        let thought = |turn| Item {
+            kind: ItemKind::Thought {
+                text: String::new(),
+                loading: false,
+            },
+            ..turn_item("", Some(turn))
+        };
+        let items = [
+            turn_item("user", Some("f1")),
+            thought("f1"),
+            turn_item("assistant", Some("f1")),
+            thought("f1"),
+            thought("f1"),
+            turn_item("assistant", Some("f1")),
+            turn_item("assistant", Some("f1")),
+            thought("f1"),
+            thought("auto-2"),
+            turn_item("user", Some("f3")),
+        ];
+        let items: Vec<&Item> = items.iter().collect();
+        assert_eq!(steps(&items), [(1, 1), (2, 4), (5, 5), (6, 7), (8, 8)]);
     }
 
     #[test]

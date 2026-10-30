@@ -18,6 +18,7 @@
 
 pub mod echo;
 pub mod env;
+pub mod group;
 
 use serde_json::Value;
 use tokio::sync::mpsc;
@@ -85,7 +86,11 @@ pub struct SessionSpec {
     /// The provider's own session id, to resume instead of starting fresh.
     pub resume: Option<String>,
     pub system_prompt: Option<String>,
+    /// Set in the CLI's environment, after `unset` and before the
+    /// provider's own variables.
     pub env: Vec<(String, String)>,
+    /// Taken out of the environment the CLI would inherit.
+    pub unset: Vec<String>,
 }
 
 /// An image attached to a prompt: base64 data and its MIME type.
@@ -146,6 +151,10 @@ pub enum ProviderEvent {
     PermissionRequested { id: String, request: Value },
     /// The provider withdrew a request it had made.
     PermissionCanceled { id: String },
+    /// Work the session runs outside a turn (an ACP agent's terminals) has
+    /// started, or all of it has stopped. While it runs, the daemon keeps
+    /// the session's CLI even when the agent is idle.
+    BackgroundWork { running: bool },
     /// The provider changed mode itself (for example after a plan is approved).
     ModeChanged { mode_id: String },
     /// The session listed its own modes, which replace the provider's
@@ -208,6 +217,9 @@ pub struct HistoryItem {
 pub struct Discovery {
     /// The provider's id, as its [`ProviderInfo`] has it.
     pub id: String,
+    /// The CLI it runs, as given (a bare name is looked up on `PATH`), for
+    /// `provider_diagnostic_request`.
+    pub program: Option<std::path::PathBuf>,
     /// Tells one install from another cheaply, `None` when the CLI cannot
     /// be run. Blocking.
     pub stamp: Box<dyn Fn() -> Option<String> + Send + Sync>,
@@ -226,6 +238,7 @@ impl Discovery {
     ) -> Self {
         Self {
             id: id.into(),
+            program: Some(program.clone()),
             stamp: Box::new(move || version_line(&program)),
             find: Box::new(find),
         }

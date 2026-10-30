@@ -244,7 +244,7 @@ async fn the_providers_snapshot_offers_codex_as_paseo_does() {
     assert_eq!(modes, ["auto", "auto-review", "full-access"]);
     assert_eq!(
         codex["models"][0],
-        json!({"id": "gpt-6-luna", "label": "GPT-6-Luna", "description": "Fast and affordable.",
+        json!({"provider": "codex", "id": "gpt-6-luna", "label": "GPT-6-Luna", "description": "Fast and affordable.",
                "isDefault": true, "defaultThinkingOptionId": "medium",
                "thinkingOptions": [
                    {"id": "low", "label": "low", "description": "Fast responses", "isDefault": false},

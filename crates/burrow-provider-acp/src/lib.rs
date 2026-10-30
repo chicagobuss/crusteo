@@ -79,7 +79,8 @@ pub const CAPABILITIES: Capabilities = Capabilities {
     streaming: true,
     session_persistence: true,
     dynamic_modes: true,
-    mcp_servers: true,
+    // A client's `mcpServers` are not passed to the agent yet (it gets none).
+    mcp_servers: false,
     reasoning_stream: true,
     tool_invocations: true,
     steer: false,
@@ -148,6 +149,7 @@ impl AcpProvider {
             config: self.config.clone(),
             cwd: home,
             env: Vec::new(),
+            unset: Vec::new(),
             trace: None,
         };
         let transport = launcher.launch().map_err(|err| err.to_string())?;
@@ -204,6 +206,7 @@ impl Provider for AcpProvider {
             config: self.config.clone(),
             cwd: PathBuf::from(&spec.cwd),
             env: spec.env.clone(),
+            unset: spec.unset.clone(),
             trace: self.trace_dir.as_ref().map(|dir| {
                 let name = format!("{}-{}.jsonl", self.config.id, uuid::Uuid::new_v4().simple());
                 dir.join(name)
@@ -242,6 +245,7 @@ struct AgentLauncher {
     config: Arc<AgentConfig>,
     cwd: PathBuf,
     env: Vec<(String, String)>,
+    unset: Vec<String>,
     trace: Option<PathBuf>,
 }
 
@@ -254,6 +258,9 @@ impl Launcher for AgentLauncher {
             .ok_or_else(|| std::io::Error::other("no command configured"))?;
         let mut command = tokio::process::Command::new(program);
         command.args(args).current_dir(&self.cwd);
+        for key in &self.unset {
+            command.env_remove(key);
+        }
         for (key, value) in self.config.env.iter().chain(&self.env) {
             command.env(key, value);
         }

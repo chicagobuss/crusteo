@@ -43,6 +43,9 @@ use crate::store::{ProjectRecord, Store, StoreEvent, WorkspaceRecord};
 
 /// How long an interrupt may take before the daemon gives up on it.
 const INTERRUPT_GRACE: Duration = Duration::from_secs(15);
+/// How long a session told to stop gets before its replacement starts
+/// anyway. Codex's gives app-server 2 s to exit.
+const SESSION_END_WAIT: Duration = Duration::from_secs(10);
 /// Client message ids remembered per agent, to drop duplicate sends.
 const REMEMBERED_SENDS: usize = 256;
 const TITLE_LIMIT: usize = 60;
@@ -53,6 +56,9 @@ const PREVIEW_LIMIT: usize = 220;
 pub struct Agents {
     providers: RwLock<BTreeMap<String, Arc<dyn Provider>>>,
     live: Mutex<HashMap<String, Arc<Live>>>,
+    /// Sessions let go of for being idle, until their CLI has exited: a
+    /// send waits for that before it resumes the session in a new one.
+    released: Mutex<HashMap<String, watch::Receiver<bool>>>,
     /// How each provider is found again ([`crate::discovery`]).
     pub(crate) watched: tokio::sync::Mutex<Vec<crate::discovery::Watched>>,
 }
@@ -67,6 +73,10 @@ struct Live {
     state: Mutex<RunState>,
     /// Counts finished turns; waiters watch it to learn an interrupt landed.
     turns_done: watch::Sender<u64>,
+    /// Set once the session has ended and its CLI is gone.
+    ended: watch::Sender<bool>,
+    /// When it last did anything: a provider event, or a send.
+    active_at: Mutex<Instant>,
 }
 
 #[derive(Default)]
@@ -80,6 +90,9 @@ struct RunState {
     /// own id, and the request as clients saw it.
     permissions: Vec<(String, String, Value)>,
     recent_sends: VecDeque<String>,
+    /// The session has work running outside a turn
+    /// ([`ProviderEvent::BackgroundWork`]).
+    background: bool,
 }
 
 impl Agents {
@@ -148,6 +161,29 @@ impl Agents {
         for (_, agent) in live {
             let _ = agent.commands.send(Command::Shutdown);
         }
+    }
+
+    /// [`shutdown`](Self::shutdown), then waits up to `within` for every
+    /// session's CLI to be gone. Each CLI leads a process group of its own
+    /// ([`burrow_provider::group`]), so a service manager stopping Burrow
+    /// does not reach them; Burrow ends them before it exits.
+    pub async fn stop_all(&self, within: Duration) {
+        let ended: Vec<watch::Receiver<bool>> = (self.live.lock())
+            .unwrap_or_else(|p| p.into_inner())
+            .values()
+            .map(|agent| agent.ended.subscribe())
+            .collect();
+        self.shutdown();
+        if ended.is_empty() {
+            return;
+        }
+        let all = futures_util::future::join_all(ended.into_iter().map(|mut ended| async move {
+            let _ = ended.wait_for(|ended| *ended).await;
+        }));
+        let _ = tokio::time::timeout(within, all).await;
+        // What ignored the group's SIGTERM gets its SIGKILL before Burrow,
+        // whose thread sends it, exits.
+        tokio::time::sleep(burrow_provider::group::KILL_AFTER + Duration::from_millis(200)).await;
     }
 }
 
@@ -379,6 +415,8 @@ pub struct CreateAgent {
     pub client_message_id: Option<String>,
     pub images: Vec<Image>,
     pub system_prompt: Option<String>,
+    /// Set in its CLI's environment (`paseo run --env`), kept with it.
+    pub env: BTreeMap<String, String>,
     /// With no `workspace_id`: make a new background workspace for it.
     pub background: bool,
     /// The id the client chose for it (`agentId`), else a new UUID.
@@ -614,6 +652,7 @@ pub async fn create(daemon: &Arc<Daemon>, request: CreateAgent) -> Result<AgentS
     let background = request.background;
     let cwd = request.cwd.clone();
     let system_prompt = request.system_prompt.clone();
+    let env = request.env.clone();
     let probe_dir = std::path::PathBuf::from(&cwd);
     let git = tokio::task::spawn_blocking(move || crate::git::probe(&probe_dir))
         .await
@@ -627,8 +666,16 @@ pub async fn create(daemon: &Arc<Daemon>, request: CreateAgent) -> Result<AgentS
         };
         let mut snapshot = snapshot;
         snapshot.workspace_id = Some(workspace_id);
+        // What its CLI is started with, every time: the prompt and env asked for.
+        let mut config = serde_json::Map::new();
         if let Some(prompt) = &system_prompt {
-            store.set_provider_config(&snapshot.id, json!({"systemPrompt": prompt}));
+            config.insert("systemPrompt".into(), prompt.clone().into());
+        }
+        if !env.is_empty() {
+            config.insert("env".into(), json!(env));
+        }
+        if !config.is_empty() {
+            store.set_provider_config(&snapshot.id, Value::Object(config));
         }
         events.extend(store.upsert_agent(snapshot));
         (Ok(()), events)
@@ -659,6 +706,77 @@ pub async fn create(daemon: &Arc<Daemon>, request: CreateAgent) -> Result<AgentS
     daemon
         .read(|store| store.agent(&agent_id).cloned())
         .ok_or_else(|| "The agent disappeared while starting".to_string())
+}
+
+/// What an agent's CLI does not inherit from Burrow's environment, as Paseo
+/// takes them out of its own:
+/// - `PASEO_HOME`, which beside the `PASEO_HOST` agents get makes Paseo's CLI
+///   refuse to pick a daemon;
+/// - what a Paseo agent, terminal, or the desktop app sets, should Burrow be
+///   started from one;
+/// - a Claude Code session's markers, which Paseo clears for every provider.
+pub const AGENT_UNSET: &[&str] = &[
+    "PASEO_HOME",
+    "PASEO_WORKSPACE_ID",
+    "PASEO_TERMINAL_ID",
+    "PASEO_NODE_ENV",
+    "PASEO_DESKTOP_MANAGED",
+    "PASEO_SUPERVISED",
+    "ELECTRON_RUN_AS_NODE",
+    "ELECTRON_NO_ATTACH_CONSOLE",
+    "ESBUILD_BINARY_PATH",
+    "CLAUDECODE",
+    "CLAUDE_CODE_ENTRYPOINT",
+    "CLAUDE_CODE_SSE_PORT",
+    "CLAUDE_AGENT_SDK_VERSION",
+];
+
+/// Where Paseo's desktop app keeps its `paseo` CLI. Under Paseo's own
+/// daemon an agent finds it there; under Burrow it is put on the agent's
+/// `PATH` when no `paseo` is on it already.
+const PASEO_APP_CLI_DIRS: &[&str] = &["/Applications/Paseo.app/Contents/Resources/bin"];
+
+/// The environment an agent's CLI gets, as Paseo gives it: who it is
+/// (`PASEO_AGENT_ID`, `PASEO_AGENT_CWD`), which Paseo's CLI uses to say a
+/// message is from it, to make its children its own and to steer rather
+/// than interrupt; where its daemon is (`PASEO_HOST`), so a `paseo` command
+/// it runs reaches Burrow without `--host`; what the client that made it
+/// asked for (`paseo run --env`); and the Paseo app's CLI on its `PATH`.
+fn agent_env(
+    daemon: &Daemon,
+    agent_id: &str,
+    cwd: &str,
+    provider_config: Option<&Value>,
+) -> Vec<(String, String)> {
+    let mut env: Vec<(String, String)> = (provider_config.and_then(|c| c["env"].as_object()))
+        .into_iter()
+        .flatten()
+        .filter_map(|(key, value)| Some((key.clone(), value.as_str()?.to_string())))
+        .collect();
+    if let Some(path) = path_with_paseo_cli(std::env::var_os("PATH")) {
+        env.push(("PATH".into(), path));
+    }
+    if let Some(endpoint) = daemon.local_endpoint.get() {
+        env.push(("PASEO_HOST".into(), endpoint.clone()));
+    }
+    env.push(("PASEO_AGENT_ID".into(), agent_id.to_string()));
+    env.push(("PASEO_AGENT_CWD".into(), cwd.to_string()));
+    env
+}
+
+/// `path` with the Paseo app's CLI folder at the end, when no `paseo` is on
+/// it and the app is installed; `None` when nothing needs adding.
+fn path_with_paseo_cli(path: Option<std::ffi::OsString>) -> Option<String> {
+    let path = path?.into_string().ok()?;
+    let has = |dir: &std::path::Path| dir.join("paseo").is_file();
+    if std::env::split_paths(&path).any(|dir| has(&dir)) {
+        return None;
+    }
+    let app = PASEO_APP_CLI_DIRS
+        .iter()
+        .map(std::path::Path::new)
+        .find(|dir| has(dir))?;
+    Some(format!("{path}:{}", app.display()))
 }
 
 /// Starts the agent's provider session if it is not running (lazy load).
@@ -696,7 +814,8 @@ fn ensure_live(daemon: &Arc<Daemon>, agent_id: &str) -> Result<Arc<Live>, String
             .as_ref()
             .and_then(|c| c["systemPrompt"].as_str())
             .map(str::to_string),
-        env: Vec::new(),
+        env: agent_env(daemon, agent_id, &snapshot.cwd, provider_config.as_ref()),
+        unset: AGENT_UNSET.iter().map(|key| key.to_string()).collect(),
     };
     // A session Burrow never recorded (started elsewhere): take its
     // conversation from the provider's own records, once.
@@ -737,6 +856,8 @@ fn ensure_live(daemon: &Arc<Daemon>, agent_id: &str) -> Result<Arc<Live>, String
             ..RunState::default()
         }),
         turns_done,
+        ended: watch::channel(false).0,
+        active_at: Mutex::new(Instant::now()),
     });
     live_map.insert(agent_id.to_string(), live.clone());
     drop(live_map);
@@ -786,6 +907,7 @@ async fn drive(
         };
         let Some(event) = event else { break };
         debug!(agent_id, ?event, "provider event");
+        live.touch();
         if let ProviderEvent::Item { turn, item } = event {
             let turn = turn.or_else(|| active_turn(&live));
             if coalescable(&item) {
@@ -804,6 +926,7 @@ async fn drive(
         }
     }
     flush(&daemon, &agent_id, &mut coalescer);
+    live.ended.send_replace(true);
     // The session ended: whatever was running is over.
     let still_registered = daemon
         .agents
@@ -882,6 +1005,12 @@ fn on_event(daemon: &Arc<Daemon>, agent_id: &str, live: &Arc<Live>, event: Provi
                     json!({"type": "thread_started", "sessionId": session_id, "provider": provider}),
                 );
             }
+        }
+        ProviderEvent::BackgroundWork { running } => {
+            live.state
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .background = running;
         }
         ProviderEvent::TurnStarted { turn } => {
             let started = {
@@ -1236,10 +1365,117 @@ async fn interrupt(live: &Live) -> Result<(), ()> {
     }
 }
 
+impl Live {
+    fn touch(&self) {
+        *self.active_at.lock().unwrap_or_else(|p| p.into_inner()) = Instant::now();
+    }
+
+    /// A turn, a question, a prompt making way for another, or work outside
+    /// a turn: anything that stopping its CLI would lose.
+    fn busy(&self) -> bool {
+        let state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        state.active_turn.is_some()
+            || !state.permissions.is_empty()
+            || state.replacing
+            || state.background
+    }
+
+    fn idle_for(&self) -> Duration {
+        self.active_at
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .elapsed()
+    }
+}
+
+/// Lets go of idle agents' CLIs every `idle_check`, as Paseo 0.14 releases
+/// idle runtimes: the next prompt resumes the session in a new one.
+pub async fn release_idle_loop(daemon: Arc<Daemon>, mut shutdown: watch::Receiver<bool>) {
+    let Some(after) = daemon.config.timing.idle_release else {
+        return;
+    };
+    loop {
+        tokio::select! {
+            _ = tokio::time::sleep(daemon.config.timing.idle_check) => {}
+            _ = shutdown.changed() => return,
+        }
+        release_idle(&daemon, after).await;
+    }
+}
+
+/// Stops the CLI of each agent that has done nothing for `after`, when it
+/// has a provider session to resume, is idle, and none of its subagents is
+/// busy. Returns the agents let go of.
+pub async fn release_idle(daemon: &Arc<Daemon>, after: Duration) -> Vec<String> {
+    let live: Vec<(String, Arc<Live>)> = (daemon.agents.live.lock())
+        .unwrap_or_else(|p| p.into_inner())
+        .iter()
+        .map(|(id, live)| (id.clone(), live.clone()))
+        .collect();
+    let busy: Vec<&str> = (live.iter())
+        .filter(|(_, live)| live.busy())
+        .map(|(id, _)| id.as_str())
+        .collect();
+    let mut released = Vec::new();
+    for (agent_id, agent) in &live {
+        let resumable = daemon.read(|store| {
+            let snapshot = store.agents.get(agent_id)?;
+            let children_busy = (store.agents.iter())
+                .map(|(child, _)| child)
+                .filter(|child| child.labels.get(PARENT_AGENT_LABEL) == Some(agent_id))
+                .any(|child| busy.contains(&child.id.as_str()));
+            let session = (snapshot.persistence.as_ref())
+                .and_then(|p| p["sessionId"].as_str())
+                .is_some();
+            Some(session && snapshot.status == AgentStatus::Idle && !children_busy)
+        });
+        if resumable != Some(true) || agent.busy() || agent.idle_for() < after {
+            continue;
+        }
+        let _gate = agent.gate.lock().await;
+        let still = (daemon.agents.live(agent_id)).is_some_and(|now| Arc::ptr_eq(&now, agent));
+        if !still || agent.busy() || agent.idle_for() < after {
+            continue;
+        }
+        info!(
+            agent_id,
+            provider = agent.info.id,
+            "releasing the CLI of an agent idle for an hour; its next prompt resumes it"
+        );
+        let ended = agent.ended.subscribe();
+        (daemon.agents.released.lock())
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(agent_id.clone(), ended);
+        daemon.agents.forget(agent_id);
+        let _ = agent.commands.send(Command::Shutdown);
+        released.push(agent_id.clone());
+    }
+    released
+}
+
+/// Waits for the CLI of a session let go of for being idle to exit, so the
+/// one that resumes it does not find the session still held.
+async fn wait_released(daemon: &Daemon, agent_id: &str) {
+    let ended = (daemon.agents.released.lock())
+        .unwrap_or_else(|p| p.into_inner())
+        .remove(agent_id);
+    if let Some(mut ended) = ended
+        && tokio::time::timeout(SESSION_END_WAIT, ended.wait_for(|ended| *ended))
+            .await
+            .is_err()
+    {
+        warn!(
+            agent_id,
+            "the released session did not end in time; resuming it anyway"
+        );
+    }
+}
+
 /// Closes an idle agent's session when its provider was found again since
 /// it started (its CLI was upgraded), so the prompt about to be sent starts
 /// the new CLI on the same provider session. A running agent keeps its CLI.
 async fn restart_if_superseded(daemon: &Arc<Daemon>, agent_id: &str) {
+    wait_released(daemon, agent_id).await;
     let Some(live) = daemon.agents.live(agent_id) else {
         return;
     };
@@ -1262,8 +1498,20 @@ async fn restart_if_superseded(daemon: &Arc<Daemon>, agent_id: &str) {
             provider = live.info.id,
             "restarting the agent's CLI, which was upgraded"
         );
+        let mut ended = live.ended.subscribe();
         daemon.agents.forget(agent_id);
         let _ = live.commands.send(Command::Shutdown);
+        // The old CLI lets go of the session before the new one resumes it:
+        // Codex refuses a thread another app-server still has open.
+        if tokio::time::timeout(SESSION_END_WAIT, ended.wait_for(|ended| *ended))
+            .await
+            .is_err()
+        {
+            warn!(
+                agent_id,
+                "the old session did not end in time; starting the new one anyway"
+            );
+        }
     }
 }
 
@@ -1283,6 +1531,7 @@ pub async fn send(
     restart_if_superseded(daemon, &agent_id).await;
     let live = ensure_live(daemon, &agent_id)?;
     let _gate = live.gate.lock().await;
+    live.touch();
     if let Some(message_id) = &message_id {
         let mut state = live.state.lock().unwrap_or_else(|p| p.into_inner());
         if state.recent_sends.contains(message_id) {
@@ -1770,6 +2019,11 @@ pub fn providers_snapshot(daemon: &Daemon, compact: bool) -> Value {
                 .map(|m| {
                     let mut model = json!({"id": m.id, "label": m.label, "isDefault": m.is_default,
                                        "isSelectable": true});
+                    // `AgentModelDefinitionSchema` requires it; the compact
+                    // form, whose models sit under their entry, has none.
+                    if !compact {
+                        model["provider"] = info.id.clone().into();
+                    }
                     if let Some(d) = &m.description {
                         model["description"] = d.clone().into();
                     }

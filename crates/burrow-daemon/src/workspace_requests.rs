@@ -1471,6 +1471,7 @@ async fn create_initial_agent(
             client_message_id: input.client_message_id,
             images: images(input.images),
             system_prompt: input.config.system_prompt,
+            env: input.config.env.unwrap_or_default(),
             background: false,
             agent_id: Some(input.agent_id.unwrap_or_else(|| agent_id.to_string())),
             caller_agent_id: input.caller_agent_id,

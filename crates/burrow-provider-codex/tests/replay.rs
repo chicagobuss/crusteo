@@ -682,3 +682,45 @@ async fn settings_apply_to_the_next_turn() {
         ProviderEvent::TurnFailed { error, .. } if error == "usage limit reached"
     )));
 }
+
+#[tokio::test]
+async fn a_thread_another_app_server_still_writes_is_resumed_once_it_lets_go() {
+    let e = play(
+        include_str!("fixtures/resume_busy_writer.jsonl"),
+        Some("thr-old"),
+    )
+    .await;
+    assert!(
+        e.iter()
+            .any(|x| matches!(x, ProviderEvent::TurnCompleted { .. })),
+        "{e:?}"
+    );
+    assert!(
+        !e.iter()
+            .any(|x| matches!(x, ProviderEvent::TurnFailed { .. })),
+        "{e:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_thread_held_elsewhere_for_good_fails_the_turn_saying_so() {
+    let refused = r#"{"dir":"out","frame":{"id":"$ID","error":{"code":-32600,"message":"thread thr-old already has an active writer"}}}"#;
+    let resume =
+        r#"{"dir":"in","frame":{"method":"thread/resume","params":{"threadId":"thr-old"}}}"#;
+    let fixture = include_str!("fixtures/resume_busy_writer.jsonl");
+    let head: Vec<&str> = fixture.lines().take(12).collect();
+    let mut lines: Vec<&str> = head;
+    lines.push(refused);
+    // Every try after the first is refused too.
+    for _ in 0..4 {
+        lines.push(resume);
+        lines.push(refused);
+    }
+    let e = play(&lines.join("\n"), Some("thr-old")).await;
+    let failed = e.iter().find_map(|x| match x {
+        ProviderEvent::TurnFailed { error, .. } => Some(error.clone()),
+        _ => None,
+    });
+    let failed = failed.expect("the waiting turn fails");
+    assert!(failed.contains("Another Codex has it open"), "{failed}");
+}

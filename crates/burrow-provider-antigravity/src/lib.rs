@@ -125,7 +125,8 @@ pub fn info(models: Vec<Model>) -> ProviderInfo {
             streaming: true,
             session_persistence: true,
             dynamic_modes: true,
-            mcp_servers: true,
+            // A client's `mcpServers` are not passed to agy yet.
+            mcp_servers: false,
             reasoning_stream: true,
             tool_invocations: true,
             steer: false,
@@ -151,6 +152,7 @@ impl Provider for AntigravityProvider {
             binary: self.binary.clone(),
             cwd: spec.cwd.clone(),
             env: spec.env.clone(),
+            unset: spec.unset.clone(),
             trace_dir: self.trace_dir.clone(),
         };
         let settings = Settings {
@@ -180,6 +182,7 @@ struct CliLauncher {
     binary: PathBuf,
     cwd: String,
     env: Vec<(String, String)>,
+    unset: Vec<String>,
     trace_dir: Option<PathBuf>,
 }
 
@@ -217,6 +220,9 @@ impl Launcher for CliLauncher {
         command
             .args(arguments(&self.cwd, conversation, settings))
             .current_dir(&self.cwd);
+        for key in &self.unset {
+            command.env_remove(key);
+        }
         for (key, value) in &self.env {
             command.env(key, value);
         }

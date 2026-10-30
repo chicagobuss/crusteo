@@ -32,6 +32,8 @@ pub struct Row {
     pub use_before: Option<Window>,
     /// Which account, its binding window with its pace, and staleness.
     pub tip: String,
+    /// Its windows as the usage table lists them.
+    pub groups: Vec<Group>,
 }
 
 /// A gauge per pool with windows, in the snapshot's order.
@@ -75,6 +77,7 @@ fn row(pool: &Pool, pools: &[Pool], served_at_unix: i64, now: i64) -> Row {
         stale,
         retained,
         tip: window_tip(pool, binding, served_at_unix, now, stale),
+        groups: groups(pool, now),
         needle: pace.as_ref().and_then(crate::needle_degrees),
         // Stale numbers, or ones a failed read left, must not invite a
         // launch.
@@ -155,7 +158,8 @@ pub fn describe_window(window: &Window, now: i64, retained: bool) -> String {
     };
     format!(
         "{} {:.0}% left, {reset}{pace}",
-        window.label, window.remaining_percent,
+        short_name(window),
+        window.remaining_percent,
     )
 }
 
@@ -165,9 +169,144 @@ pub fn use_before_text(window: &Window, now: i64) -> String {
     format!(
         "{:.0}% of {} left, resets in {}.",
         window.remaining_percent,
-        window.label,
+        short_name(window),
         crate::format_reset(window.resets_at, now)
     )
+}
+
+/// A window named in a sentence, without the models it covers: "weekly",
+/// "Gemini Models (5h)", "Fable (weekly)".
+pub fn short_name(window: &Window) -> String {
+    match name_and_period(window) {
+        (name, period) if name.is_empty() => period,
+        (name, period) if period.is_empty() => name,
+        (name, period) => format!("{name} ({period})"),
+    }
+}
+
+/// A pool's windows as the usage table lists them: under a heading, a line
+/// per period.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Group {
+    /// The heading: "Gemini Models", "Fable", "All models". Empty when it
+    /// would only repeat the provider, for a pool that is all one group.
+    pub name: String,
+    /// The models its limits cover, when the source lists them and the
+    /// heading does not say: hover text, for whoever wants it.
+    pub models: String,
+    pub lines: Vec<Line>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Line {
+    /// "weekly", "5h", "session"; empty when nothing says.
+    pub period: String,
+    /// How hard it can be pushed: "1.8× room", "1.6× too fast", "unused".
+    pub pace: Option<String>,
+    /// How it is doing, which colours its bar.
+    pub severity: Severity,
+    pub window: Window,
+}
+
+/// "Gemini Models (weekly)" is the weekly line under "Gemini Models";
+/// Claude's weekly limit scoped to Fable is the weekly line under "Fable";
+/// an account-wide "session" or "weekly Global" is under no heading of its
+/// own, "All models" beside others. A name that says no period takes one
+/// from the window's length.
+pub fn groups(pool: &Pool, now: i64) -> Vec<Group> {
+    let mut groups: Vec<Group> = Vec::new();
+    for window in &pool.windows {
+        let (name, period) = name_and_period(window);
+        let models = if window.scope == name {
+            String::new()
+        } else {
+            window.scope.clone()
+        };
+        let line = Line {
+            period,
+            pace: crate::pace(window, now).and_then(|pace| crate::pace_brief(&pace)),
+            severity: crate::severity(window, now),
+            window: window.clone(),
+        };
+        match groups.iter_mut().find(|group| group.name == name) {
+            Some(group) => {
+                if group.models.is_empty() {
+                    group.models = models;
+                }
+                group.lines.push(line);
+            }
+            None => groups.push(Group {
+                name,
+                models,
+                lines: vec![line],
+            }),
+        }
+    }
+    if let [only] = groups.as_mut_slice() {
+        if only.name.eq_ignore_ascii_case(&pool.provider) {
+            only.name.clear();
+        }
+    } else {
+        for group in groups.iter_mut().filter(|group| group.name.is_empty()) {
+            group.name = "All models".into();
+        }
+    }
+    groups
+}
+
+fn name_and_period(window: &Window) -> (String, String) {
+    let label = match window.scope.as_str() {
+        "" => window.label.as_str(),
+        scope => window.label.strip_suffix(scope).unwrap_or(&window.label),
+    }
+    .trim();
+    let label = label.strip_suffix(" Global").unwrap_or(label);
+    if let Some((name, inner)) = label
+        .strip_suffix(')')
+        .and_then(|rest| rest.rsplit_once(" ("))
+    {
+        if is_period(inner) {
+            return (name.trim().to_string(), inner.to_lowercase());
+        }
+        if is_period(name) {
+            return (inner.trim().to_string(), name.to_lowercase());
+        }
+    }
+    if is_period(label) {
+        return (window.scope.clone(), label.to_lowercase());
+    }
+    (label.to_string(), period_of(window.window_seconds))
+}
+
+/// "weekly", "Session", "5h", "7d".
+fn is_period(text: &str) -> bool {
+    let text = text.trim().to_ascii_lowercase();
+    const WORDS: [&str; 8] = [
+        "session", "hourly", "daily", "weekly", "monthly", "day", "week", "month",
+    ];
+    WORDS.contains(&text.as_str())
+        || (text.len() > 1
+            && text.ends_with(['h', 'd', 'w', 'm'])
+            && text[..text.len() - 1].bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// A window's length as a period: "5h", "daily", "weekly", "monthly".
+fn period_of(seconds: f64) -> String {
+    const HOUR: f64 = 3_600.;
+    const DAY: f64 = 24. * HOUR;
+    if seconds <= 0. {
+        String::new()
+    } else if (seconds - DAY).abs() < 1. {
+        "daily".into()
+    } else if (seconds - 7. * DAY).abs() < 1. {
+        "weekly".into()
+    } else if (28. * DAY..=31. * DAY).contains(&seconds) {
+        "monthly".into()
+    } else if seconds < 2. * DAY {
+        format!("{}h", (seconds / HOUR).round())
+    } else {
+        format!("{}d", (seconds / DAY).round())
+    }
 }
 
 pub fn severity_name(severity: Severity) -> &'static str {
@@ -218,19 +357,35 @@ impl Row {
     /// The row as a phone gets it. Times are unix seconds, for the phone to
     /// count down itself; nothing in it changes with the clock alone except
     /// pace, severity and staleness. `served_at` is when its numbers were
-    /// read, the last successful read's when `retained`.
+    /// read, the last successful read's when `retained`. `groups` lists
+    /// the windows' keys as the usage table shows them.
     pub fn to_json(&self) -> Value {
         let binding = self.binding.as_ref().map(|w| w.key.as_str());
+        let lines = || self.groups.iter().flat_map(|group| &group.lines);
         let windows: Vec<Value> = (self.pool.windows.iter())
             .map(|window| {
+                let line = lines().find(|line| line.window.key == window.key);
                 json!({
                     "key": window.key,
                     "name": window.label,
+                    "short": short_name(window),
+                    "period": line.map(|line| line.period.as_str()),
+                    "pace": line.and_then(|line| line.pace.as_deref()),
+                    "severity": line.map(|line| severity_name(line.severity)),
                     "used": tenth(window.used_percent.clamp(0., 100.)),
                     "remaining": tenth(window.remaining_percent.clamp(0., 100.)),
                     "resets_at": window.resets_at.round() as i64,
                     "length": window.window_seconds.round() as i64,
                     "binding": Some(window.key.as_str()) == binding,
+                })
+            })
+            .collect();
+        let groups: Vec<Value> = (self.groups.iter())
+            .map(|group| {
+                json!({
+                    "name": group.name,
+                    "models": group.models,
+                    "keys": group.lines.iter().map(|line| &line.window.key).collect::<Vec<_>>(),
                 })
             })
             .collect();
@@ -253,11 +408,12 @@ impl Row {
             "needle": self.needle.map(|n| n.round() as i64),
             "binding": binding,
             "windows": windows,
+            "groups": groups,
             "use_before": null,
         });
         if let Some(window) = &self.use_before {
             out["use_before"] = json!({
-                "window": window.label,
+                "window": short_name(window),
                 "remaining": tenth(window.remaining_percent),
                 "resets_at": window.resets_at.round() as i64,
             });
@@ -282,6 +438,7 @@ mod tests {
             remaining_percent: remaining,
             window_seconds: seconds,
             resets_at: NOW as f64 + resets_in,
+            ..Default::default()
         }
     }
 
@@ -360,6 +517,111 @@ mod tests {
         assert!(rows[0].stale);
         assert!(rows[0].use_before.is_none());
         assert!(rows[0].tip.ends_with(STALE));
+    }
+
+    fn scoped(key: &str, label: &str, scope: &str, seconds: f64) -> Window {
+        Window {
+            label: match scope {
+                "" => label.into(),
+                scope => format!("{label} {scope}"),
+            },
+            scope: scope.into(),
+            ..window(key, 50., seconds, 3_600.)
+        }
+    }
+
+    fn listed(pool: &Pool) -> Vec<(String, Vec<String>, String)> {
+        (groups(pool, NOW).into_iter())
+            .map(|group| {
+                let periods = group.lines.iter().map(|l| l.period.clone()).collect();
+                (group.name, periods, group.models)
+            })
+            .collect()
+    }
+
+    fn named(name: &str, periods: &[&str], models: &str) -> (String, Vec<String>, String) {
+        let periods = periods.iter().map(|p| p.to_string()).collect();
+        (name.into(), periods, models.into())
+    }
+
+    /// The table names each group once and each window by its period,
+    /// with the models a group covers kept for hover.
+    #[test]
+    fn windows_are_listed_by_group_and_period() {
+        const WEEK: f64 = 604_800.;
+        const FIVE_HOURS: f64 = 18_000.;
+        let models = "Gemini Flash, Gemini Pro";
+        let others = "Claude Opus, Claude Sonnet, GPT-OSS";
+        let gemini = pool(
+            "gemini:personal",
+            "gemini",
+            "personal",
+            vec![
+                scoped("gemini-weekly", "Gemini Models (weekly)", models, WEEK),
+                scoped("gemini-5h", "Gemini Models (5h)", models, FIVE_HOURS),
+                scoped("3p-weekly", "Claude and GPT models (weekly)", others, WEEK),
+                scoped("3p-5h", "Claude and GPT models (5h)", others, FIVE_HOURS),
+                scoped("argon", "Gemini 4 Argon (weekly)", "", WEEK),
+            ],
+        );
+        assert_eq!(
+            listed(&gemini),
+            [
+                named("Gemini Models", &["weekly", "5h"], models),
+                named("Claude and GPT models", &["weekly", "5h"], others),
+                named("Gemini 4 Argon", &["weekly"], ""),
+            ]
+        );
+        let mut claude = pool(
+            "claude:work",
+            "claude",
+            "work",
+            vec![
+                scoped("session", "session", "", FIVE_HOURS),
+                scoped("weekly_all", "weekly", "", WEEK),
+                scoped("weekly_scoped:Fable", "weekly", "Fable", WEEK),
+            ],
+        );
+        claude.windows = crate::feed::shown_windows(claude.windows);
+        assert_eq!(
+            listed(&claude),
+            [
+                named("All models", &["session", "weekly"], ""),
+                named("Fable", &["weekly"], ""),
+            ]
+        );
+        let cursor = pool(
+            "cursor:personal",
+            "cursor",
+            "personal",
+            vec![
+                scoped("cursor_models", "Cursor Models", "", 2_678_400.),
+                scoped("on_demand", "On-demand spend", "", 2_678_400.),
+            ],
+        );
+        assert_eq!(
+            listed(&cursor),
+            [
+                named("Cursor Models", &["monthly"], ""),
+                named("On-demand spend", &["monthly"], ""),
+            ]
+        );
+        // One group named for its provider needs no heading.
+        let codex = pool(
+            "codex:personal",
+            "codex",
+            "personal",
+            vec![scoped("codex:primary", "codex", "", WEEK)],
+        );
+        assert_eq!(listed(&codex), [named("", &["weekly"], "")]);
+        let row = &rows(&merged(NOW, vec![gemini]), NOW)[0];
+        let json = row.to_json();
+        assert_eq!(
+            json["groups"][0]["keys"],
+            json!(["gemini-weekly", "gemini-5h"])
+        );
+        assert_eq!(json["windows"][1]["period"], "5h");
+        assert!(json["windows"][0]["pace"].as_str().unwrap().contains('×'));
     }
 
     /// As Paseo's card shows retained usage: the numbers, the failure, and

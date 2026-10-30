@@ -41,7 +41,7 @@ async fn tail(home: &Path, server_id: &str, agent_id: &str) -> (Value, Value) {
     let page = client
         .request(
             json!({"type": "fetch_agent_timeline_request", "agentId": agent_id,
-                        "direction": "tail", "limit": 40}),
+                        "direction": "tail", "limit": 40, "projection": "canonical"}),
         )
         .await
         .expect("timeline");

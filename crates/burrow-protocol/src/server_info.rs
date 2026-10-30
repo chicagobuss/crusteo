@@ -59,6 +59,13 @@ pub mod feature {
     /// Paseo 0.13's setup panel needs it ("Update the host to view
     /// workspace setup details").
     pub const WORKSPACE_SETUP_OBSERVATION: &str = "workspaceSetupObservation";
+    /// Timeline pages keep turns whole on request (`wholeTurns`), which
+    /// Paseo 0.14's app needs to fold finished turns.
+    pub const WHOLE_TURN_TIMELINE: &str = "wholeTurnTimeline";
+    /// `daemon.get_status.request`, which `paseo status` and `paseo daemon
+    /// status` need ("Update the host to read daemon status" without it).
+    /// Paseo's CLI then also asks for `daemon.get_pairing_offer`.
+    pub const DAEMON_STATUS_RPC: &str = "daemonStatusRpc";
     // P1
     pub const PROVIDERS_SNAPSHOT: &str = "providersSnapshot";
     pub const CREATION_LIFECYCLE: &str = "creationLifecycle";
@@ -88,6 +95,11 @@ pub const P0_FEATURES: &[&str] = &[
     // Paseo's app reads tools and models only from a host that says so: its
     // pickers stayed on "Loading..." without it.
     feature::PROVIDERS_SNAPSHOT,
+    feature::WHOLE_TURN_TIMELINE,
+    feature::DAEMON_STATUS_RPC,
+    // `set_agent_thinking_request`; `paseo agent update --thinking` refuses
+    // without the flag.
+    feature::AGENT_THINKING_UPDATE,
 ];
 
 /// `ServerInfoStatusPayloadSchema`.
@@ -145,6 +157,8 @@ mod tests {
         assert_eq!(payload["features"]["stableProjectIdentity"], true);
         assert_eq!(payload["features"]["projectRemove"], true);
         assert_eq!(payload["features"]["agentMessageProvenance"], true);
+        assert_eq!(payload["features"]["daemonStatusRpc"], true);
+        assert_eq!(payload["features"]["agentThinkingUpdate"], true);
         assert_eq!(payload["permissions"].as_array().unwrap().len(), 9);
     }
 }
