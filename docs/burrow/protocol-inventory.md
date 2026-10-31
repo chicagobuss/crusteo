@@ -36,7 +36,7 @@ outbound messages are `{type, payload}`. Both travel inside `{"type":"session","
 | `ping` (session) → `pong` | C→D | RPC ping with `clientSentAt`/`serverReceivedAt`/`serverSentAt` | | P0 | done |
 | `rpc_error` | D→C | Correlated failure: `requestId`, `requestType?`, `error`, `code` | yes | P0 | done |
 | `status{status:"error"}` | D→C | Uncorrelated failure (no `requestId` to answer) | | P0 | done |
-| `client_heartbeat` | C→D | Focus and visibility; drives `shouldNotify`. No reply | | P1 | done (ignored) |
+| `client_heartbeat` | C→D | Focus and visibility; drives `shouldNotify`. No reply | | P1 | done |
 | `activity_log` | D→C | Log lines (event subscription) | | P2 | |
 | `artifact` | D→C | Markdown/diff/image/code artifact | | P2 | |
 | `daemon.get_status.request` | C→D | Daemon status RPC | | P2 | |
@@ -219,7 +219,7 @@ state), `0x05` restore. Slots are per socket.
 
 | Message | Purpose | C | Tier |
 |---|---|---|---|
-| `schedule/create`, `schedule/list`, `schedule/inspect`, `schedule/logs`, `schedule/pause`, `schedule/resume`, `schedule/delete`, `schedule/run-once`, `schedule/update` | Cron-scheduled prompts to an agent or a new agent; replies `schedule/<op>/response` | | P2 |
+| `schedule/create`, `schedule/list`, `schedule/inspect`, `schedule/logs`, `schedule/pause`, `schedule/resume`, `schedule/delete`, `schedule/run-once`, `schedule/update` | Cron-scheduled prompts to an agent or a new agent; replies `schedule/<op>/response`. Done ([compatibility.md](compatibility.md#schedules)) | | P2 |
 | `loop/run`, `loop/list`, `loop/inspect`, `loop/logs`, `loop/stop` | `COMPAT(agentLoops)`: parse, but Paseo has no handler and never replies | | — |
 | `chat/create`, `chat/list`, `chat/inspect`, `chat/delete`, `chat/post`, `chat/read`, `chat/wait` | `COMPAT(chatRooms)`: same, no handler | | — |
 
@@ -229,7 +229,7 @@ state), `0x05` restore. Slots are per socket.
 |---|---|---|
 | Hub (7) | `hub.management.daemon.connect/get_status/disconnect/permissions.update.request`, `hub.execution.agent.create/validate.request`, `hub.execution.control.request`; events `hub.execution.agent.update`, `hub.execution.agent.stream` | P2 |
 | Voice (8 in, 9 out) | `voice_audio_chunk`, `abort_request`, `audio_played`, `set_voice_mode`, `dictation_stream_start/chunk/finish/cancel`; out `assistant_chunk`, `audio_output`, `transcription_result`, `voice_input_state`, `dictation_stream_ack/finish_accepted/partial/final/error` | P2 |
-| Push (2) | `register_push_token` (no reply), `push.unregister.request` | P2 |
+| Push (2) | `register_push_token` (no reply), `push.unregister.request`: done, pushes through Expo | P2 |
 | Plugins (15) | `plugin.catalog.get`, `plugin.list`, `plugin.logs.get`, `plugin.directory.install/inspect`, `plugin.source.install/status/update/update.preview/update.apply`, `plugin.reload/enable/disable/remove`, `plugin.rpc.invoke` | P2 |
 | Skills (5) | `agent.skills.get_status/reconcile/uninstall/save_selection/import_legacy_selection` | P2 |
 | Browser host (2 + 1) | `browser.host.register.request`, `browser.automation.execute.response` (client's reply to the daemon-initiated `browser.automation.execute.request`) | P2 |

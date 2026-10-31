@@ -42,6 +42,7 @@ pub struct Settings {
     pub mode: Option<String>,
     pub thinking: Option<String>,
     pub append_system_prompt: Option<String>,
+    pub mcp_servers: Vec<burrow_provider::McpServer>,
 }
 
 enum Turn {

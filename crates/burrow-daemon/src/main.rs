@@ -96,12 +96,31 @@ struct Args {
     /// Do not offer Cursor even when it is installed.
     #[arg(long)]
     no_cursor: bool,
+    /// OpenCode's CLI, run as `<bin> acp`. Defaults to `opencode` on PATH.
+    #[arg(long)]
+    opencode_bin: Option<PathBuf>,
+    /// Do not offer OpenCode even when it is installed.
+    #[arg(long)]
+    no_opencode: bool,
+    /// Google's Gemini CLI, run as `<bin> --acp`. Defaults to `gemini` on PATH.
+    #[arg(long)]
+    gemini_bin: Option<PathBuf>,
+    /// Do not offer Gemini even when it is installed.
+    #[arg(long)]
+    no_gemini: bool,
     /// Do not hold Paseo's daemon lock (`$PASEO_HOME/paseo.pid`, default
     /// `~/.paseo/paseo.pid`), by which Paseo's CLI finds a daemon without
     /// `--host`. Burrow holds it only when it listens on Paseo's port (its
     /// `config.json`'s, else 6767), and never takes it from a running Paseo.
     #[arg(long, env = "BURROW_NO_PASEO_LOCK")]
     no_paseo_lock: bool,
+    /// Where push notifications to Paseo's apps are sent. Defaults to
+    /// Expo's push service, where the apps register.
+    #[arg(long, env = "BURROW_PUSH_URL")]
+    push_url: Option<String>,
+    /// Send no push notifications to Paseo's apps.
+    #[arg(long, env = "BURROW_NO_PUSH")]
+    no_push: bool,
 }
 
 /// How long Burrow waits for its agents' CLIs to exit when it stops.
@@ -123,6 +142,16 @@ enum Subcommand {
         /// Print what would be imported and write nothing.
         #[arg(long)]
         dry_run: bool,
+    },
+    /// Speak MCP on stdio for an agent that takes only stdio servers,
+    /// forwarding to Burrow's agent tools; without them, a server with no
+    /// tools. Burrow hands agents this command itself; it is not for
+    /// running by hand.
+    McpBridge {
+        #[arg(long, env = "BURROW_MCP_URL")]
+        url: Option<String>,
+        #[arg(long, env = "BURROW_MCP_TOKEN", hide_env_values = true)]
+        token: Option<String>,
     },
 }
 
@@ -166,19 +195,29 @@ fn import_paseo(
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let args = Args::parse();
+    // Before logging starts: stdout is the bridge's protocol.
+    if let Some(Subcommand::McpBridge { url, token }) = &args.command {
+        let server = (url.clone().zip(token.clone()))
+            .map(|(url, token)| burrow_daemon::mcp::bridge::Server { url, token });
+        return tokio::task::spawn_blocking(move || burrow_daemon::mcp::bridge::run(server))
+            .await?
+            .context("bridging the agent tools");
+    }
     // Read before logging starts, so a deprecated name is reported after.
     let log = env::resolve("BURROW_LOG", |key| std::env::var_os(key));
     let filter = log
         .as_ref()
         .and_then(|(value, _)| value.to_str())
         .and_then(|value| EnvFilter::try_new(value).ok())
-        .unwrap_or_else(|| EnvFilter::new("info"));
+        // rmcp logs every tool call's handshake at info.
+        .unwrap_or_else(|| EnvFilter::new("info,rmcp=warn"));
     tracing_subscriber::fmt().with_env_filter(filter).init();
     if let Some((_, env::Source::Legacy(old))) = &log {
         env::warn_deprecated(old, "BURROW_LOG");
     }
-    let args = Args::parse();
-    let discoveries = discoveries(&args);
+    let state_home = args.home.clone().or_else(home::default_home);
+    let discoveries = discoveries(&args, state_home.as_deref());
     if let Some(Subcommand::ImportPaseo {
         from,
         home,
@@ -211,7 +250,7 @@ async fn main() -> anyhow::Result<()> {
     let worktrees_root = args
         .worktrees_root
         .or_else(|| env::var_os("BURROW_WORKTREES_ROOT").map(PathBuf::from));
-    let home = args.home.or_else(home::default_home);
+    let home = state_home;
     let server_id = match (args.server_id, &home) {
         (Some(id), _) => id,
         (None, Some(home)) => home::server_id(home)
@@ -234,6 +273,8 @@ async fn main() -> anyhow::Result<()> {
         allowed_origins: args.allowed_origins,
         timing: daemon::Timing::default(),
         worktrees_root,
+        push_url: (!args.no_push)
+            .then(|| (args.push_url).unwrap_or_else(|| burrow_daemon::push::EXPO_PUSH_URL.into())),
     };
     let daemon = Daemon::open(config).context("opening the state directory")?;
     burrow_daemon::discovery::start(&daemon, discoveries).await;
@@ -269,7 +310,7 @@ async fn main() -> anyhow::Result<()> {
 
 /// How to find each provider not turned off, at startup and whenever its
 /// CLI changes ([`burrow_daemon::discovery`]).
-fn discoveries(args: &Args) -> Vec<Discovery> {
+fn discoveries(args: &Args, home: Option<&std::path::Path>) -> Vec<Discovery> {
     let program = |binary: &Option<PathBuf>, name: &str| {
         binary.clone().unwrap_or_else(|| PathBuf::from(name))
     };
@@ -315,12 +356,15 @@ fn discoveries(args: &Args) -> Vec<Discovery> {
         let binary = args.agy_bin.clone();
         let cli = program(&binary, "agy");
         let id = burrow_provider_antigravity::catalog::PROVIDER_ID;
+        // agy loads the agent tools only from a plugin in its own folder.
+        let plugin = user_home().join(".gemini/config/plugins/burrow");
         found.push(Discovery::cli(
             id,
             cli,
             move || match AntigravityProvider::detect(binary.as_deref()) {
                 Ok(agy) => {
                     tracing::info!(version = agy.version(), "offering Antigravity");
+                    let agy = agy.with_plugin_dir(plugin.clone());
                     Some(Arc::new(agy) as Arc<dyn Provider>)
                 }
                 Err(reason) => {
@@ -333,11 +377,16 @@ fn discoveries(args: &Args) -> Vec<Discovery> {
     if !args.no_pi {
         let binary = args.pi_bin.clone();
         let cli = program(&binary, "pi");
+        // The extension that hands sessions the agent tools lives here.
+        let extensions = home.map(|home| home.join("pi"));
         found.push(Discovery::cli("pi", cli, move || {
-            let Some(pi) = PiProvider::detect(binary.as_deref()) else {
+            let Some(mut pi) = PiProvider::detect(binary.as_deref()) else {
                 tracing::info!("pi was not found; not offering it");
                 return None;
             };
+            if let Some(dir) = &extensions {
+                pi = pi.with_extension_dir(dir.clone());
+            }
             tracing::info!(version = ?pi.version(), "offering pi");
             // Its models come from pi itself. Wait a little for them, so the
             // snapshot has them, then let it finish.
@@ -353,20 +402,45 @@ fn discoveries(args: &Args) -> Vec<Discovery> {
             Some(Arc::new(pi) as Arc<dyn Provider>)
         }));
     }
-    if !args.no_cursor {
-        let binary = args.cursor_bin.clone();
-        let cli = program(&binary, "cursor-agent");
-        let id = burrow_provider_acp::cursor(binary.as_deref()).id;
+    type AcpConfig = fn(Option<&std::path::Path>) -> burrow_provider_acp::AgentConfig;
+    let acp: [(bool, Option<PathBuf>, &str, AcpConfig); 3] = [
+        (
+            args.no_cursor,
+            args.cursor_bin.clone(),
+            "cursor-agent",
+            burrow_provider_acp::cursor,
+        ),
+        (
+            args.no_opencode,
+            args.opencode_bin.clone(),
+            "opencode",
+            burrow_provider_acp::opencode,
+        ),
+        (
+            args.no_gemini,
+            args.gemini_bin.clone(),
+            "gemini",
+            burrow_provider_acp::gemini,
+        ),
+    ];
+    for (off, binary, default, config) in acp {
+        if off {
+            continue;
+        }
+        let cli = program(&binary, default);
+        let id = config(binary.as_deref()).id;
         found.push(Discovery::cli(id, cli, move || {
-            match AcpProvider::detect(burrow_provider_acp::cursor(binary.as_deref())) {
-                Some(cursor) => {
-                    tracing::info!(version = ?cursor.version(), "offering Cursor");
+            let config = config(binary.as_deref());
+            let label = config.label.clone();
+            match AcpProvider::detect(config) {
+                Some(agent) => {
+                    tracing::info!(version = ?agent.version(), "offering {label}");
                     // Its models and modes come from a probe session, as in Paseo.
-                    cursor.refresh_in_background();
-                    Some(Arc::new(cursor) as Arc<dyn Provider>)
+                    agent.refresh_in_background();
+                    Some(Arc::new(agent) as Arc<dyn Provider>)
                 }
                 None => {
-                    tracing::info!("Cursor's agent was not found; not offering it");
+                    tracing::info!("{label}'s CLI was not found; not offering it");
                     None
                 }
             }

@@ -323,7 +323,11 @@ fn last_assistant_text(store: &Store, agent_id: &str) -> String {
 
 /// `agent_attention_required`, for event subscribers.
 fn attention(daemon: &Daemon, agent: &AgentSnapshot, reason: AttentionReason) {
-    if agent.labels.contains_key("paseo.parent-agent-id") {
+    // A child agent, and an agent a schedule started (`notifyOnFinish:
+    // false` in Paseo), raise none.
+    if agent.labels.contains_key("paseo.parent-agent-id")
+        || agent.labels.contains_key(crate::schedules::SCHEDULE_LABEL)
+    {
         return;
     }
     let (reason_name, title, fallback) = match reason {
@@ -353,28 +357,40 @@ fn attention(daemon: &Daemon, agent: &AgentSnapshot, reason: AttentionReason) {
         body
     };
     let timestamp = clock::now_iso();
+    let notification = json!({
+        "title": title,
+        "body": body,
+        "data": {
+            "serverId": daemon.config.server_id,
+            "workspaceId": agent.workspace_id,
+            "agentId": agent.id,
+            "reason": reason_name,
+        },
+    });
+    // One present client shows it, or else the phones get a push; an
+    // error is never pushed.
+    let pushable = !matches!(reason, AttentionReason::Error);
+    let plan = daemon.clients.plan(&agent.id, pushable, clock::now_ms());
+    let mut payload = json!({
+        "agentId": agent.id,
+        "reason": reason_name,
+        "timestamp": timestamp,
+        "shouldNotify": false,
+        "notification": notification,
+    });
+    if let Some(connection) = plan.in_app {
+        payload[crate::subscriptions::NOTIFY_CONNECTION] = connection.into();
+    }
     publish(
         daemon,
         vec![StoreEvent::Session {
             kind: "agent_attention_required",
-            payload: json!({
-                "agentId": agent.id,
-                "reason": reason_name,
-                "timestamp": timestamp,
-                "shouldNotify": false,
-                "notification": {
-                    "title": title,
-                    "body": body,
-                    "data": {
-                        "serverId": daemon.config.server_id,
-                        "workspaceId": agent.workspace_id,
-                        "agentId": agent.id,
-                        "reason": reason_name,
-                    },
-                },
-            }),
+            payload,
         }],
     );
+    if let (true, Some(url)) = (plan.push, &daemon.config.push_url) {
+        crate::push::send_later(url.clone(), daemon.push_tokens.clone(), notification);
+    }
 }
 
 fn permission_summary(request: &Value) -> String {
@@ -816,6 +832,8 @@ fn ensure_live(daemon: &Arc<Daemon>, agent_id: &str) -> Result<Arc<Live>, String
             .map(str::to_string),
         env: agent_env(daemon, agent_id, &snapshot.cwd, provider_config.as_ref()),
         unset: AGENT_UNSET.iter().map(|key| key.to_string()).collect(),
+        // Paseo's tools, as `paseo`; providers that take MCP servers use it.
+        mcp_servers: crate::mcp::servers_for(daemon, agent_id),
     };
     // A session Burrow never recorded (started elsewhere): take its
     // conversation from the provider's own records, once.
@@ -1453,6 +1471,28 @@ pub async fn release_idle(daemon: &Arc<Daemon>, after: Duration) -> Vec<String> 
     released
 }
 
+/// `kill_agent` (Paseo's `closeAgent`): ends the agent's CLI, its turn
+/// with it. The agent stays, `closed`, and a later prompt resumes it.
+pub async fn close(daemon: &Arc<Daemon>, key: &str) -> Result<String, String> {
+    let agent_id = resolve(daemon, key)?;
+    if let Some(live) = daemon.agents.live(&agent_id) {
+        let _gate = live.gate.lock().await;
+        let _ = interrupt(&live).await;
+        let ended = live.ended.subscribe();
+        (daemon.agents.released.lock())
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(agent_id.clone(), ended);
+        daemon.agents.forget(&agent_id);
+        let _ = live.commands.send(Command::Shutdown);
+    }
+    update(daemon, &agent_id, |agent| {
+        agent.status = AgentStatus::Closed;
+        agent.active_turn = None;
+        agent.pending_permissions.clear();
+    });
+    Ok(agent_id)
+}
+
 /// Waits for the CLI of a session let go of for being idle to exit, so the
 /// one that resumes it does not find the session still held.
 async fn wait_released(daemon: &Daemon, agent_id: &str) {
@@ -1526,8 +1566,87 @@ pub async fn send(
     behavior: Option<&str>,
     source_agent: Option<&str>,
 ) -> Result<String, String> {
+    let from = match source_agent.filter(|s| !s.trim().is_empty()) {
+        Some(sender) => From::Agent(sender),
+        None => From::User,
+    };
+    deliver(daemon, key, text, message_id, images, behavior, from).await
+}
+
+/// A schedule's prompt, as Paseo's `formatSystemNotificationPrompt` sends
+/// it: steering a running turn, the provider gets it in a bare
+/// `<paseo-system>` envelope, and the timeline has it as a `heartbeat`
+/// call, as Paseo projects such a prompt.
+pub(crate) async fn send_system(
+    daemon: &Arc<Daemon>,
+    key: &str,
+    body: &str,
+) -> Result<String, String> {
+    deliver(
+        daemon,
+        key,
+        body,
+        None,
+        Vec::new(),
+        Some("steer"),
+        From::System,
+    )
+    .await
+}
+
+/// A notice that an agent finished, failed or needs permission, to the
+/// agent that asked to be told (Paseo's finish notifications): steering a
+/// running turn, from `child`, in an `agent-notification` envelope whose
+/// `event` is `finished`, `errored`, `permission-required` or `closed`.
+/// An archived recipient is left archived.
+pub(crate) async fn send_notice(
+    daemon: &Arc<Daemon>,
+    recipient: &str,
+    child: &str,
+    event: &str,
+    body: &str,
+) -> Result<String, String> {
+    let from = From::Notice { child, event };
+    deliver(
+        daemon,
+        recipient,
+        body,
+        None,
+        Vec::new(),
+        Some("steer"),
+        from,
+    )
+    .await
+}
+
+/// Who a prompt is from.
+#[derive(Clone, Copy)]
+enum From<'a> {
+    User,
+    /// Another agent, by id.
+    Agent(&'a str),
+    /// A notice about another agent (`event`).
+    Notice {
+        child: &'a str,
+        event: &'a str,
+    },
+    /// The daemon itself: a schedule firing.
+    System,
+}
+
+async fn deliver(
+    daemon: &Arc<Daemon>,
+    key: &str,
+    text: &str,
+    message_id: Option<String>,
+    images: Vec<Image>,
+    behavior: Option<&str>,
+    from: From<'_>,
+) -> Result<String, String> {
     let agent_id = resolve(daemon, key)?;
-    unarchive(daemon, &agent_id);
+    if !matches!(from, From::Notice { .. }) {
+        unarchive(daemon, &agent_id);
+    }
     restart_if_superseded(daemon, &agent_id).await;
     let live = ensure_live(daemon, &agent_id)?;
     let _gate = live.gate.lock().await;
@@ -1544,16 +1663,20 @@ pub async fn send(
     }
     let client_message_id = message_id.unwrap_or_else(ids::agent_id);
     let text = text.trim().to_string();
-    let (prompt, mut user_message) = match source_agent.filter(|s| !s.trim().is_empty()) {
-        Some(sender) => from_agent(daemon, sender, &client_message_id, &text),
-        None => (
+    let (prompt, mut user_message) = match from {
+        From::Agent(sender) => from_agent(daemon, sender, &client_message_id, &text, None),
+        From::Notice { child, event } => {
+            from_agent(daemon, child, &client_message_id, &text, Some(event))
+        }
+        From::System => from_system(&text),
+        From::User => (
             text.clone(),
             json!({"type": "user_message", "text": text,
                    "messageId": client_message_id, "clientMessageId": client_message_id}),
         ),
     };
     // Kept, unlike Paseo, so other clients can show them too.
-    if !images.is_empty() && source_agent.is_none() {
+    if !images.is_empty() && matches!(from, From::User) {
         let (keeper, kept) = (daemon.clone(), images.clone());
         let kept = tokio::task::spawn_blocking(move || keeper.attachments.keep(&kept))
             .await
@@ -1607,7 +1730,11 @@ pub async fn send(
     );
     record(daemon, &agent_id, Some(turn_id.clone()), user_message);
     update(daemon, &agent_id, |agent| {
-        if agent.title.is_none() && agent.last_user_message_at.is_none() {
+        // A schedule's prompt or a notice does not name the agent.
+        if agent.title.is_none()
+            && agent.last_user_message_at.is_none()
+            && matches!(from, From::User | From::Agent(_))
+        {
             agent.title = derive_title(&text);
         }
         agent.status = AgentStatus::Running;
@@ -1633,18 +1760,34 @@ pub async fn send(
 /// gets it in a `<paseo-system>` envelope naming the sender, so the agent
 /// knows it is not from its user, and the timeline has it as an
 /// `agent_message` call from the sender, which clients show as "From ...".
-/// Returns the provider's text and the timeline item.
-fn from_agent(daemon: &Daemon, sender: &str, message_id: &str, text: &str) -> (String, Value) {
+/// With an `event`, it is a notice about the sender (`agent-notification`),
+/// shown as "worker finished". Returns the provider's text and the
+/// timeline item.
+fn from_agent(
+    daemon: &Daemon,
+    sender: &str,
+    message_id: &str,
+    text: &str,
+    event: Option<&str>,
+) -> (String, Value) {
     let title = daemon
-        .read(|store| store.agent(sender).and_then(|agent| agent.title.clone()))
+        .read(|store| {
+            store
+                .find_agent(sender)
+                .and_then(|agent| agent.title.clone())
+        })
         .map(|title| title.trim().to_string())
         .filter(|title| !title.is_empty());
     let named = match &title {
         Some(title) => format!(" source-agent-title=\"{}\"", escape_xml(title)),
         None => String::new(),
     };
+    let (kind, attribute) = match event {
+        Some(event) => ("agent-notification", format!(" event=\"{event}\"")),
+        None => ("agent-message", String::new()),
+    };
     let envelope = format!(
-        "<paseo-system version=\"1\" kind=\"agent-message\" source-agent-id=\"{}\" message-id=\"{}\"{named}>\n{}\n</paseo-system>",
+        "<paseo-system version=\"1\" kind=\"{kind}\" source-agent-id=\"{}\" message-id=\"{}\"{named}{attribute}>\n{}\n</paseo-system>",
         escape_xml(sender),
         escape_xml(message_id),
         escape_xml(text),
@@ -1656,11 +1799,30 @@ fn from_agent(daemon: &Daemon, sender: &str, message_id: &str, text: &str) -> (S
     let item = json!({
         "type": "tool_call",
         "callId": format!("paseo-agent-message:{message_id}"),
-        "agentMessage": { "event": "message", "sender": from, "text": text },
+        "agentMessage": { "event": event.unwrap_or("message"), "sender": from, "text": text },
         "name": "agent_message",
         "status": "completed",
         "error": null,
         "detail": { "type": "plain_text", "text": text, "icon": "bot" },
+    });
+    (envelope, item)
+}
+
+/// A daemon's own prompt in Paseo's bare `<paseo-system>` envelope, and its
+/// timeline item, a `heartbeat` call named by the envelope's hash, as
+/// Paseo's `projectAgentMessage` makes it.
+fn from_system(body: &str) -> (String, Value) {
+    use sha2::Digest;
+    let envelope = format!("<paseo-system>\n{body}\n</paseo-system>");
+    let hash = sha2::Sha256::digest(envelope.as_bytes());
+    let hex: String = hash.iter().map(|byte| format!("{byte:02x}")).collect();
+    let item = json!({
+        "type": "tool_call",
+        "callId": format!("paseo-system:{hex}"),
+        "name": "heartbeat",
+        "status": "completed",
+        "error": null,
+        "detail": { "type": "plain_text", "text": body, "icon": "sparkles" },
     });
     (envelope, item)
 }
@@ -1790,6 +1952,8 @@ pub async fn archive(daemon: &Arc<Daemon>, key: &str) -> Result<String, String> 
         }
         ((), Vec::new())
     });
+    // Its schedules end, as Paseo's `completeForAgent`.
+    daemon.schedules.complete_for_agent(&agent_id);
     Ok(archived_at)
 }
 

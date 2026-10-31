@@ -74,6 +74,27 @@ pub struct Settings {
     pub mode: Option<String>,
     pub thinking: Option<String>,
     pub system_prompt: Option<String>,
+    pub mcp_servers: Vec<burrow_provider::McpServer>,
+}
+
+impl Settings {
+    /// The thread's `config` overrides: its MCP servers beside the user's
+    /// own, as Paseo's `buildCodexInnerConfig` sets them.
+    fn thread_config(&self) -> Option<Value> {
+        if self.mcp_servers.is_empty() {
+            return None;
+        }
+        let servers: serde_json::Map<String, Value> = (self.mcp_servers.iter())
+            .map(|server| {
+                let headers: serde_json::Map<String, Value> = (server.headers.iter())
+                    .map(|(name, value)| (name.clone(), value.clone().into()))
+                    .collect();
+                let config = json!({"url": server.url, "http_headers": headers});
+                (server.name.clone(), config)
+            })
+            .collect();
+        Some(json!({"mcp_servers": servers}))
+    }
 }
 
 /// What one of our requests was for.
@@ -999,6 +1020,9 @@ impl<L: Launcher> Session<L> {
         if let Some(prompt) = &self.settings.system_prompt {
             params["developerInstructions"] = prompt.clone().into();
         }
+        if let Some(config) = self.settings.thread_config() {
+            params["config"] = config;
+        }
         params["approvalsReviewer"] = preset.reviewer.into();
         self.request("thread/start", params, Request::ThreadStart);
     }
@@ -1009,6 +1033,9 @@ impl<L: Launcher> Session<L> {
         let mut params = json!({"threadId": self.thread, "excludeTurns": true});
         if let Some(prompt) = &self.settings.system_prompt {
             params["developerInstructions"] = prompt.clone().into();
+        }
+        if let Some(config) = self.settings.thread_config() {
+            params["config"] = config;
         }
         self.request("thread/resume", params, Request::ThreadResume);
     }

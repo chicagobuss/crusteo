@@ -13,6 +13,7 @@ mod workspace;
 
 pub use composer::bind_keys;
 pub use conversation::{Conversation, ConversationEvent};
+pub use screens::{SETTINGS_WIDTH, SettingsPane};
 pub use sidebar::{Sidebar, add_project};
 pub use terminal::TerminalView;
 pub use terminal::bind_keys as bind_terminal_keys;
@@ -27,7 +28,7 @@ use gpui_kit::prelude::FluentBuilder;
 
 use crate::app::{Core, Screen};
 use crate::theme::{palette, size};
-use screens::{HistoryScreen, HostsScreen, NewWorkspaceScreen, SettingsScreen};
+use screens::{HistoryScreen, HostsScreen, NewWorkspaceScreen};
 use workspace::WorkspaceView;
 
 pub fn build(core: &Core, window: &mut Window, cx: &mut App) -> AnyView {
@@ -41,7 +42,6 @@ pub struct PaseoLayout {
     workspace: Entity<WorkspaceView>,
     hosts: Option<Entity<HostsScreen>>,
     new_workspace: Option<Entity<NewWorkspaceScreen>>,
-    settings: Option<Entity<SettingsScreen>>,
     history: Option<Entity<HistoryScreen>>,
     last_screen: Screen,
     resizing: bool,
@@ -58,7 +58,6 @@ impl PaseoLayout {
             workspace,
             hosts: None,
             new_workspace: None,
-            settings: None,
             history: None,
             last_screen: Screen::Workspace,
             resizing: false,
@@ -105,13 +104,6 @@ impl Render for PaseoLayout {
                     view.update(cx, |view, cx| view.reload(cx));
                 }
                 view.cached_fill()
-            }
-            Screen::Settings => {
-                let core = self.core.clone();
-                self.settings
-                    .get_or_insert_with(|| cx.new(|cx| SettingsScreen::new(core, window, cx)))
-                    .clone()
-                    .cached_fill()
             }
         };
 

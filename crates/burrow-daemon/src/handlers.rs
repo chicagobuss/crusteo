@@ -33,14 +33,12 @@ use crate::store::Store;
 use crate::subscriptions::{AgentView, SESSION_EVENTS, Subscription, Subscriptions};
 use crate::{daemon_requests, workspace_requests};
 
-/// Session messages that never get a reply. Phase 0 accepts and ignores them.
+/// Session messages that never get a reply, and that Burrow ignores.
 const FIRE_AND_FORGET: &[&str] = &[
-    "client_heartbeat",
     "terminal_input",
     "unsubscribe_terminal_request",
     "unsubscribe_terminals_request",
     "unsubscribe_checkout_diff_request",
-    "register_push_token",
     "voice_audio_chunk",
     "abort_request",
     "audio_played",
@@ -104,13 +102,16 @@ pub fn handle(
             parse(&message).map(|r| timeline_subscription(subs, r))
         }
         "session.events.set_subscription.request" => {
-            parse(&message).and_then(|r| events_subscription(subs, r))
+            parse(&message).and_then(|r| events_subscription(daemon, subs, r))
         }
-        "subscription.release.request" => parse(&message).map(|r| release(subs, r)),
+        "subscription.release.request" => parse(&message).map(|r| release(daemon, subs, r)),
         "workspace.setup.subscribe.request" => {
             parse(&message).map(|r| setup_subscription(daemon, subs, r))
         }
         "file_explorer_request" => parse(&message).map(|r| read_file(daemon, r)),
+        "client_heartbeat" => parse(&message).map(|r| heartbeat(daemon, subs, r)),
+        "register_push_token" => parse(&message).map(|r| register_push(daemon, subs, r)),
+        "push.unregister.request" => parse(&message).map(|r| unregister_push(daemon, r)),
         other if agent_requests::KINDS.contains(&other) => {
             agent_requests::handle(daemon, other, &message, shape, late).ok_or(Failure::Schema)
         }
@@ -119,6 +120,9 @@ pub fn handle(
         }
         other if daemon_requests::KINDS.contains(&other) => {
             daemon_requests::handle(daemon, other, &message, late).ok_or(Failure::Schema)
+        }
+        other if crate::schedules::KINDS.contains(&other) => {
+            crate::schedules::handle(daemon, other, &message, late).ok_or(Failure::Schema)
         }
         other if FIRE_AND_FORGET.contains(&other) => Ok(Vec::new()),
         _ => Err(Failure::Schema),
@@ -784,12 +788,17 @@ fn timeline_subscription(
 struct EventsRequest {
     request_id: String,
     events: Vec<String>,
+    /// The client shows notifications for the events it asks for, so it
+    /// may be the one told to ([`crate::push`]).
     #[serde(default)]
-    #[allow(dead_code)]
     notifications: Option<bool>,
 }
 
-fn events_subscription(subs: &mut Subscriptions, request: EventsRequest) -> Outcome {
+fn events_subscription(
+    daemon: &Daemon,
+    subs: &mut Subscriptions,
+    request: EventsRequest,
+) -> Outcome {
     if !request
         .events
         .iter()
@@ -797,13 +806,74 @@ fn events_subscription(subs: &mut Subscriptions, request: EventsRequest) -> Outc
     {
         return Err(Failure::Schema);
     }
+    let notifying = request.notifications == Some(true)
+        && request
+            .events
+            .iter()
+            .any(|e| e == "agent_attention_required");
     let id = subs.open(Subscription::Events {
         events: request.events.into_iter().collect(),
     });
+    daemon.clients.subscribed(subs.connection(), &id, notifying);
     Ok(vec![session(
         "session.events.set_subscription.response",
         json!({"requestId": request.request_id, "subscriptionId": id}),
     )])
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Heartbeat {
+    #[serde(default)]
+    focused_agent_id: Option<String>,
+    last_activity_at: String,
+    app_visible: bool,
+}
+
+/// `client_heartbeat`: where the person is in the app, for notifications,
+/// and a renewal of the push token this client registered.
+fn heartbeat(daemon: &Daemon, subs: &Subscriptions, beat: Heartbeat) -> Vec<Value> {
+    let presence = crate::push::Presence {
+        app_visible: beat.app_visible,
+        focused_agent_id: beat.focused_agent_id.filter(|id| !id.is_empty()),
+        last_activity_ms: clock::parse_iso_ms(&beat.last_activity_at),
+    };
+    if let Some(token) = daemon.clients.heartbeat(subs.connection(), presence) {
+        daemon.push_tokens.renew(&token);
+    }
+    Vec::new()
+}
+
+#[derive(Deserialize)]
+struct PushToken {
+    token: String,
+}
+
+/// `register_push_token`: a phone's Expo token, leased for 48 hours.
+fn register_push(daemon: &Daemon, subs: &Subscriptions, push: PushToken) -> Vec<Value> {
+    let token = push.token.trim().to_string();
+    if !token.is_empty() {
+        daemon.push_tokens.renew(&token);
+        daemon.clients.set_token(subs.connection(), Some(token));
+    }
+    Vec::new()
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PushUnregister {
+    request_id: String,
+    token: String,
+}
+
+/// `push.unregister.request`: notifications turned off on the phone.
+fn unregister_push(daemon: &Daemon, request: PushUnregister) -> Vec<Value> {
+    daemon.push_tokens.revoke(&request.token);
+    daemon.clients.clear_token(&request.token);
+    vec![session(
+        "push.unregister.response",
+        json!({"requestId": request.request_id}),
+    )]
 }
 
 #[derive(Deserialize)]
@@ -850,8 +920,11 @@ fn read_file(daemon: &Daemon, request: FileExplorerRequest) -> Vec<Value> {
     )]
 }
 
-fn release(subs: &mut Subscriptions, request: ReleaseRequest) -> Vec<Value> {
+fn release(daemon: &Daemon, subs: &mut Subscriptions, request: ReleaseRequest) -> Vec<Value> {
     subs.release(&request.subscription_id);
+    daemon
+        .clients
+        .released(subs.connection(), &request.subscription_id);
     vec![session(
         "subscription.release.response",
         json!({"requestId": request.request_id, "subscriptionId": request.subscription_id}),

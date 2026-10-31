@@ -1,6 +1,6 @@
 //! The items the shell itself puts in its bars: the sidebar toggle, the
-//! layout switcher, attention counts and hosts. Others come from layouts
-//! and extensions.
+//! layout switcher, attention counts, History, the menu and hosts. Others
+//! come from layouts and extensions.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -14,7 +14,7 @@ use gpui_kit::gpui::{
 use gpui_kit::prelude::FluentBuilder as _;
 
 use super::{Side, TITLE, ToolbarItem};
-use crate::app::{Core, Screen};
+use crate::app::{Core, Pane, Screen};
 use crate::theme::{palette, size as sz};
 use crate::ui;
 
@@ -31,6 +31,7 @@ pub fn items(core: &Core, layouts: Vec<(&'static str, &'static str)>) -> Vec<Rc<
             counts: RefCell::new(None),
             recount_queued: Rc::new(Cell::new(false)),
         }),
+        Rc::new(History { core: core.clone() }),
         Rc::new(Help),
         Rc::new(Hosts { core: core.clone() }),
     ]
@@ -74,6 +75,74 @@ impl ToolbarItem for Help {
                         .separator()
                         .menu("About Crusteo", Box::new(crate::app_menu::About))
                 })
+                .into_any_element(),
+        )
+    }
+}
+
+/// Every agent in one list, the latest change first, sliding in from the
+/// edge nearest the button: see [`crate::state_list`].
+struct History {
+    core: Core,
+}
+
+impl ToolbarItem for History {
+    fn id(&self) -> &str {
+        "history"
+    }
+    fn title(&self) -> SharedString {
+        "History".into()
+    }
+    fn home(&self) -> (&'static str, Side) {
+        (TITLE, Side::Right)
+    }
+    // After the counts and extensions' items, before the menu.
+    fn order(&self) -> i32 {
+        80
+    }
+    fn render(&self, _: &mut Window, cx: &mut App) -> Option<AnyElement> {
+        let p = palette();
+        let open = self.core.nav.read(cx).pane_open(Pane::History);
+        let nav = self.core.nav.clone();
+        Some(
+            div()
+                .id("history-button")
+                .size(px(26.))
+                .rounded(px(6.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .when(open, |button| button.bg(p.surface3))
+                .hover(|button| button.bg(p.sidebar_hover))
+                .tooltip(|window, cx| {
+                    let keys = if cfg!(target_os = "macos") {
+                        "⇧⌘H"
+                    } else {
+                        "Ctrl+Shift+H"
+                    };
+                    gpui_kit::component::tooltip::Tooltip::new(format!(
+                        "Every agent, latest first ({keys})"
+                    ))
+                    .build(window, cx)
+                })
+                .child(ui::icon(
+                    "list-clock",
+                    16.,
+                    if open { p.foreground } else { p.extra_muted },
+                ))
+                // On mouse down, as the window's "any click closes it" is,
+                // so a second click closes it rather than opening it again.
+                .on_mouse_down(
+                    gpui_kit::gpui::MouseButton::Left,
+                    move |event, window, cx| {
+                        cx.stop_propagation();
+                        let side = crate::pane::side_at(event.position.x, window);
+                        nav.update(cx, |nav, cx| {
+                            nav.set_state_highlight(None, cx);
+                            nav.toggle_pane(Pane::History, side, cx);
+                        });
+                    },
+                )
                 .into_any_element(),
         )
     }
@@ -241,7 +310,13 @@ impl ToolbarItem for AttentionCounts {
         let p = palette();
         let counts = self.counts(cx);
         let nav = self.core.nav.read(cx);
-        let (singled, listed) = (nav.state_highlight, nav.state_list);
+        let (singled, listed) = (
+            nav.state_highlight,
+            nav.pane.and_then(|(pane, _)| match pane {
+                Pane::State(state) => Some(state),
+                _ => None,
+            }),
+        );
         Some(
             div()
                 .flex()
@@ -285,7 +360,7 @@ impl ToolbarItem for AttentionCounts {
                                         cx.stop_propagation();
                                         nav.update(cx, |nav, cx| {
                                             nav.set_state_highlight(None, cx);
-                                            nav.set_state_list((!listing).then_some(bucket), cx);
+                                            nav.toggle_pane(Pane::State(bucket), Side::Right, cx);
                                         });
                                     },
                                 )

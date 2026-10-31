@@ -1,4 +1,6 @@
-//! Full-pane screens reached from the sidebar: hosts, new workspace, settings.
+//! Full-pane screens reached from the sidebar: hosts, new workspace and
+//! history. Settings is here too, though it slides in over any layout in
+//! the pane of [`crate::pane`].
 
 use fleet::providers::Provider;
 use fleet::{Connection, HostConfig, HostId};
@@ -561,6 +563,10 @@ impl Render for NewWorkspaceScreen {
 
 // ---- settings ------------------------------------------------------------
 
+/// The narrowest a preference's words get before its control goes under
+/// them, in a pane too narrow for both side by side.
+const PREFERENCE_TEXT_MIN: f32 = 200.;
+
 fn preference_toggle(
     id: &'static str,
     title: &'static str,
@@ -616,12 +622,13 @@ fn preference_row(
     div()
         .p(px(16.))
         .flex()
+        .flex_wrap()
         .items_center()
         .gap(px(12.))
         .child(
             div()
                 .flex_1()
-                .min_w(px(0.))
+                .min_w(px(PREFERENCE_TEXT_MIN))
                 .flex()
                 .flex_col()
                 .gap(px(4.))
@@ -636,7 +643,10 @@ fn preference_row(
         .child(div().flex_shrink_0().child(control))
 }
 
-pub struct SettingsScreen {
+/// The Settings pane's width, where the window has room for it.
+pub const SETTINGS_WIDTH: f32 = 560.;
+
+pub struct SettingsPane {
     core: Core,
     /// The window border's color, chosen with a picker.
     border_color: Entity<ColorPickerState>,
@@ -650,7 +660,7 @@ const BORDER_COLORS: [u32; 10] = [
     0xffffff,
 ];
 
-impl SettingsScreen {
+impl SettingsPane {
     pub fn new(core: Core, window: &mut Window, cx: &mut Context<Self>) -> Self {
         cx.observe(&core.store, |_, _, cx| cx.notify()).detach();
         cx.observe(&core.nav, |_, _, cx| cx.notify()).detach();
@@ -706,7 +716,7 @@ impl SettingsScreen {
     }
 }
 
-impl Render for SettingsScreen {
+impl Render for SettingsPane {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette();
         let data_dir = crate::app::config::data_dir().display().to_string();
@@ -721,11 +731,19 @@ impl Render for SettingsScreen {
                 .border_color(p.border)
                 .child(
                     div()
-                        .w(px(160.))
+                        .w(px(120.))
+                        .flex_shrink_0()
                         .text_color(p.muted)
                         .child(label.to_string()),
                 )
-                .child(div().flex_1().text_color(p.foreground).child(value))
+                // Long values, such as a path, wrap within the pane.
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.))
+                        .text_color(p.foreground)
+                        .child(value),
+                )
         };
         let versions = hosts
             .iter()
@@ -960,14 +978,34 @@ impl Render for SettingsScreen {
                     )
                     .anchor(gpui_kit::gpui::Anchor::TopRight),
             ));
-        page("Settings").child(
+        let nav = self.core.nav.clone();
+        let header = div()
+            .h(px(40.))
+            .flex_shrink_0()
+            .px(px(16.))
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .border_b_1()
+            .border_color(p.border)
+            .child(ui::icon("settings", 14., p.muted))
+            .child(div().flex_1().text_color(p.foreground).child("Settings"))
+            .child(
+                Button::new("settings-close")
+                    .icon(gpui_kit::component::Icon::empty().path("icons/x.svg"))
+                    .ghost()
+                    .xsmall()
+                    .tooltip("Close (Esc)")
+                    .on_click(move |_, _, cx| nav.update(cx, |nav, cx| nav.set_pane(None, cx))),
+            );
+        div().size_full().flex().flex_col().child(header).child(
             div()
                 .id("settings-content")
                 .flex_1()
                 .min_h(px(0.))
                 .overflow_y_scroll()
                 .restrict_scroll_to_axis()
-                .p(px(24.))
+                .p(px(16.))
                 .flex()
                 .flex_col()
                 .gap(px(16.))

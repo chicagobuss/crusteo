@@ -52,6 +52,33 @@ pub struct Settings {
     pub capability_meta: Option<Value>,
     /// Extra environment for terminals the agent runs.
     pub env: Vec<(String, String)>,
+    /// MCP servers for the session (`mcpServers`), Burrow's own among them.
+    pub mcp_servers: Vec<burrow_provider::McpServer>,
+}
+
+/// `mcpServers` for `session/new`, `session/load` and `session/resume`: each
+/// server over HTTP when the agent says it takes HTTP servers
+/// (`mcpCapabilities.http`), else as its stdio command, which every ACP
+/// agent must support; one with neither is left out.
+pub fn mcp_servers(servers: &[burrow_provider::McpServer], capabilities: &Value) -> Value {
+    let pairs = |pairs: &[(String, String)]| -> Vec<Value> {
+        (pairs.iter())
+            .map(|(name, value)| json!({"name": name, "value": value}))
+            .collect()
+    };
+    let http = capabilities["mcpCapabilities"]["http"] == true;
+    let listed: Vec<Value> = (servers.iter())
+        .filter_map(|server| match (&server.stdio, http) {
+            (_, true) => Some(
+                json!({"type": "http", "name": server.name, "url": server.url,
+                                     "headers": pairs(&server.headers)}),
+            ),
+            (Some(stdio), false) => Some(json!({"name": server.name, "command": stdio.command,
+                                                "args": stdio.args, "env": pairs(&stdio.env)})),
+            (None, false) => None,
+        })
+        .collect();
+    Value::Array(listed)
 }
 
 /// The `initialize` request Paseo sends.
@@ -931,7 +958,9 @@ impl<L: Launcher> Session<L> {
             return self.new_session();
         };
         // Some agents insist on all three parameters, even an empty list.
-        let params = json!({"sessionId": session_id, "cwd": self.settings.cwd, "mcpServers": []});
+        let servers = mcp_servers(&self.settings.mcp_servers, &self.agent_capabilities);
+        let params =
+            json!({"sessionId": session_id, "cwd": self.settings.cwd, "mcpServers": servers});
         if self.agent_capabilities["loadSession"] == true {
             self.session_id = Some(session_id);
             self.replaying = true;
@@ -949,7 +978,8 @@ impl<L: Launcher> Session<L> {
     }
 
     fn new_session(&mut self) {
-        let params = json!({"cwd": self.settings.cwd, "mcpServers": []});
+        let servers = mcp_servers(&self.settings.mcp_servers, &self.agent_capabilities);
+        let params = json!({"cwd": self.settings.cwd, "mcpServers": servers});
         self.request("session/new", params, Pending::NewSession);
     }
 
@@ -1075,7 +1105,7 @@ impl<L: Launcher> Session<L> {
                     .then(|| self.tools.get(&id))
                     .flatten();
                 let snapshot = tools::merge(&id, update, previous);
-                let item = tools::item(&snapshot, &|t| self.terminals.view(t));
+                let item = tools::item(&snapshot, &self.mcp_names(), &|t| self.terminals.view(t));
                 if !self.tools.contains_key(&id) {
                     self.tool_order.push(id.clone());
                 }
@@ -1203,7 +1233,15 @@ impl<L: Launcher> Session<L> {
     }
 
     /// Calls still running when a turn ends are shown as canceled.
+    /// The names of the MCP servers the session gave the agent.
+    fn mcp_names(&self) -> Vec<String> {
+        (self.settings.mcp_servers.iter())
+            .map(|server| server.name.clone())
+            .collect()
+    }
+
     fn synthesize_canceled_tools(&mut self) {
+        let servers = self.mcp_names();
         for id in &self.tool_order {
             let Some(snapshot) = self.tools.get(id) else {
                 continue;
@@ -1211,7 +1249,7 @@ impl<L: Launcher> Session<L> {
             if tools::status(snapshot) != "running" {
                 continue;
             }
-            let mut item = tools::item(snapshot, &|t| self.terminals.view(t));
+            let mut item = tools::item(snapshot, &servers, &|t| self.terminals.view(t));
             item["status"] = "canceled".into();
             item["error"] = Value::Null;
             self.item(item);
@@ -1294,6 +1332,7 @@ impl<L: Launcher> Session<L> {
             &request_id,
             params,
             &snapshot,
+            &self.mcp_names(),
         );
         self.permissions.insert(
             request_id.clone(),
@@ -1386,6 +1425,36 @@ mod tests {
         assert_eq!(text_slice(raw, None, None), raw);
         assert_eq!(text_slice(raw, Some(2), Some(2)), "b\nc");
         assert_eq!(text_slice(raw, Some(3), None), "c\nd");
+    }
+
+    #[test]
+    fn servers_go_over_http_when_the_agent_takes_it_else_as_their_stdio_command() {
+        let server = burrow_provider::McpServer {
+            name: "paseo".into(),
+            url: "http://127.0.0.1:4100/mcp".into(),
+            headers: vec![("Authorization".into(), "Bearer t".into())],
+            stdio: Some(burrow_provider::StdioCommand {
+                command: "/usr/local/bin/burrow".into(),
+                args: vec!["mcp-bridge".into()],
+                env: vec![("BURROW_MCP_TOKEN".into(), "t".into())],
+            }),
+        };
+        let http = json!({"mcpCapabilities": {"http": true, "sse": true}});
+        assert_eq!(
+            mcp_servers(std::slice::from_ref(&server), &http),
+            json!([{"type": "http", "name": "paseo", "url": "http://127.0.0.1:4100/mcp",
+                    "headers": [{"name": "Authorization", "value": "Bearer t"}]}])
+        );
+        assert_eq!(
+            mcp_servers(std::slice::from_ref(&server), &json!({})),
+            json!([{"name": "paseo", "command": "/usr/local/bin/burrow", "args": ["mcp-bridge"],
+                    "env": [{"name": "BURROW_MCP_TOKEN", "value": "t"}]}])
+        );
+        let http_only = burrow_provider::McpServer {
+            stdio: None,
+            ..server
+        };
+        assert_eq!(mcp_servers(&[http_only], &json!({})), json!([]));
     }
 
     #[test]

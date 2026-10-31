@@ -170,6 +170,7 @@ impl Provider for CodexProvider {
             mode: spec.mode_id.clone(),
             thinking: spec.thinking_option_id.clone(),
             system_prompt: spec.system_prompt.clone(),
+            mcp_servers: spec.mcp_servers.clone(),
         };
         let catalog = self.catalog.clone();
         let resume = spec.resume.clone();

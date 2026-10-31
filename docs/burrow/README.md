@@ -16,7 +16,7 @@ It runs next to Paseo's daemon until it has proved as good or better. It uses it
 | [compatibility.md](compatibility.md) | Burrow and Paseo in each direction (Paseo's CLI and app on Burrow, crusteo on Paseo, moving state over), the versions checked and how; 0.12 and 0.13 changes; open incompatibilities |
 | [protocol-inventory.md](protocol-inventory.md) | Every protocol v1 message with Crusteo usage, priority tier and status; Paseo's on-disk state |
 
-## Status: runs Claude, Codex, pi, Antigravity and Cursor agents
+## Status: runs Claude, Codex, pi, Antigravity, Cursor, OpenCode and Gemini agents
 
 ### Working, and tested with Crusteo's `paseo-client` and `fleet`
 
@@ -73,6 +73,11 @@ It runs next to Paseo's daemon until it has proved as good or better. It uses it
   generic ACP client drives it. Its models and modes, tool calls, plans, permissions, interrupt and
   resume (`session/load`) work. Another ACP agent is one more configuration in
   `burrow-provider-acp`.
+- **OpenCode and Gemini:** `opencode acp` and `gemini --acp`, through the same ACP client
+  ([compatibility.md](compatibility.md#opencode-and-gemini-acp)).
+- **Agent tools:** Paseo's `paseo` MCP server, for Claude, Codex, pi, the ACP agents and
+  Antigravity, which gets it from a plugin Burrow keeps in `~/.gemini/config/plugins/burrow`
+  ([compatibility.md](compatibility.md#agent-tools-mcp)).
 
 ### Verified against a real model
 
@@ -102,7 +107,7 @@ restart ([compatibility.md](compatibility.md#cursor-acp)).
 ### Not yet
 
 Terminals, checking out pull requests and forge search, rewind and fork, provider subagents,
-`list_commands` content, notification targeting (`shouldNotify`), password auth. All of these
+`list_commands` content, password auth. All of these
 get Paseo's answer to an unknown request, or a refusal that says so.
 
 ## Crates
@@ -116,7 +121,7 @@ get Paseo's answer to an unknown request, or a refusal that says so.
 | `crates/burrow-provider-codex` | Codex through `codex app-server` (JSON-RPC over stdio). |
 | `crates/burrow-provider-pi` | pi in its JSONL RPC mode. |
 | `crates/burrow-provider-antigravity` | Antigravity's `agy` in stream-json print mode. |
-| `crates/burrow-provider-acp` | Agent Client Protocol agents over stdio JSON-RPC; Cursor's configuration. |
+| `crates/burrow-provider-acp` | Agent Client Protocol agents over stdio JSON-RPC; Cursor's, OpenCode's and Gemini's configurations. |
 
 ## Run it next to Paseo
 
@@ -138,6 +143,8 @@ Reef.
 | `--pi-bin`, `--no-pi` | `pi` on PATH | pi is offered when found, with the models it is configured with. |
 | `--agy-bin`, `--no-agy` | `agy` on PATH | Antigravity is offered when `agy` 1.1.15 or later is found. |
 | `--cursor-bin`, `--no-cursor` | `cursor-agent` on PATH | Cursor is offered when found, run as `<bin> acp`. |
+| `--opencode-bin`, `--no-opencode` | `opencode` on PATH | OpenCode is offered when found, run as `<bin> acp`. |
+| `--gemini-bin`, `--no-gemini` | `gemini` on PATH | Gemini CLI is offered when found, run as `<bin> --acp`. |
 | `--echo-provider` | off | A provider that answers from the prompt text, for trying clients without a model. |
 | `--server-id`, `--hostname`, `--advertise-version` | taken from home, the OS, and `<version>-burrow` | What `server_info` reports. |
 | `--seed-demo` | off | Adds a placeholder project and agent to an empty home. |
@@ -155,6 +162,9 @@ Other settings:
 - `BURROW_PI_TRACE=<dir>` does the same for each pi process. A recording contains pi's system
   prompt, with the user's skills and context files, so scrub it too.
 - `BURROW_ACP_TRACE=<dir>` does the same for each ACP agent session, Cursor's included.
+- `burrow mcp-bridge` is not for people: it is the stdio MCP server Burrow hands ACP agents that
+  take no HTTP servers, and Antigravity through its plugin, relaying to the agent tools with the
+  URL and token in its environment. Without them it is a server with no tools.
 - On SIGTERM or Ctrl-C the daemon stops its agents and flushes state.
 
 ## Move a host over from Paseo

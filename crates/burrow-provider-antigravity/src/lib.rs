@@ -3,6 +3,12 @@
 //! `antigravity-provider` plugin drives it. Agents show as `antigravity`,
 //! with the models `agy models` lists and one mode, `full-access`.
 //!
+//! agy reads MCP servers only from its own config and its plugins, so the
+//! agent tools come from a plugin Burrow keeps in agy's plugins folder
+//! (`burrow`, see [`AntigravityProvider::with_plugin_dir`]). It runs the
+//! stdio bridge, which finds Burrow's server and the agent's token in the
+//! environment Burrow gives agy; started any other way it has no tools.
+//!
 //! Set `BURROW_AGY_TRACE=<dir>` to record every frame each process
 //! exchanges with the CLI as JSONL (`{"dir":"in"|"out","frame":...}`).
 
@@ -21,10 +27,10 @@ use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 use burrow_provider::{
-    Capabilities, Model, Provider, ProviderError, ProviderInfo, Session as ProviderSession,
-    SessionSpec,
+    Capabilities, McpServer, Model, Provider, ProviderError, ProviderInfo,
+    Session as ProviderSession, SessionSpec,
 };
-use serde_json::Value;
+use serde_json::{Map, Value, json};
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
@@ -34,6 +40,11 @@ use crate::session::{Launcher, Session, Settings};
 /// How long `agy --version` and `agy models` may take (Paseo's limit).
 const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// The plugin's manifest, written once: a user who disables the plugin
+/// keeps it disabled.
+pub const PLUGIN_MANIFEST: &str = r#"{"name":"burrow","description":"Paseo's agent tools for agents Burrow runs; none otherwise.","disabled":false}
+"#;
+
 /// `agy`, found and version-checked, with the models it offers.
 #[derive(Debug, Clone)]
 pub struct AntigravityProvider {
@@ -42,6 +53,8 @@ pub struct AntigravityProvider {
     models: Arc<RwLock<Vec<Model>>>,
     refreshing: Arc<AtomicBool>,
     trace_dir: Option<PathBuf>,
+    /// Where the plugin is kept; without one, sessions get no MCP servers.
+    plugin_dir: Option<PathBuf>,
 }
 
 impl AntigravityProvider {
@@ -69,6 +82,7 @@ impl AntigravityProvider {
             models: Arc::default(),
             refreshing: Arc::default(),
             trace_dir: burrow_provider::env::var_os("BURROW_AGY_TRACE").map(PathBuf::from),
+            plugin_dir: None,
         };
         if let Err(err) = provider.refresh_models() {
             warn!(%err, "could not read Antigravity's models");
@@ -76,8 +90,35 @@ impl AntigravityProvider {
         Ok(provider)
     }
 
+    /// Keeps the plugin in `dir` (`~/.gemini/config/plugins/burrow`),
+    /// written when a session first needs it and whenever its servers'
+    /// commands change.
+    pub fn with_plugin_dir(mut self, dir: PathBuf) -> Self {
+        self.plugin_dir = Some(dir);
+        self
+    }
+
     pub fn version(&self) -> String {
         dotted(self.version)
+    }
+
+    /// Writes what of the plugin is missing or out of date. `false` when
+    /// there is no plugin to keep.
+    fn keep_plugin(&self, config: &Value) -> std::io::Result<bool> {
+        let Some(dir) = &self.plugin_dir else {
+            return Ok(false);
+        };
+        std::fs::create_dir_all(dir)?;
+        let manifest = dir.join("plugin.json");
+        if !manifest.exists() {
+            std::fs::write(&manifest, PLUGIN_MANIFEST)?;
+        }
+        let path = dir.join("mcp_config.json");
+        let text = format!("{}\n", serde_json::to_string_pretty(config)?);
+        if std::fs::read_to_string(&path).ok() != Some(text.clone()) {
+            std::fs::write(&path, text)?;
+        }
+        Ok(true)
     }
 
     fn refresh_models(&self) -> Result<(), String> {
@@ -125,7 +166,8 @@ pub fn info(models: Vec<Model>) -> ProviderInfo {
             streaming: true,
             session_persistence: true,
             dynamic_modes: true,
-            // A client's `mcpServers` are not passed to agy yet.
+            // A client's `mcpServers` are not passed on; agy gets Burrow's
+            // own through the plugin.
             mcp_servers: false,
             reasoning_stream: true,
             tool_invocations: true,
@@ -148,10 +190,18 @@ impl Provider for AntigravityProvider {
         self.refresh_models_if_missing();
         let (commands, command_rx) = mpsc::unbounded_channel();
         let (events, event_rx) = mpsc::unbounded_channel();
+        let mut env = spec.env.clone();
+        if let Some((config, server_env)) = plugin_mcp_config(&spec.mcp_servers) {
+            match self.keep_plugin(&config) {
+                Ok(true) => env.extend(server_env),
+                Ok(false) => {}
+                Err(error) => warn!(%error, "could not write agy's Burrow plugin; no agent tools"),
+            }
+        }
         let launcher = CliLauncher {
             binary: self.binary.clone(),
             cwd: spec.cwd.clone(),
-            env: spec.env.clone(),
+            env,
             unset: spec.unset.clone(),
             trace_dir: self.trace_dir.clone(),
         };
@@ -208,6 +258,23 @@ pub fn arguments(cwd: &str, conversation: Option<&str>, settings: &Settings) -> 
         args.extend(["--conversation".into(), conversation.into()]);
     }
     args
+}
+
+/// The plugin's `mcp_config.json` for the servers that have a stdio form,
+/// and the environment those commands need, which agy passes on to them.
+/// The file holds no token. `None` when no server has a stdio form.
+pub fn plugin_mcp_config(servers: &[McpServer]) -> Option<(Value, Vec<(String, String)>)> {
+    let mut entries = Map::new();
+    let mut env = Vec::new();
+    for server in servers {
+        let Some(stdio) = &server.stdio else {
+            continue;
+        };
+        let entry = json!({"command": stdio.command, "args": stdio.args});
+        entries.insert(server.name.clone(), entry);
+        env.extend(stdio.env.iter().cloned());
+    }
+    (!entries.is_empty()).then(|| (json!({"mcpServers": entries}), env))
 }
 
 impl Launcher for CliLauncher {
@@ -306,6 +373,61 @@ mod tests {
                 .ends_with("--model gemini-3.8-flash-low --conversation conv-1")
         );
         assert!(!resumed.iter().any(|a| a == "--mode" || a == "--effort"));
+    }
+
+    #[test]
+    fn the_plugin_runs_the_stdio_servers_and_keeps_their_tokens_out_of_the_file() {
+        let stdio = |token: &str| burrow_provider::StdioCommand {
+            command: "/usr/local/bin/burrow".into(),
+            args: vec!["mcp-bridge".into()],
+            env: vec![("BURROW_MCP_TOKEN".into(), token.into())],
+        };
+        let server = |stdio| McpServer {
+            name: "paseo".into(),
+            url: "http://127.0.0.1:1/mcp".into(),
+            headers: Vec::new(),
+            stdio,
+        };
+        let (config, env) = plugin_mcp_config(&[server(Some(stdio("t1")))]).unwrap();
+        assert_eq!(
+            config,
+            json!({"mcpServers": {"paseo": {
+                "command": "/usr/local/bin/burrow", "args": ["mcp-bridge"]}}})
+        );
+        assert_eq!(env, [("BURROW_MCP_TOKEN".to_string(), "t1".to_string())]);
+        assert!(plugin_mcp_config(&[server(None)]).is_none());
+
+        let dir =
+            std::env::temp_dir().join(format!("burrow-agy-{}", uuid::Uuid::new_v4().simple()));
+        let mut agy = AntigravityProvider {
+            binary: "agy".into(),
+            version: [1, 4, 11],
+            models: Arc::default(),
+            refreshing: Arc::default(),
+            trace_dir: None,
+            plugin_dir: None,
+        };
+        assert!(!agy.keep_plugin(&config).unwrap(), "no folder, no plugin");
+        agy = agy.with_plugin_dir(dir.clone());
+        assert!(agy.keep_plugin(&config).unwrap());
+        let written = std::fs::read_to_string(dir.join("mcp_config.json")).unwrap();
+        assert_eq!(serde_json::from_str::<Value>(&written).unwrap(), config);
+        // A plugin the user turned off stays off.
+        let disabled = PLUGIN_MANIFEST.replace("\"disabled\":false", "\"disabled\":true");
+        std::fs::write(dir.join("plugin.json"), &disabled).unwrap();
+        let (moved, _) = plugin_mcp_config(&[server(Some(burrow_provider::StdioCommand {
+            command: "/opt/burrow/bin/burrow".into(),
+            ..stdio("t2")
+        }))])
+        .unwrap();
+        agy.keep_plugin(&moved).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.join("plugin.json")).unwrap(),
+            disabled
+        );
+        let rewritten = std::fs::read_to_string(dir.join("mcp_config.json")).unwrap();
+        assert!(rewritten.contains("/opt/burrow/bin/burrow") && !rewritten.contains("t2"));
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

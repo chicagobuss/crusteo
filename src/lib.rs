@@ -10,6 +10,7 @@ pub mod fuel;
 pub mod help;
 pub mod layouts;
 pub mod needs_you;
+pub mod pane;
 pub mod popout;
 pub mod shell;
 pub mod state_list;

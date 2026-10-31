@@ -116,21 +116,34 @@ pub enum Subscription {
     },
 }
 
+/// In an `agent_attention_required` event, the connection told to show a
+/// notification ([`crate::push`]). Taken out before the event is sent.
+pub const NOTIFY_CONNECTION: &str = "\u{0}notifyConnection";
+
 #[derive(Debug, Default)]
 pub struct Subscriptions {
     by_id: HashMap<String, Subscription>,
     /// The client reads compact providers snapshots.
     compact_provider_snapshots: bool,
+    /// This socket, among every connection the daemon has had.
+    connection: u64,
 }
 
 impl Subscriptions {
     /// The subscriptions of a socket whose client reads compact providers
     /// snapshots, or not.
     pub fn for_client(compact_provider_snapshots: bool) -> Self {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         Self {
             compact_provider_snapshots,
+            connection: NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             ..Self::default()
         }
+    }
+
+    /// This socket's connection number.
+    pub fn connection(&self) -> u64 {
+        self.connection
     }
 
     pub fn open(&mut self, subscription: Subscription) -> String {
@@ -157,7 +170,9 @@ impl Subscriptions {
         let mut frames = Vec::new();
         for (id, subscription) in &mut self.by_id {
             let compact = self.compact_provider_snapshots;
-            if let Some(frame) = route_one(id, subscription, event, generation, compact) {
+            let connection = self.connection;
+            if let Some(frame) = route_one(id, subscription, event, generation, compact, connection)
+            {
                 frames.push(frame);
             }
         }
@@ -171,6 +186,7 @@ fn route_one(
     event: &StoreEvent,
     generation: &str,
     compact_snapshots: bool,
+    connection: u64,
 ) -> Option<Value> {
     // A subscription that includes background workspaces is sequenced in
     // their own generation, as its read was.
@@ -378,6 +394,9 @@ fn route_one(
             if events.contains(*kind) =>
         {
             let mut payload = object(payload.clone());
+            if let Some(chosen) = payload.remove(NOTIFY_CONNECTION) {
+                payload.insert("shouldNotify".into(), (chosen == connection).into());
+            }
             payload.insert("subscriptionId".into(), id.into());
             Some(session(kind, Value::Object(payload)))
         }

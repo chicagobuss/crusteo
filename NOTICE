@@ -27,6 +27,10 @@ directory-sync and timeline semantics, error codes and reply-naming rules,
 learned from Paseo's packages/protocol and packages/server and reimplemented
 in Rust. The timeline paging in crates/burrow-daemon/src/timeline.rs follows
 Paseo's selectProjectedTimelinePage. docs/burrow/ summarizes the protocol.
+The agent tools' catalogue in crates/burrow-daemon/src/mcp/paseo-tools-*.json
+(tool names, titles, descriptions and input schemas) is Paseo 0.14.0's own
+tools/list output, included unmodified; the handlers that serve it are
+reimplemented in Rust, as are Paseo's schedules and push notifications.
 Burrow is not affiliated with or endorsed by the Paseo project either.
 
 -------------------------------------------------------------------------------

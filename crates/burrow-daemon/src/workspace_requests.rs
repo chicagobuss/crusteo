@@ -1212,6 +1212,52 @@ async fn create_workspace(
     finish(daemon, reply, creation, agent)
 }
 
+/// A workspace for one run of a schedule that starts a new agent (Paseo's
+/// `createDirectoryWorkspace` and `createPaseoWorktreeWorkspace`): a new
+/// one for `cwd`, or for a new worktree of it. Returns its id and the
+/// folder the agent runs in.
+pub(crate) async fn workspace_for_run(
+    daemon: &Arc<Daemon>,
+    cwd: &str,
+    worktree: bool,
+    prompt: &str,
+) -> Result<(String, String), String> {
+    let source = if worktree {
+        json!({"kind": "worktree", "cwd": cwd})
+    } else {
+        json!({"kind": "directory", "path": cwd})
+    };
+    make_workspace(daemon, source, None, false, Some(prompt)).await
+}
+
+/// A new workspace from a `workspace.create` source (`{kind: "directory",
+/// path}` or `{kind: "worktree", cwd, action, …}`), as the request makes
+/// one, for the agent tools and schedules. Returns its id and the folder
+/// an agent in it runs in.
+pub(crate) async fn make_workspace(
+    daemon: &Arc<Daemon>,
+    source: Value,
+    title: Option<&str>,
+    background: bool,
+    prompt: Option<&str>,
+) -> Result<(String, String), String> {
+    let request: CreateWorkspace = serde_json::from_value(json!({
+        "requestId": "tool", "source": source, "title": title, "background": background,
+        "firstAgentContext": {"prompt": prompt},
+    }))
+    .map_err(|err| err.to_string())?;
+    let made = provision(daemon, &request, &crate::ids::workspace_id())
+        .await
+        .map_err(|failure| failure.message)?;
+    if let Some(worktree) = &made.worktree {
+        start_workspace_setup(daemon, worktree);
+    }
+    let directory = describe(daemon, &made.workspace_id)
+        .map(|w| w.workspace_directory)
+        .unwrap_or(made.cwd);
+    Ok((made.workspace_id, directory))
+}
+
 /// What [`finish`] needs to answer and keep the reply.
 struct Reply {
     request_id: String,

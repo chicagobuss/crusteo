@@ -1356,10 +1356,11 @@ fn footer(core: &Core, cx: &mut Context<Sidebar>) -> impl IntoElement {
         )
         .child(
             icon_button("footer-settings", "settings").on_click(cx.listener(
-                |this, _: &ClickEvent, _, cx| {
-                    this.core
-                        .nav
-                        .update(cx, |nav, cx| nav.show(Screen::Settings, cx));
+                |this, event: &ClickEvent, window, cx| {
+                    let side = crate::pane::side_at(event.position().x, window);
+                    this.core.nav.update(cx, |nav, cx| {
+                        nav.set_pane(Some((crate::app::Pane::Settings, side)), cx)
+                    });
                 },
             )),
         )

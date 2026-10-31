@@ -109,6 +109,7 @@ impl Provider for ClaudeProvider {
             mode: spec.mode_id.clone(),
             thinking: spec.thinking_option_id.clone(),
             append_system_prompt: spec.system_prompt.clone(),
+            mcp_servers: spec.mcp_servers.clone(),
         };
         let session = Session::new(launcher, settings, spec.resume.clone(), events);
         tokio::spawn(session.run(command_rx));
@@ -175,10 +176,29 @@ pub fn arguments(resume: Option<&str>, settings: &Settings) -> Vec<String> {
     if let Some(mode) = settings.mode.as_deref().filter(|m| *m != "default") {
         args.extend(["--permission-mode".into(), mode.into()]);
     }
+    if !settings.mcp_servers.is_empty() {
+        args.extend(["--mcp-config".into(), mcp_config(&settings.mcp_servers)]);
+    }
     if let Some(resume) = resume {
         args.push(format!("--resume={resume}"));
     }
     args
+}
+
+/// `--mcp-config`'s inline JSON, as the Agent SDK passes it: the servers
+/// join those of the user's own settings.
+fn mcp_config(servers: &[burrow_provider::McpServer]) -> String {
+    let servers: serde_json::Map<String, Value> = servers
+        .iter()
+        .map(|server| {
+            let headers: serde_json::Map<String, Value> = (server.headers.iter())
+                .map(|(name, value)| (name.clone(), value.clone().into()))
+                .collect();
+            let config = json!({"type": "http", "url": server.url, "headers": headers});
+            (server.name.clone(), config)
+        })
+        .collect();
+    json!({"mcpServers": servers}).to_string()
 }
 
 /// What a Claude Code session sets for its children. A Burrow started from
@@ -330,12 +350,38 @@ mod tests {
     }
 
     #[test]
+    fn mcp_servers_go_in_as_the_sdks_inline_config() {
+        let settings = Settings {
+            mcp_servers: vec![burrow_provider::McpServer {
+                name: "paseo".into(),
+                url: "http://127.0.0.1:41234/mcp".into(),
+                headers: vec![("Authorization".into(), "Bearer t0ken".into())],
+                stdio: None,
+            }],
+            ..Settings::default()
+        };
+        let args = arguments(None, &settings);
+        let at = args
+            .iter()
+            .position(|a| a == "--mcp-config")
+            .expect("the flag");
+        let config: Value = serde_json::from_str(&args[at + 1]).unwrap();
+        assert_eq!(
+            config,
+            json!({"mcpServers": {"paseo": {"type": "http", "url": "http://127.0.0.1:41234/mcp",
+                "headers": {"Authorization": "Bearer t0ken"}}}})
+        );
+        assert!(!arguments(None, &Settings::default()).contains(&"--mcp-config".to_string()));
+    }
+
+    #[test]
     fn arguments_follow_the_sdk() {
         let settings = Settings {
             model: Some("claude-haiku-4-5".into()),
             mode: Some("default".into()),
             thinking: Some("high".into()),
             append_system_prompt: None,
+            mcp_servers: Vec::new(),
         };
         let args = arguments(Some("abc"), &settings);
         let joined = args.join(" ");

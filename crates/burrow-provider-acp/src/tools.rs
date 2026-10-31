@@ -66,9 +66,46 @@ pub fn status(snapshot: &Snapshot) -> &'static str {
     }
 }
 
-/// The `tool_call` timeline item for a snapshot. `terminal` resolves a
-/// client terminal id to what it has shown.
-pub fn item(snapshot: &Snapshot, terminal: &dyn Fn(&str) -> Option<TerminalView>) -> Value {
+/// A call to an MCP server's tool as `mcp__<server>__<tool>`, the name
+/// Claude and Codex calls have, so a client shows Paseo's tools as its own.
+/// ACP has no field for it, so it is read from how each agent reports one:
+/// Cursor's `rawInput`, Gemini's title `<tool> (<server> MCP Server)` and
+/// OpenCode's title `<server>_<tool>`, for a server the session was given
+/// (`servers`). Paseo names them all by their kind, `other`.
+pub fn mcp_name(snapshot: &Snapshot, servers: &[String]) -> Option<String> {
+    if snapshot.kind.as_deref().is_some_and(|kind| kind != "other") {
+        return None;
+    }
+    let input = record(snapshot.raw_input.as_ref());
+    let named = |key| string(input, &[key]).filter(|s| !s.is_empty());
+    let (server, tool) = match (named("providerIdentifier"), named("toolName")) {
+        (Some(server), Some(tool)) => (server, tool),
+        _ => {
+            let title = snapshot.title.trim();
+            let gemini = (title.strip_suffix(" MCP Server)"))
+                .and_then(|rest| rest.split_once(" ("))
+                .map(|(tool, server)| (server.to_string(), tool.to_string()));
+            let opencode = || {
+                servers.iter().find_map(|server| {
+                    let tool = title.strip_prefix(server.as_str())?.strip_prefix('_')?;
+                    Some((server.clone(), tool.to_string()))
+                })
+            };
+            gemini.or_else(opencode)?
+        }
+    };
+    let plain = |s: &str| !s.is_empty() && !s.contains(char::is_whitespace);
+    (plain(&server) && plain(&tool)).then(|| format!("mcp__{server}__{tool}"))
+}
+
+/// The `tool_call` timeline item for a snapshot. `servers` are the
+/// session's MCP servers ([`mcp_name`]); `terminal` resolves a client
+/// terminal id to what it has shown.
+pub fn item(
+    snapshot: &Snapshot,
+    servers: &[String],
+    terminal: &dyn Fn(&str) -> Option<TerminalView>,
+) -> Value {
     let status = status(snapshot);
     let mut metadata = Map::new();
     if let Some(kind) = &snapshot.kind {
@@ -83,12 +120,43 @@ pub fn item(snapshot: &Snapshot, terminal: &dyn Fn(&str) -> Option<TerminalView>
     json!({
         "type": "tool_call",
         "callId": snapshot.id,
-        "name": snapshot.kind.clone().unwrap_or_else(|| snapshot.title.clone()),
-        "detail": detail(snapshot, terminal),
+        "name": name(snapshot, servers),
+        "detail": call_detail(snapshot, servers, terminal),
         "metadata": metadata,
         "status": status,
         "error": error,
     })
+}
+
+/// A call's name: an MCP tool's own, else its kind or title, as Paseo's.
+fn name(snapshot: &Snapshot, servers: &[String]) -> String {
+    mcp_name(snapshot, servers)
+        .or_else(|| snapshot.kind.clone())
+        .unwrap_or_else(|| snapshot.title.clone())
+}
+
+/// A call's detail: an MCP call's as Claude's are (the tool's arguments and
+/// `{output}`), so a client shows it as it shows theirs; else [`detail`].
+fn call_detail(
+    snapshot: &Snapshot,
+    servers: &[String],
+    terminal: &dyn Fn(&str) -> Option<TerminalView>,
+) -> Value {
+    if mcp_name(snapshot, servers).is_none() {
+        return detail(snapshot, terminal);
+    }
+    let input = record(snapshot.raw_input.as_ref());
+    // Cursor wraps the arguments in `args`.
+    let arguments = (input.filter(|input| input.contains_key("providerIdentifier")))
+        .and_then(|input| input.get("args"))
+        .or(snapshot.raw_input.as_ref())
+        .cloned()
+        .unwrap_or(json!({}));
+    let output = content_text(snapshot.content.as_deref())
+        .map(|text| serde_json::from_str(&text).unwrap_or(Value::String(text)))
+        .or_else(|| snapshot.raw_output.clone())
+        .map(|output| json!({"output": output}));
+    json!({"type": "unknown", "input": arguments, "output": output})
 }
 
 /// Inserts `value` under `key` when it is there (JavaScript's `undefined`
@@ -387,12 +455,13 @@ pub fn is_chooser(options: &[Value]) -> bool {
 }
 
 /// The `AgentPermissionRequest` for a `session/request_permission`, with
-/// Paseo's id (`request_id`).
+/// Paseo's id (`request_id`), named as [`item`] names the call.
 pub fn permission_request(
     provider: &str,
     request_id: &str,
     params: &Value,
     snapshot: &Snapshot,
+    servers: &[String],
 ) -> Value {
     let options = params["options"].as_array().cloned().unwrap_or_default();
     let kind = if snapshot.kind.as_deref() == Some("switch_mode") {
@@ -413,7 +482,7 @@ pub fn permission_request(
     };
     let detail = match chooser_text {
         Some(text) => json!({"type": "plain_text", "label": title, "text": text, "icon": "wrench"}),
-        None => detail(snapshot, &|_| None),
+        None => call_detail(snapshot, servers, &|_| None),
     };
     let actions: Vec<Value> = options
         .iter()
@@ -425,7 +494,7 @@ pub fn permission_request(
     json!({
         "id": request_id,
         "provider": provider,
-        "name": snapshot.kind.clone().unwrap_or_else(|| snapshot.title.clone()),
+        "name": name(snapshot, servers),
         "kind": kind,
         "title": title,
         "detail": detail,
@@ -487,7 +556,7 @@ mod tests {
         );
         assert_eq!(next.title, "Run ls");
         assert_eq!(next.kind.as_deref(), Some("execute"));
-        let item = item(&next, &none);
+        let item = item(&next, &[], &none);
         assert_eq!(item["name"], "execute");
         assert_eq!(item["status"], "completed");
         assert_eq!(
@@ -526,7 +595,7 @@ mod tests {
             &json!({"title": "Mystery", "status": "failed", "rawOutput": {"error": "boom"}}),
             None,
         );
-        let item = item(&failed, &none);
+        let item = item(&failed, &[], &none);
         assert_eq!(item["name"], "Mystery");
         assert_eq!(item["error"], json!({"message": "boom"}));
         assert_eq!(item["detail"]["type"], "unknown");
@@ -558,7 +627,7 @@ mod tests {
             {"optionId": "reject-once", "name": "Reject", "kind": "reject_once"},
         ]});
         let snapshot = merge("c1", &params["toolCall"], None);
-        let request = permission_request("cursor", "p1", &params, &snapshot);
+        let request = permission_request("cursor", "p1", &params, &snapshot, &[]);
         assert_eq!(request["kind"], "tool");
         assert_eq!(request["name"], "execute");
         assert_eq!(request["actions"][2]["behavior"], "deny");
@@ -581,5 +650,61 @@ mod tests {
             "an action of the other behaviour is refused"
         );
         assert!(!is_chooser(options));
+    }
+
+    #[test]
+    fn mcp_calls_are_named_by_server_and_tool_however_the_agent_reports_them() {
+        let servers = ["paseo".to_string()];
+        let named =
+            |update: Value| item(&merge("m", &update, None), &servers, &none)["name"].clone();
+        // Cursor: the call is pending as `MCP: tool`, then named in rawInput.
+        let pending = merge(
+            "m",
+            &json!({"kind": "other", "title": "MCP: tool", "rawInput": {}}),
+            None,
+        );
+        let cursor = merge(
+            "m",
+            &json!({"title": "paseo: list_agents", "rawInput": {"args": {"serverId": "srv_1"},
+                    "providerIdentifier": "paseo", "toolName": "list_agents"}}),
+            Some(&pending),
+        );
+        let cursor_item = item(&cursor, &servers, &none);
+        assert_eq!(cursor_item["name"], "mcp__paseo__list_agents");
+        assert_eq!(
+            cursor_item["detail"],
+            json!({"type": "unknown", "input": {"serverId": "srv_1"}, "output": null})
+        );
+        // A result as text, as OpenCode and Gemini send it, is the output.
+        let done = merge(
+            "m",
+            &json!({"status": "completed", "content": [{"type": "content",
+                    "content": {"type": "text", "text": "agents_count=0\n\n{}"}}]}),
+            Some(&cursor),
+        );
+        assert_eq!(
+            item(&done, &servers, &none)["detail"]["output"],
+            json!({"output": "agents_count=0\n\n{}"})
+        );
+        let params = json!({"toolCall": {"toolCallId": "m", "title": "paseo-list_agents: list_agents"},
+                            "options": []});
+        let request = permission_request("acp", "p", &params, &cursor, &servers);
+        assert_eq!(request["name"], "mcp__paseo__list_agents");
+        // Gemini and OpenCode name it in the title.
+        let gemini = named(json!({"kind": "other", "title": "list_hosts (paseo MCP Server)"}));
+        assert_eq!(gemini, "mcp__paseo__list_hosts");
+        let opencode = named(json!({"kind": "other", "title": "paseo_list_hosts"}));
+        assert_eq!(opencode, "mcp__paseo__list_hosts");
+        // Anything else keeps Paseo's name.
+        assert_eq!(
+            named(json!({"kind": "other", "title": "github_list_issues"})),
+            "other"
+        );
+        assert_eq!(
+            named(json!({"kind": "execute", "title": "paseo_list_hosts"})),
+            "execute"
+        );
+        let spaced = named(json!({"kind": "other", "title": "Read the (big) MCP Server)"}));
+        assert_eq!(spaced, "other");
     }
 }

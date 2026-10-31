@@ -1,0 +1,1303 @@
+{
+  "tools": [
+    {
+      "name": "list_hosts",
+      "title": "List hosts",
+      "description": "Discover this host and registered destination hosts for fleet tools.",
+      "inputSchema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "properties": {}
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "create_workspace",
+      "title": "Create workspace",
+      "description": "Create a workspace using an existing local checkout or a new Paseo-managed worktree.",
+      "inputSchema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "properties": {
+          "isolation": {
+            "type": "string",
+            "enum": [
+              "local",
+              "worktree"
+            ]
+          },
+          "path": {
+            "description": "Local directory or source checkout. Defaults to your current workspace. Local isolation adopts an existing directory and never creates one.",
+            "type": "string"
+          },
+          "projectId": {
+            "description": "Existing project id to own the workspace.",
+            "type": "string"
+          },
+          "title": {
+            "type": "string",
+            "minLength": 1
+          },
+          "background": {
+            "description": "True hides the workspace from default lists and the sidebar while its contents remain durable and accessible; omit background to inherit your current workspace\u2019s value (false without a caller), and override it only when the user explicitly asks.",
+            "type": "boolean"
+          },
+          "mode": {
+            "description": "Worktree creation mode. Defaults to branch-off.",
+            "type": "string",
+            "enum": [
+              "branch-off",
+              "checkout-branch",
+              "checkout-pr"
+            ]
+          },
+          "worktreeSlug": {
+            "type": "string",
+            "minLength": 1
+          },
+          "branchName": {
+            "description": "New branch name for branch-off mode.",
+            "type": "string",
+            "minLength": 1
+          },
+          "baseBranch": {
+            "description": "Base ref for branch-off mode.",
+            "type": "string",
+            "minLength": 1
+          },
+          "branch": {
+            "description": "Existing branch for checkout-branch mode.",
+            "type": "string",
+            "minLength": 1
+          },
+          "prNumber": {
+            "description": "Pull request or change request number for checkout-pr mode.",
+            "type": "integer",
+            "exclusiveMinimum": 0,
+            "maximum": 9007199254740991
+          },
+          "forge": {
+            "description": "Forge for checkout-pr mode. Defaults to the source checkout.",
+            "type": "string",
+            "minLength": 1
+          },
+          "serverId": {
+            "description": "Destination server ID from list_hosts; omit for this host.",
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "isolation"
+        ]
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "list_workspaces",
+      "title": "List workspaces",
+      "description": "List active workspaces.",
+      "inputSchema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "properties": {
+          "includeBackground": {
+            "default": false,
+            "type": "boolean"
+          },
+          "serverId": {
+            "description": "Destination server ID from list_hosts; omit for this host.",
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "archive_workspace",
+      "title": "Archive workspace",
+      "description": "Archive a workspace and everything it owns.",
+      "inputSchema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "properties": {
+          "workspaceId": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "workspaceId"
+        ]
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "create_agent",
+      "title": "Create agent",
+      "description": "Create an agent. Agent-scoped creation defaults to your workspace and creates your subagent. Top-level creation without workspaceId creates a new local workspace. Requires provider/model (for example codex/gpt-5.4) and an initial prompt. Do not guess; call list_providers and list_models first if uncertain.",
+      "inputSchema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "properties": {
+          "title": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 60,
+            "description": "Short descriptive title (<= 60 chars) summarizing the agent's focus."
+          },
+          "provider": {
+            "type": "string",
+            "description": "Required provider/model pair, for example codex/gpt-5.4."
+          },
+          "labels": {
+            "description": "Labels to set on the agent",
+            "type": "object",
+            "propertyNames": {
+              "type": "string"
+            },
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "settings": {
+            "description": "Initial runtime settings for the new agent.",
+            "type": "object",
+            "properties": {
+              "modeId": {
+                "description": "Session mode to configure before the first run.",
+                "type": "string"
+              },
+              "thinkingOptionId": {
+                "description": "Thinking option ID.",
+                "type": "string"
+              },
+              "features": {
+                "description": "Provider-specific feature values, for example { fast_mode: true } for Codex.",
+                "type": "object",
+                "propertyNames": {
+                  "type": "string"
+                },
+                "additionalProperties": {}
+              }
+            },
+            "additionalProperties": false
+          },
+          "initialPrompt": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Required first task to run immediately after creation."
+          },
+          "workspaceId": {
+            "description": "Existing workspace id. Agent-scoped calls default to the caller workspace; top-level calls create a new local workspace when omitted.",
+            "type": "string",
+            "minLength": 1
+          },
+          "notifyOnFinish": {
+            "default": true,
+            "description": "Get notified when the created agent finishes, errors, or needs permission. Set false for explicit reporting or no completion callback.",
+            "type": "boolean"
+          },
+          "serverId": {
+            "description": "Destination server ID from list_hosts; omit for this host.",
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "title",
+          "provider",
+          "initialPrompt"
+        ],
+        "additionalProperties": {}
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "send_agent_prompt",
+      "title": "Send agent prompt",
+      "description": "Send a task. Agent callers receive an immediate queued receipt; delivery follows after two quiet seconds per recipient. Completion reports include the target\u2019s last response by default. Paseo supplies caller identity.",
+      "inputSchema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "properties": {
+          "activeTurnBehavior": {
+            "description": "How to send into a running turn: \"steer\" joins it, falling back to interrupt when unavailable; \"interrupt\" replaces it. Defaults to steer for agent callers and interrupt otherwise.",
+            "type": "string",
+            "enum": [
+              "interrupt",
+              "steer"
+            ]
+          },
+          "agentId": {
+            "type": "string"
+          },
+          "prompt": {
+            "type": "string"
+          },
+          "sessionMode": {
+            "description": "Optional mode to set before running the prompt.",
+            "type": "string"
+          },
+          "notifyOnFinish": {
+            "default": true,
+            "description": "Get notified when the prompted agent finishes, errors, or needs permission. Set false for explicit reporting or no completion callback.",
+            "type": "boolean"
+          },
+          "serverId": {
+            "description": "Destination server ID from list_hosts; omit for this host.",
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "agentId",
+          "prompt"
+        ]
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "get_agent_status",
+      "title": "Get agent status",
+      "description": "Return the latest snapshot for an agent, including lifecycle state, capabilities, and pending permissions.",
+      "inputSchema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "properties": {
+          "agentId": {
+            "type": "string"
+          },
+          "serverId": {
+            "description": "Destination server ID from list_hosts; omit for this host.",
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "agentId"
+        ]
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "list_agents",
+      "title": "List agents",
+      "description": "List recent agents as compact metadata.",
+      "inputSchema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "properties": {
+          "includeBackground": {
+            "default": false,
+            "type": "boolean"
+          },
+          "includeArchived": {
+            "default": false,
+            "type": "boolean"
+          },
+          "cwd": {
+            "type": "string"
+          },
+          "sinceHours": {
+            "default": 48,
+            "type": "integer",
+            "exclusiveMinimum": 0,
+            "maximum": 720
+          },
+          "statuses": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "initializing",
+                "idle",
+                "running",
+                "error",
+                "closed"
+              ]
+            }
+          },
+          "limit": {
+            "default": 50,
+            "type": "integer",
+            "exclusiveMinimum": 0,
+            "maximum": 200
+          },
+          "serverId": {
+            "description": "Destination server ID from list_hosts; omit for this host.",
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "cancel_agent",
+      "title": "Cancel agent run",
+      "description": "Abort the agent's current run but keep the agent alive for future tasks.",
+      "inputSchema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "properties": {
+          "agentId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "agentId"
+        ]
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "archive_agent",
+      "title": "Archive agent",
+      "description": "Archive an agent (soft-delete). The agent is interrupted if running and removed from the active list.",
+      "inputSchema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "properties": {
+          "agentId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "agentId"
+        ]
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "kill_agent",
+      "title": "Kill agent",
+      "description": "Terminate an agent session permanently.",
+      "inputSchema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "properties": {
+          "agentId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "agentId"
+        ]
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "update_agent",
+      "title": "Update agent",
+      "description": "Update an agent name, labels, and/or runtime settings.",
+      "inputSchema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "properties": {
+          "agentId": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "labels": {
+            "description": "Labels to set on the agent",
+            "type": "object",
+            "propertyNames": {
+              "type": "string"
+            },
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "settings": {
+            "description": "Runtime settings to apply to the agent.",
+            "type": "object",
+            "properties": {
+              "modeId": {
+                "description": "Session mode ID.",
+                "type": "string"
+              },
+              "model": {
+                "description": "Model ID. Pass null to clear.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "thinkingOptionId": {
+                "description": "Thinking option ID. Pass null to clear.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "features": {
+                "description": "Provider-specific feature values, for example { fast_mode: true } for Codex.",
+                "type": "object",
+                "propertyNames": {
+                  "type": "string"
+                },
+                "additionalProperties": {}
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "agentId"
+        ]
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "rename_workspace",
+      "title": "Rename workspace",
+      "description": "Rename a workspace by setting its user-visible title. Omit workspaceId to rename your current workspace.",
+      "inputSchema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "properties": {
+          "workspaceId": {
+            "description": "Workspace id to rename. Omit to rename your current workspace.",
+            "type": "string",
+            "minLength": 1
+          },
+          "title": {
+            "type": "string",
+            "minLength": 1,
+            "description": "New user-visible workspace title."
+          }
+        },
+        "required": [
+          "title"
+        ]
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "list_workspace_scripts",
+      "title": "List workspace scripts",
+      "description": "List configured workspace scripts and their lifecycle, service port, proxy URL, health, and terminal ID.",
+      "inputSchema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "properties": {
+          "workspaceId": {
+            "type": "string",
+            "description": "Workspace ID whose configured scripts to list."
+          }
+        },
+        "required": [
+          "workspaceId"
+        ]
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "start_workspace_script",
+      "title": "Start workspace script",
+      "description": "Start one configured workspace script through Paseo's managed workspace-script launcher.",
+      "inputSchema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "properties": {
+          "workspaceId": {
+            "type": "string",
+            "description": "Workspace ID containing the configured script."
+          },
+          "scriptName": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Configured paseo.json script name to start."
+          }
+        },
+        "required": [
+          "workspaceId",
+          "scriptName"
+        ]
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "stop_workspace_script",
+      "title": "Stop workspace script",
+      "description": "Stop a running workspace script through its supervised terminal lifecycle.",
+      "inputSchema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "properties": {
+          "workspaceId": {
+            "type": "string",
+            "description": "Workspace ID containing the running script."
+          },
+          "scriptName": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Configured paseo.json script name to stop."
+          }
+        },
+        "required": [
+          "workspaceId",
+          "scriptName"
+        ]
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "list_terminals",
+      "title": "List terminals",
+      "description": "List terminals for a working directory or across all working directories.",
+      "inputSchema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "properties": {
+          "cwd": {
+            "description": "Optional working directory. Defaults to your current working directory.",
+            "type": "string"
+          },
+          "all": {
+            "description": "List terminals across all working directories.",
+            "type": "boolean"
+          }
+        }
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "create_terminal",
+      "title": "Create terminal",
+      "description": "Create a terminal session for a working directory.",
+      "inputSchema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "properties": {
+          "cwd": {
+            "description": "Optional working directory. Defaults to your current working directory.",
+            "type": "string"
+          },
+          "name": {
+            "description": "Optional terminal name.",
+            "type": "string"
+          }
+        }
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "kill_terminal",
+      "title": "Kill terminal",
+      "description": "Kill an existing terminal session.",
+      "inputSchema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "properties": {
+          "terminalId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "terminalId"
+        ]
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "capture_terminal",
+      "title": "Capture terminal",
+      "description": "Capture plain-text terminal output lines from a terminal session.",
+      "inputSchema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "properties": {
+          "terminalId": {
+            "type": "string"
+          },
+          "start": {
+            "type": "number"
+          },
+          "end": {
+            "type": "number"
+          },
+          "scrollback": {
+            "type": "boolean"
+          },
+          "stripAnsi": {
+            "default": true,
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "terminalId"
+        ]
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "send_terminal_keys",
+      "title": "Send terminal keys",
+      "description": "Send text or a key token: Enter, Tab, Escape, Space, BSpace, Up, Down, Left, Right, Home, End, Insert, Delete, PageUp, PageDown, or F1-F12. Combine C- (Ctrl), M- (Alt), and S- (Shift) prefixes, e.g. C-r, S-Tab, or C-M-Left. Set literal=true to send the text unchanged.",
+      "inputSchema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "properties": {
+          "terminalId": {
+            "type": "string"
+          },
+          "keys": {
+            "type": "string"
+          },
+          "literal": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "terminalId",
+          "keys"
+        ]
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "create_schedule",
+      "title": "Create schedule",
+      "description": "Create a recurring schedule that starts a new agent on a cron cadence.",
+      "inputSchema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "properties": {
+          "prompt": {
+            "type": "string",
+            "minLength": 1
+          },
+          "cron": {
+            "type": "string",
+            "minLength": 1
+          },
+          "timezone": {
+            "description": "IANA time zone for the cron cadence. For example: America/New_York.",
+            "type": "string",
+            "minLength": 1
+          },
+          "name": {
+            "type": "string"
+          },
+          "provider": {
+            "description": "Provider, or provider/model (for example: codex or codex/gpt-5.4). Defaults to the caller's provider in an agent-scoped session.",
+            "type": "string"
+          },
+          "cwd": {
+            "type": "string"
+          },
+          "isolation": {
+            "type": "string",
+            "enum": [
+              "local",
+              "worktree"
+            ]
+          },
+          "maxRuns": {
+            "type": "integer",
+            "exclusiveMinimum": 0,
+            "maximum": 9007199254740991
+          },
+          "expiresIn": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "prompt",
+          "cron"
+        ]
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "create_heartbeat",
+      "title": "Create heartbeat",
+      "description": "Create a recurring heartbeat that sends you a prompt on a cron cadence.",
+      "inputSchema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "properties": {
+          "prompt": {
+            "type": "string",
+            "minLength": 1
+          },
+          "cron": {
+            "type": "string",
+            "minLength": 1
+          },
+          "timezone": {
+            "description": "IANA time zone for the cron cadence. For example: America/New_York.",
+            "type": "string",
+            "minLength": 1
+          },
+          "name": {
+            "type": "string"
+          },
+          "maxRuns": {
+            "type": "integer",
+            "exclusiveMinimum": 0,
+            "maximum": 9007199254740991
+          },
+          "expiresIn": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "prompt",
+          "cron"
+        ]
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "delete_heartbeat",
+      "title": "Delete heartbeat",
+      "description": "Delete one of your heartbeats.",
+      "inputSchema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "id"
+        ]
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "list_schedules",
+      "title": "List schedules",
+      "description": "List all schedules managed by the daemon.",
+      "inputSchema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "properties": {}
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "inspect_schedule",
+      "title": "Inspect schedule",
+      "description": "Inspect a schedule and its run history.",
+      "inputSchema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ]
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "pause_schedule",
+      "title": "Pause schedule",
+      "description": "Pause an active schedule.",
+      "inputSchema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ]
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "resume_schedule",
+      "title": "Resume schedule",
+      "description": "Resume a paused schedule.",
+      "inputSchema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ]
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "delete_schedule",
+      "title": "Delete schedule",
+      "description": "Delete a schedule permanently.",
+      "inputSchema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ]
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "update_schedule",
+      "title": "Update schedule",
+      "description": "Update an existing schedule. Only provided fields are changed; omitted fields remain unchanged.",
+      "inputSchema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "cron": {
+            "description": "New cron expression.",
+            "type": "string"
+          },
+          "timezone": {
+            "description": "IANA time zone for cron cadence; requires cron. For example: America/New_York.",
+            "type": "string",
+            "minLength": 1
+          },
+          "name": {
+            "description": "New name (null to clear).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "prompt": {
+            "description": "New prompt text.",
+            "type": "string",
+            "minLength": 1
+          },
+          "maxRuns": {
+            "description": "New max runs limit (null to clear).",
+            "anyOf": [
+              {
+                "type": "integer",
+                "exclusiveMinimum": 0,
+                "maximum": 9007199254740991
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "provider": {
+            "description": "New provider for new-agent target.",
+            "type": "string",
+            "minLength": 1
+          },
+          "model": {
+            "description": "New model for new-agent target (null to clear).",
+            "anyOf": [
+              {
+                "type": "string",
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "mode": {
+            "description": "New mode for new-agent target (null to clear).",
+            "anyOf": [
+              {
+                "type": "string",
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "cwd": {
+            "description": "New cwd for new-agent target.",
+            "type": "string",
+            "minLength": 1
+          },
+          "expiresIn": {
+            "description": "New relative expiry duration (for example: 1h, 2d).",
+            "type": "string"
+          },
+          "clearExpires": {
+            "description": "Clear any schedule expiry.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "additionalProperties": {}
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "schedule_logs",
+      "title": "Schedule logs",
+      "description": "Get the run history (logs) for a schedule.",
+      "inputSchema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ]
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "run_schedule_once",
+      "title": "Run schedule once",
+      "description": "Run a schedule immediately without changing its cron cadence.",
+      "inputSchema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "id"
+        ]
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "list_providers",
+      "title": "List providers",
+      "description": "List configured agent providers, availability, and their modes.",
+      "inputSchema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "properties": {}
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "list_models",
+      "title": "List models",
+      "description": "List models for an agent provider.",
+      "inputSchema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "properties": {
+          "provider": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "provider"
+        ]
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "list_profiles",
+      "title": "List agent profiles",
+      "description": "List agent profiles: named provider/model/mode bundles a human configured for specific kinds of work. Read each profile's `notes` to pick the one that fits the task you're delegating, then copy its `provider`, `model`, `modeId`, `thinkingOptionId`, and `featureValues` into create_agent (there is no `profile` parameter). Returns an empty list if none are configured.",
+      "inputSchema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "properties": {}
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "inspect_provider",
+      "title": "Inspect provider",
+      "description": "Inspect compact provider capabilities for orchestration, including modes and draft feature settings. Use list_models for the full model list.",
+      "inputSchema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "properties": {
+          "provider": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Provider ID, optionally with a model ID (for example codex or codex/gpt-5.4)."
+          },
+          "cwd": {
+            "description": "Working directory used to resolve provider feature availability.",
+            "type": "string"
+          },
+          "settings": {
+            "description": "Draft provider settings used to compute available features.",
+            "type": "object",
+            "properties": {
+              "modeId": {
+                "description": "Draft session mode ID.",
+                "type": "string"
+              },
+              "model": {
+                "description": "Draft model ID.",
+                "type": "string"
+              },
+              "thinkingOptionId": {
+                "description": "Draft thinking option ID.",
+                "type": "string"
+              },
+              "features": {
+                "description": "Draft provider feature values.",
+                "type": "object",
+                "propertyNames": {
+                  "type": "string"
+                },
+                "additionalProperties": {}
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "provider"
+        ]
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "get_agent_activity",
+      "title": "Get agent activity",
+      "description": "Return recent agent timeline entries as a curated summary.",
+      "inputSchema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "properties": {
+          "agentId": {
+            "type": "string"
+          },
+          "limit": {
+            "description": "Optional limit for number of activities to include (most recent first).",
+            "type": "number"
+          },
+          "serverId": {
+            "description": "Destination server ID from list_hosts; omit for this host.",
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "agentId"
+        ]
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "set_agent_mode",
+      "title": "Set agent session mode",
+      "description": "Switch the agent's session mode (plan, bypassPermissions, read-only, auto, etc.).",
+      "inputSchema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "properties": {
+          "agentId": {
+            "type": "string"
+          },
+          "modeId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "agentId",
+          "modeId"
+        ]
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "list_pending_permissions",
+      "title": "List pending permissions",
+      "description": "Return all pending permission requests across all agents with the normalized payloads.",
+      "inputSchema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "properties": {}
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "respond_to_permission",
+      "title": "Respond to permission",
+      "description": "Approve or deny a pending permission request with an AgentManager-compatible response payload.",
+      "inputSchema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "properties": {
+          "agentId": {
+            "type": "string"
+          },
+          "requestId": {
+            "type": "string"
+          },
+          "response": {
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "behavior": {
+                    "type": "string",
+                    "const": "allow"
+                  },
+                  "selectedActionId": {
+                    "type": "string"
+                  },
+                  "updatedInput": {
+                    "type": "object",
+                    "propertyNames": {
+                      "type": "string"
+                    },
+                    "additionalProperties": {}
+                  },
+                  "updatedPermissions": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "propertyNames": {
+                        "type": "string"
+                      },
+                      "additionalProperties": {}
+                    }
+                  }
+                },
+                "required": [
+                  "behavior"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "behavior": {
+                    "type": "string",
+                    "const": "deny"
+                  },
+                  "selectedActionId": {
+                    "type": "string"
+                  },
+                  "message": {
+                    "type": "string"
+                  },
+                  "interrupt": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "behavior"
+                ]
+              }
+            ]
+          }
+        },
+        "required": [
+          "agentId",
+          "requestId",
+          "response"
+        ]
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    }
+  ]
+}

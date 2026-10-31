@@ -7,6 +7,52 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.0-beta.4] - 2026-10-31
+
+### Added
+
+- Burrow gives Claude, Codex, pi, Cursor, OpenCode, Gemini and Antigravity agents Paseo's MCP
+  tools (`mcp__paseo__create_agent`, `send_agent_prompt`, `create_heartbeat`, `list_agents`, …), 32
+  of Paseo's 40, with Paseo 0.14's own catalogue of names, descriptions and schemas. The server
+  listens only on loopback and knows each agent by a token of its own. An agent that makes or
+  prompts another is told when that one finishes, errors or needs permission, as under Paseo.
+  ACP agents get the tools too, which Paseo does not give them: over HTTP when the agent takes
+  that, else through `burrow mcp-bridge` on its stdio. pi gets them from a small extension for
+  that session only, leaving its `mcp.json` alone. Antigravity gets them from a `burrow` plugin
+  Burrow keeps in `~/.gemini/config/plugins`, which has no tools when `agy` runs outside Burrow.
+  Their MCP calls show as the tool they call ("List hosts"), not as "Other" or "call_mcp_tool".
+- Burrow runs OpenCode (`opencode acp`) and Gemini CLI (`gemini --acp`) agents over the Agent
+  Client Protocol, through the client that runs Cursor's: models and modes from the agent, tool
+  calls and permissions. `--opencode-bin`/`--no-opencode` and `--gemini-bin`/`--no-gemini` choose
+  them.
+- A History button in the title bar (Ctrl/Cmd+Shift+H): every agent in one list, the latest
+  change first, in the rows the state counts' lists use, each with its state and what it is
+  about. It slides in from the edge nearest the button, or the right for the key.
+- Lanes' one-line rows, under an open card and wherever cards show as one line, end with how long
+  ago their agent last did something ("5h ago"), as a conversation's turns do.
+- Burrow sends Paseo's notifications: when an agent finishes or needs permission, the one Paseo
+  app that is in use is told to show a notification (`shouldNotify`, from its
+  `client_heartbeat`s), and with no app in use, phones that registered get a push through Expo,
+  as from Paseo's daemon; an app looking at that agent gets neither. Push tokens are leased for 48
+  hours, dropped when Expo or the phone says so (`push.unregister.request`), kept in
+  `push-tokens.json` in Paseo's format, and brought over by `import-paseo`. `--push-url` and
+  `--no-push` change where they go.
+- Burrow runs Paseo's schedules: `paseo schedule create/ls/inspect/logs/pause/resume/update/
+  run-once/delete` and an agent's own `paseo heartbeat` work against it. A schedule sends its
+  prompt every N minutes or on a five-field cron in any time zone, to an agent (as a system
+  notice, shown as a heartbeat in its timeline) or to a new agent in a new workspace each time,
+  archived after. Each slot runs once, a busy agent skips it, run limits and expiry end it, and
+  so does archiving its agent. Schedules are kept in Paseo's format, and `import-paseo` brings
+  Paseo's over.
+
+### Changed
+
+- Settings slides in as a pane over whatever layout is showing, instead of switching to the Paseo
+  layout's Settings screen; closing it (Escape, ×, or a click outside) leaves the layout as it
+  was. Opened from the Paseo sidebar it comes in from the left, from the menu or Ctrl/Cmd+, from
+  the right. Its changes still apply as they are made, visible behind it.
+- Usage bars keep what is left at the right, so use drains them from the left.
+
 ## [0.1.0-beta.3] - 2026-10-29
 
 ### Added
@@ -576,7 +622,8 @@ First alpha, for a few early testers. Early software: expect rough edges.
 - Patched GPUI (`vendor/gpui-pre`) that skips redraws on window moves and lets cached views be
   reused after they move.
 
-[Unreleased]: https://github.com/chicagobuss/crusteo/compare/v0.1.0-beta.3...HEAD
+[Unreleased]: https://github.com/chicagobuss/crusteo/compare/v0.1.0-beta.4...HEAD
+[0.1.0-beta.4]: https://github.com/chicagobuss/crusteo/releases/tag/v0.1.0-beta.4
 [0.1.0-beta.3]: https://github.com/chicagobuss/crusteo/releases/tag/v0.1.0-beta.3
 [0.1.0-beta.2]: https://github.com/chicagobuss/crusteo/releases/tag/v0.1.0-beta.2
 [0.1.0-beta.1]: https://github.com/chicagobuss/crusteo/releases/tag/v0.1.0-beta.1

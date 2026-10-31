@@ -1,7 +1,9 @@
-//! The slide-out lists behind the title bar's counts: a click on "56 ready
-//! to review" opens, at the right under the title bar, every agent
-//! in that state, its latest change first, each with what it is about. A
-//! click on one opens it as a notification's click does.
+//! The slide-in lists behind the title bar's counts and its History
+//! button: a click on "56 ready to review" opens, under the title bar,
+//! every agent in that state, and History every agent in any state, the
+//! latest change first, each with what it is about. A click on one opens
+//! it as a notification's click does. See [`crate::pane`] for the pane
+//! they slide in on.
 //!
 //! The list only reads. Building it, scrolling it and reading replies for
 //! the rows in view leave "ready to review" alone; opening an agent from
@@ -21,9 +23,9 @@ use gpui_kit::component::Sizable as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::scroll::Scrollbar;
 use gpui_kit::gpui::{
-    AnyElement, App, ClickEvent, Context, Entity, InteractiveElement, IntoElement, MouseButton,
-    ParentElement, Render, StatefulInteractiveElement, Styled, UniformListScrollHandle, Window,
-    div, point, px, relative, uniform_list,
+    AnyElement, App, ClickEvent, Context, InteractiveElement, IntoElement, ParentElement, Render,
+    StatefulInteractiveElement, Styled, UniformListScrollHandle, Window, div, point, px,
+    uniform_list,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 
@@ -31,12 +33,9 @@ use crate::app::Core;
 use crate::app::store::time_ago;
 use crate::theme::{palette, size as sz};
 use crate::ui;
-use crate::ui::CachedExt as _;
 
-/// The panel's width, where the window has room for it.
-const WIDTH: f32 = 420.;
-/// The title bar's height: the panel slides in under it.
-const TOP: f32 = 36.;
+/// The pane's width, where the window has room for it.
+pub const WIDTH: f32 = 420.;
 /// Every row is this tall, so the list lays out only the rows in view.
 const ROW_HEIGHT: f32 = 66.;
 /// While the fleet churns, rebuild at most this often, as the counts
@@ -95,8 +94,9 @@ fn kept_top(top: f32, old: &[StateRow], new: &[StateRow]) -> Option<f32> {
 
 pub struct StateList {
     core: Core,
-    /// The state listed, and whether background workspaces are left out.
-    shown: Option<(Bucket, bool)>,
+    /// The state listed, None for every state, and whether background
+    /// workspaces are left out.
+    shown: Option<(Option<Bucket>, bool)>,
     rows: Vec<StateRow>,
     /// The store revision the rows were built from, and when.
     built: Option<(u64, Instant)>,
@@ -129,7 +129,8 @@ impl StateList {
     /// Opens, switches or closes the list as the nav says.
     fn follow_nav(&mut self, cx: &mut Context<Self>) {
         let nav = self.core.nav.read(cx);
-        let wanted = nav.state_list.map(|state| (state, !nav.show_background()));
+        let wanted = (nav.pane.and_then(|(pane, _)| pane.listing()))
+            .map(|listing| (listing, !nav.show_background()));
         if wanted == self.shown {
             return;
         }
@@ -176,7 +177,7 @@ impl StateList {
     }
 
     fn rebuild(&mut self, cx: &mut Context<Self>) {
-        let Some((state, hide)) = self.shown else {
+        let Some((listing, hide)) = self.shown else {
             if !self.rows.is_empty() {
                 self.rows.clear();
                 cx.notify();
@@ -184,7 +185,7 @@ impl StateList {
             return;
         };
         let store = self.core.store.read(cx);
-        let rows = fleet::state_list::rows(&store.fleet, state, hide);
+        let rows = fleet::state_list::rows(&store.fleet, listing, hide);
         self.built = Some((store.revision, Instant::now()));
         if rows == self.rows {
             return;
@@ -260,11 +261,12 @@ impl StateList {
         self.replies.get(&key).and_then(|reply| reply.line.clone())
     }
 
-    fn row(&self, ix: usize, state: Bucket, cx: &mut Context<Self>) -> AnyElement {
+    fn row(&self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
         let p = palette();
         let Some(row) = self.rows.get(ix) else {
             return div().h(px(ROW_HEIGHT)).into_any_element();
         };
+        let state = row.state;
         let about = self.about(row);
         // Not read yet, or being read: its line is on its way.
         let key = (row.host.clone(), row.agent_id.clone());
@@ -295,7 +297,7 @@ impl StateList {
                 // As a notification's click does: its card in Lanes, else
                 // its tab.
                 this.core.nav.update(cx, |nav, cx| {
-                    nav.set_state_list(None, cx);
+                    nav.set_pane(None, cx);
                     nav.open_agent(&host, &workspace, &agent, cx);
                 });
             })
@@ -370,13 +372,51 @@ impl StateList {
             .into_any_element()
     }
 
-    fn header(&self, state: Bucket) -> AnyElement {
+    fn header(&self, listing: Option<Bucket>) -> AnyElement {
         let p = palette();
+        let nav = self.core.nav.clone();
+        let close = move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
+            nav.update(cx, |nav, cx| nav.set_pane(None, cx));
+        };
+        let close = Button::new("state-list-close")
+            .icon(gpui_kit::component::Icon::empty().path("icons/x.svg"))
+            .ghost()
+            .xsmall()
+            .tooltip("Close (Esc)")
+            .on_click(close);
+        let count = div()
+            .flex_1()
+            .min_w(px(0.))
+            .text_size(sz::sm())
+            .text_color(p.extra_muted)
+            .child(self.rows.len().to_string());
+        let header = div()
+            .h(px(40.))
+            .flex_shrink_0()
+            .px(px(12.))
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .border_b_1()
+            .border_color(p.border);
+        let Some(state) = listing else {
+            return header
+                .child(ui::icon("list-clock", 14., p.muted))
+                .child(
+                    div()
+                        .flex_shrink_0()
+                        .text_color(p.foreground)
+                        .child("History"),
+                )
+                .child(count)
+                .child(close)
+                .into_any_element();
+        };
         let nav = self.core.nav.clone();
         let show = move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
             // What a click on the count did before it opened this list.
             nav.update(cx, |nav, cx| {
-                nav.set_state_list(None, cx);
+                nav.set_pane(None, cx);
                 if nav.layout != "lanes" {
                     nav.layout = "lanes".into();
                     nav.save();
@@ -385,19 +425,7 @@ impl StateList {
                 cx.notify();
             });
         };
-        let nav = self.core.nav.clone();
-        let close = move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
-            nav.update(cx, |nav, cx| nav.set_state_list(None, cx));
-        };
-        div()
-            .h(px(40.))
-            .flex_shrink_0()
-            .px(px(12.))
-            .flex()
-            .items_center()
-            .gap(px(8.))
-            .border_b_1()
-            .border_color(p.border)
+        header
             .child(ui::agent_dot(state))
             .child(
                 div()
@@ -405,14 +433,7 @@ impl StateList {
                     .text_color(p.foreground)
                     .child(state.label()),
             )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w(px(0.))
-                    .text_size(sz::sm())
-                    .text_color(p.extra_muted)
-                    .child(self.rows.len().to_string()),
-            )
+            .child(count)
             .child(
                 Button::new("state-list-board")
                     .icon(gpui_kit::component::Icon::empty().path("icons/kanban.svg"))
@@ -422,14 +443,7 @@ impl StateList {
                     .tooltip("Single them out on the Lanes board")
                     .on_click(show),
             )
-            .child(
-                Button::new("state-list-close")
-                    .icon(gpui_kit::component::Icon::empty().path("icons/x.svg"))
-                    .ghost()
-                    .xsmall()
-                    .tooltip("Close (Esc)")
-                    .on_click(close),
-            )
+            .child(close)
             .into_any_element()
     }
 
@@ -455,18 +469,22 @@ impl StateList {
 impl Render for StateList {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette();
-        let Some((state, _)) = self.shown else {
+        let Some((listing, _)) = self.shown else {
             return div().into_any_element();
         };
         self.keep_ticking(cx);
-        let header = self.header(state);
+        let header = self.header(listing);
         let body = if self.rows.is_empty() {
             div()
                 .flex_1()
                 .p(px(16.))
                 .text_size(sz::sm())
                 .text_color(p.extra_muted)
-                .child("None right now.")
+                .child(if listing.is_some() {
+                    "None right now."
+                } else {
+                    "No agents yet."
+                })
                 .into_any_element()
         } else {
             let list = uniform_list(
@@ -474,7 +492,7 @@ impl Render for StateList {
                 self.rows.len(),
                 cx.processor(move |this, range: Range<usize>, _, cx| {
                     this.read_replies(range.clone(), cx);
-                    range.map(|ix| this.row(ix, state, cx)).collect::<Vec<_>>()
+                    range.map(|ix| this.row(ix, cx)).collect::<Vec<_>>()
                 }),
             )
             .track_scroll(&self.scroll)
@@ -502,53 +520,6 @@ impl Render for StateList {
     }
 }
 
-/// The open list over the window, under the title bar: a clear layer that
-/// closes it on a click outside, and the panel at the right edge, nearest
-/// the counts. It appears at once, as crusteo's other panels do: none of
-/// them animate (see `src/ui.rs`).
-pub fn layer(list: &Entity<StateList>, core: &Core, cx: &App) -> Option<AnyElement> {
-    core.nav.read(cx).state_list?;
-    let p = palette();
-    let nav = core.nav.clone();
-    let outside = div()
-        .id("state-list-outside")
-        .absolute()
-        .top(px(TOP))
-        .left_0()
-        .right_0()
-        .bottom_0()
-        .occlude()
-        .on_mouse_down(MouseButton::Left, move |_, _, cx| {
-            cx.stop_propagation();
-            nav.update(cx, |nav, cx| nav.set_state_list(None, cx));
-        });
-    let panel = div()
-        .id("state-list")
-        .absolute()
-        .top(px(TOP))
-        .bottom_0()
-        .right_0()
-        .w(px(WIDTH))
-        .max_w(relative(0.9))
-        .bg(p.surface0)
-        .border_l_1()
-        .border_color(p.border_accent)
-        .shadow_lg()
-        .occlude()
-        // A click inside is the panel's; the window's "any click closes"
-        // must not take it away before the click lands.
-        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-        .child(list.clone().cached_fill());
-    Some(
-        div()
-            .absolute()
-            .inset_0()
-            .child(outside)
-            .child(panel)
-            .into_any_element(),
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -557,6 +528,7 @@ mod tests {
         StateRow {
             host: HostId::new("h"),
             agent_id: agent.into(),
+            state: Bucket::Attention,
             workspace_id: None,
             title: agent.into(),
             place: String::new(),

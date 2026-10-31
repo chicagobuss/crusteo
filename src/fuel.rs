@@ -313,6 +313,10 @@ fn table_line(line: &view::Line, marked: bool, retained: bool, now: i64) -> AnyE
                         .h(px(4.))
                         .rounded_full()
                         .bg(with_alpha(p.muted, 0.25))
+                        // What is left sits at the right: use drains it from
+                        // the left, as time runs toward the reset.
+                        .flex()
+                        .justify_end()
                         .child(
                             div()
                                 .h_full()

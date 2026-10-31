@@ -66,6 +66,9 @@ pub mod feature {
     /// status` need ("Update the host to read daemon status" without it).
     /// Paseo's CLI then also asks for `daemon.get_pairing_offer`.
     pub const DAEMON_STATUS_RPC: &str = "daemonStatusRpc";
+    /// `push.unregister.request`: Paseo's app drops its push token from a
+    /// host when notifications are turned off, on a host that says so.
+    pub const PUSH_TOKEN_REVOCATION: &str = "pushTokenRevocation";
     // P1
     pub const PROVIDERS_SNAPSHOT: &str = "providersSnapshot";
     pub const CREATION_LIFECYCLE: &str = "creationLifecycle";
@@ -100,6 +103,7 @@ pub const P0_FEATURES: &[&str] = &[
     // `set_agent_thinking_request`; `paseo agent update --thinking` refuses
     // without the flag.
     feature::AGENT_THINKING_UPDATE,
+    feature::PUSH_TOKEN_REVOCATION,
 ];
 
 /// `ServerInfoStatusPayloadSchema`.
@@ -159,6 +163,7 @@ mod tests {
         assert_eq!(payload["features"]["agentMessageProvenance"], true);
         assert_eq!(payload["features"]["daemonStatusRpc"], true);
         assert_eq!(payload["features"]["agentThinkingUpdate"], true);
+        assert_eq!(payload["features"]["pushTokenRevocation"], true);
         assert_eq!(payload["permissions"].as_array().unwrap().len(), 9);
     }
 }

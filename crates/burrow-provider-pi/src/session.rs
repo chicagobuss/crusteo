@@ -48,6 +48,8 @@ pub struct Settings {
     pub model: Option<String>,
     pub thinking: Option<String>,
     pub append_system_prompt: Option<String>,
+    /// Extension files pi loads (`--extension`).
+    pub extensions: Vec<String>,
 }
 
 /// Header of the single question an extension dialog becomes.

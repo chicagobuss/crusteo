@@ -182,6 +182,15 @@ async fn await_hello(
     Ok(hello)
 }
 
+/// Forgets a connection's client ([`crate::push::Clients`]) when dropped.
+struct Gone<'a>(&'a Daemon, u64);
+
+impl Drop for Gone<'_> {
+    fn drop(&mut self) {
+        self.0.clients.gone(self.1);
+    }
+}
+
 async fn session(
     daemon: &Arc<Daemon>,
     stream: &mut SplitStream<Socket>,
@@ -195,6 +204,8 @@ async fn session(
     let mut changes = daemon.changes();
     let generation = daemon.read(|store| store.generation.clone());
     let mut subs = Subscriptions::for_client(shape.compact_provider_snapshots);
+    // However the session ends, notifications forget this client.
+    let _gone = Gone(daemon, subs.connection());
     out.send(&daemon.server_info().frame());
 
     // Claimed by the first bare ping; renewed by every inbound frame after.

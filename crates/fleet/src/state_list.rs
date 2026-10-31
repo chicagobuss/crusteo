@@ -1,9 +1,11 @@
-//! The lists behind the title bar's counts: every agent in one state, the
-//! state's latest change first, with what each one is about.
+//! The lists behind the title bar's counts and its History button: every
+//! agent in one state, or every agent, the latest change first, with what
+//! each one is about.
 //!
-//! A list holds exactly the agents its count counts
-//! ([`crate::Fleet::agent_bucket_counts`]). Building it only reads the
-//! fleet; nothing here marks an agent seen.
+//! A state's list holds exactly the agents its count counts
+//! ([`crate::Fleet::agent_bucket_counts`]), and History all of them
+//! together. Building one only reads the fleet; nothing here marks an
+//! agent seen.
 
 use paseo_client::proto::{Agent, Bucket};
 
@@ -14,6 +16,7 @@ use crate::Fleet;
 pub struct StateRow {
     pub host: crate::HostId,
     pub agent_id: String,
+    pub state: Bucket,
     /// Where opening it goes; an agent with none cannot be opened.
     pub workspace_id: Option<String>,
     pub title: String,
@@ -42,15 +45,18 @@ impl StateRow {
     }
 }
 
-/// The agents in `bucket`, as its count counts them: not archived, and with
-/// `hide_background` none in background workspaces. Most recently changed
-/// first, then by host and id, so the order never depends on how the
-/// directory stores them.
-pub fn rows(fleet: &Fleet, bucket: Bucket, hide_background: bool) -> Vec<StateRow> {
+/// The agents in `bucket`, or with None in every state, as the counts count
+/// them: not archived, and with `hide_background` none in background
+/// workspaces. Most recently changed first, then by host and id, so the
+/// order never depends on how the directory stores them.
+pub fn rows(fleet: &Fleet, bucket: Option<Bucket>, hide_background: bool) -> Vec<StateRow> {
     let mut rows: Vec<StateRow> = fleet
         .shown_agents(hide_background)
-        .filter(|(_, agent)| agent.archived_at.is_none() && agent.bucket() == bucket)
+        .filter(|(_, agent)| {
+            agent.archived_at.is_none() && bucket.is_none_or(|bucket| agent.bucket() == bucket)
+        })
         .map(|(host, agent)| {
+            let state = agent.bucket();
             let directory = &host.directory;
             let workspace =
                 (agent.workspace_id.as_deref()).and_then(|id| directory.workspaces.get(id));
@@ -67,6 +73,7 @@ pub fn rows(fleet: &Fleet, bucket: Bucket, hide_background: bool) -> Vec<StateRo
             StateRow {
                 host: host.id().clone(),
                 agent_id: agent.id.clone(),
+                state,
                 workspace_id: agent.workspace_id.clone(),
                 title: agent.display_title(),
                 place,
@@ -74,7 +81,7 @@ pub fn rows(fleet: &Fleet, bucket: Bucket, hide_background: bool) -> Vec<StateRo
                 model: agent.model_label().map(str::to_string),
                 changed_at: agent.updated_at.clone(),
                 background: directory.in_background(agent),
-                detail: match bucket {
+                detail: match state {
                     Bucket::NeedsInput => Some(ask(agent)),
                     Bucket::Failed => error(agent),
                     _ => None,
@@ -220,13 +227,13 @@ mod tests {
                 "title": "Bash", "detail": {"type": "shell", "command": "cargo test"}}]}),
             ),
         ]);
-        let ready_rows = rows(&fleet, Bucket::Attention, false);
+        let ready_rows = rows(&fleet, Some(Bucket::Attention), false);
         assert_eq!(ids(&ready_rows), ["new", "mid", "old"]);
         assert!(ready_rows.iter().all(|row| row.detail.is_none()));
-        assert_eq!(ids(&rows(&fleet, Bucket::Running, false)), ["busy"]);
-        let failed = rows(&fleet, Bucket::Failed, false);
+        assert_eq!(ids(&rows(&fleet, Some(Bucket::Running), false)), ["busy"]);
+        let failed = rows(&fleet, Some(Bucket::Failed), false);
         assert_eq!(failed[0].detail.as_deref(), Some("Provider quit"));
-        let needs = rows(&fleet, Bucket::NeedsInput, false);
+        let needs = rows(&fleet, Some(Bucket::NeedsInput), false);
         assert_eq!(ids(&needs), ["asks"]);
         assert_eq!(
             needs[0].detail.as_deref(),
@@ -234,6 +241,18 @@ mod tests {
         );
         assert_eq!(needs[0].place, "w1-name");
         assert_eq!(needs[0].model_label(), "claude/opus");
+        // History: every state together, newest change first, each row
+        // with its own state and what it waits on or failed with.
+        let all = rows(&fleet, None, false);
+        assert_eq!(
+            ids(&all),
+            ["done", "busy", "new", "broke", "mid", "asks", "old"]
+        );
+        let row = |id: &str| all.iter().find(|row| row.agent_id == id).unwrap();
+        assert_eq!(row("busy").state, Bucket::Running);
+        assert_eq!(row("broke").detail.as_deref(), Some("Provider quit"));
+        assert_eq!(row("asks").detail, needs[0].detail);
+        assert_eq!(row("done").detail, None);
     }
 
     #[test]
@@ -249,7 +268,7 @@ mod tests {
             agent("a", same, ready()),
             undated,
         ]);
-        let rows = rows(&fleet, Bucket::Attention, false);
+        let rows = rows(&fleet, Some(Bucket::Attention), false);
         let keys: Vec<(&str, &str)> = (rows.iter())
             .map(|row| (row.host.as_str(), row.agent_id.as_str()))
             .collect();
@@ -276,18 +295,21 @@ mod tests {
             hidden,
         ]);
         for hide in [false, true] {
-            for (bucket, count) in fleet.agent_bucket_counts(hide) {
+            let counts = fleet.agent_bucket_counts(hide);
+            let total: usize = counts.iter().map(|(_, count)| count).sum();
+            assert_eq!(rows(&fleet, None, hide).len(), total, "hide={hide}");
+            for (bucket, count) in counts {
                 assert_eq!(
-                    rows(&fleet, bucket, hide).len(),
+                    rows(&fleet, Some(bucket), hide).len(),
                     count,
                     "{bucket:?} hide={hide}"
                 );
             }
         }
-        let shown = rows(&fleet, Bucket::Attention, false);
+        let shown = rows(&fleet, Some(Bucket::Attention), false);
         assert_eq!(ids(&shown), ["hidden", "seen"]);
         assert!(shown[0].background);
-        assert_eq!(ids(&rows(&fleet, Bucket::Attention, true)), ["seen"]);
+        assert_eq!(ids(&rows(&fleet, Some(Bucket::Attention), true)), ["seen"]);
     }
 
     #[test]
@@ -298,11 +320,11 @@ mod tests {
         ]);
         let before: Vec<Agent> = fleet.agents().map(|(_, agent)| agent.clone()).collect();
         for bucket in Bucket::GROUP_ORDER {
-            rows(&fleet, bucket, false);
+            rows(&fleet, Some(bucket), false);
         }
         let after: Vec<Agent> = fleet.agents().map(|(_, agent)| agent.clone()).collect();
         assert_eq!(before, after);
-        assert_eq!(rows(&fleet, Bucket::Attention, false).len(), 2);
+        assert_eq!(rows(&fleet, Some(Bucket::Attention), false).len(), 2);
         // The only thing a list asks a daemon for is a read of a timeline's
         // end: no subscription, and nothing that clears attention.
         let request = crate::requests::last_reply("r1");

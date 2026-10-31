@@ -508,6 +508,7 @@ async fn play_recorded(trace: &str, resume: Option<&str>, first_turn: u64) -> Ve
         mode: Some("auto".into()),
         thinking: Some("low".into()),
         system_prompt: None,
+        mcp_servers: Vec::new(),
     };
     let catalog = Arc::new(Mutex::new(Catalog::default()));
     let session = Session::new(

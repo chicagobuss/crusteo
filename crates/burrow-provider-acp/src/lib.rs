@@ -3,8 +3,8 @@
 //!
 //! The protocol client is generic. An [`AgentConfig`] says which agent it
 //! runs: the provider id clients see, the command, and the agent's quirks.
-//! [`cursor`] is the first; another ACP agent (Gemini, Copilot, ...) is one
-//! more such function.
+//! [`cursor`], [`opencode`] and [`gemini`] are the ones Burrow offers;
+//! another ACP agent (Copilot, ...) is one more such function.
 //!
 //! Set `BURROW_ACP_TRACE=<dir>` to record every frame each session
 //! exchanges with its agent as JSONL (`{"dir":"in"|"out","frame":...}`), the
@@ -73,13 +73,46 @@ pub fn cursor(binary: Option<&Path>) -> AgentConfig {
     }
 }
 
+/// OpenCode's agent over ACP, `opencode acp`, under Paseo's provider id
+/// (Paseo drives it through `opencode serve` instead); models and modes
+/// come from its sessions.
+pub fn opencode(binary: Option<&Path>) -> AgentConfig {
+    let program = binary.map_or_else(|| "opencode".into(), |p| p.display().to_string());
+    AgentConfig {
+        id: "opencode".into(),
+        label: "OpenCode".into(),
+        description: "The open source coding agent".into(),
+        command: vec![program, "acp".into()],
+        env: Vec::new(),
+        permission_provider: "acp".into(),
+        capability_meta: None,
+        models: Models::Session,
+    }
+}
+
+/// Google's Gemini CLI over ACP, `gemini --acp`. Paseo has no Gemini
+/// provider of its own; there it is a custom ACP agent.
+pub fn gemini(binary: Option<&Path>) -> AgentConfig {
+    let program = binary.map_or_else(|| "gemini".into(), |p| p.display().to_string());
+    AgentConfig {
+        id: "gemini".into(),
+        label: "Gemini".into(),
+        description: "Google's Gemini CLI".into(),
+        command: vec![program, "--acp".into()],
+        env: Vec::new(),
+        permission_provider: "acp".into(),
+        capability_meta: None,
+        models: Models::Session,
+    }
+}
+
 /// What Paseo's ACP agents can do (`DEFAULT_ACP_CAPABILITIES`). Nothing
 /// steers a running ACP turn.
 pub const CAPABILITIES: Capabilities = Capabilities {
     streaming: true,
     session_persistence: true,
     dynamic_modes: true,
-    // A client's `mcpServers` are not passed to the agent yet (it gets none).
+    // A client's `mcpServers` are not passed on; the agent gets Burrow's own.
     mcp_servers: false,
     reasoning_stream: true,
     tool_invocations: true,
@@ -222,6 +255,7 @@ impl Provider for AcpProvider {
             resume: spec.resume,
             capability_meta: self.config.capability_meta.clone(),
             env: spec.env,
+            mcp_servers: spec.mcp_servers,
         };
         tokio::spawn(Session::new(launcher, settings, events).run(command_rx));
         Ok(ProviderSession {
@@ -286,5 +320,25 @@ mod tests {
         assert!(!info.capabilities.steer && info.capabilities.session_persistence);
         let custom = cursor(Some(Path::new("/opt/cursor/bin/cursor-agent")));
         assert_eq!(custom.command[0], "/opt/cursor/bin/cursor-agent");
+    }
+
+    #[test]
+    fn opencode_and_gemini_run_their_acp_modes_with_models_from_the_session() {
+        let opencode = opencode(None);
+        assert_eq!(opencode.command, ["opencode", "acp"]);
+        assert_eq!(
+            (opencode.id.as_str(), opencode.label.as_str()),
+            ("opencode", "OpenCode")
+        );
+        let gemini = gemini(Some(Path::new("/usr/local/bin/gemini")));
+        assert_eq!(gemini.command, ["/usr/local/bin/gemini", "--acp"]);
+        assert_eq!(
+            (gemini.id.as_str(), gemini.label.as_str()),
+            ("gemini", "Gemini")
+        );
+        for config in [opencode, gemini] {
+            assert_eq!(config.models, Models::Session);
+            assert_eq!(config.capability_meta, None);
+        }
     }
 }

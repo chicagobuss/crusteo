@@ -3,12 +3,16 @@
 
 use serde_json::{Map, Value, json};
 
+/// What Burrow's plugin is called in agy, which names its servers
+/// `<plugin>_<server>`.
+const PLUGIN_PREFIX: &str = "burrow_";
+
 /// A `tool` or `subagent` step as a `tool_call` item with call id `id`.
 pub fn tool_item(step: &Value, id: &str) -> Value {
-    let name = step["tool_name"]
-        .as_str()
-        .filter(|n| !n.is_empty())
-        .unwrap_or("Antigravity tool");
+    let name = mcp_name(step).unwrap_or_else(|| {
+        let name = step["tool_name"].as_str().filter(|n| !n.is_empty());
+        name.unwrap_or("Antigravity tool").to_string()
+    });
     let mut item = json!({
         "type": "tool_call", "callId": id, "name": name, "detail": detail(step),
     });
@@ -29,6 +33,20 @@ pub fn tool_item(step: &Value, id: &str) -> Value {
     item["status"] = status.into();
     item["error"] = error;
     item
+}
+
+/// An MCP call (`call_mcp_tool`) as `mcp__<server>__<tool>`, the name other
+/// agents' MCP calls have, so a client shows Paseo's tools as their own.
+/// (Paseo's plugin keeps `call_mcp_tool`; it gives agy no servers.)
+fn mcp_name(step: &Value) -> Option<String> {
+    let info = &step["tool_info"];
+    if info["name"] != "call_mcp_tool" {
+        return None;
+    }
+    let text = |key: &str| info["parameters"][key].as_str().filter(|s| !s.is_empty());
+    let (server, tool) = (text("ServerName")?, text("ToolName")?);
+    let server = server.strip_prefix(PLUGIN_PREFIX).unwrap_or(server);
+    Some(format!("mcp__{server}__{tool}"))
 }
 
 /// `subagent_info.subagents`, each child with the wire's defaults.
@@ -96,7 +114,16 @@ fn detail(step: &Value) -> Value {
                 }),
                 None => output.into(),
             };
-            json!({"type": "unknown", "input": parameters, "output": output})
+            // An MCP call's detail is as Claude's are: the tool's own
+            // arguments and its result as `{output}`.
+            let (input, output) = match mcp_name(step) {
+                Some(_) => {
+                    let arguments = parameters.get("Arguments").cloned().unwrap_or(json!({}));
+                    (arguments, json!({"output": output}))
+                }
+                None => (Value::Object(parameters), output),
+            };
+            json!({"type": "unknown", "input": input, "output": output})
         }
     }
 }
@@ -188,6 +215,31 @@ mod tests {
         );
         let unnamed = tool_item(&json!({"state": "DONE", "step_type": "tool"}), "t:8");
         assert_eq!(unnamed["name"], "Antigravity tool");
+    }
+
+    #[test]
+    fn an_mcp_call_is_named_by_its_server_and_tool() {
+        let call = |server: &str| {
+            step(
+                "DONE",
+                json!({"name": "call_mcp_tool", "output": "agents_count=0",
+                       "parameters": {"Arguments": {"serverId": "srv_1"}, "ServerName": server,
+                                      "ToolName": "list_agents"}}),
+            )
+        };
+        let ours = tool_item(&call("burrow_paseo"), "t:4");
+        assert_eq!(ours["name"], "mcp__paseo__list_agents");
+        assert_eq!(
+            ours["detail"],
+            json!({"type": "unknown", "input": {"serverId": "srv_1"},
+                   "output": {"output": "agents_count=0"}})
+        );
+        assert_eq!(
+            tool_item(&call("github"), "t:5")["name"],
+            "mcp__github__list_agents"
+        );
+        let unnamed = step("DONE", json!({"name": "call_mcp_tool", "parameters": {}}));
+        assert_eq!(tool_item(&unnamed, "t:6")["name"], "call_mcp_tool");
     }
 
     #[test]

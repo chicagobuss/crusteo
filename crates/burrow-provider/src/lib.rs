@@ -91,6 +91,30 @@ pub struct SessionSpec {
     pub env: Vec<(String, String)>,
     /// Taken out of the environment the CLI would inherit.
     pub unset: Vec<String>,
+    /// MCP servers the CLI connects to, beside its own.
+    pub mcp_servers: Vec<McpServer>,
+}
+
+/// An MCP server an agent's CLI reaches over HTTP (Streamable HTTP), such
+/// as Burrow's own, which gives agents Paseo's tools.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct McpServer {
+    /// What the agent knows it by; its tools are `mcp__<name>__<tool>`.
+    pub name: String,
+    pub url: String,
+    /// Sent with every request.
+    pub headers: Vec<(String, String)>,
+    /// The same server as a command speaking MCP on stdio, for agents
+    /// that take no HTTP servers (an ACP agent need only support stdio).
+    pub stdio: Option<StdioCommand>,
+}
+
+/// A command an agent starts to reach an MCP server over its stdio.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StdioCommand {
+    pub command: String,
+    pub args: Vec<String>,
+    pub env: Vec<(String, String)>,
 }
 
 /// An image attached to a prompt: base64 data and its MIME type.

@@ -20,10 +20,11 @@ use gpui_kit::gpui::{
 };
 use gpui_kit::prelude::FluentBuilder;
 
-use crate::app::{Core, FleetEvent, LayoutEntry, Screen, Tab};
+use crate::app::{Core, FleetEvent, LayoutEntry, Pane, Screen, Tab};
 use crate::layouts::paseo::{PaseoLayout, Sidebar};
 use crate::theme::{palette, size as sz};
 use crate::toolbars;
+use crate::toolbars::Side;
 use crate::ui;
 
 gpui_kit::actions!(
@@ -38,6 +39,7 @@ gpui_kit::actions!(
         PreviousWorkspace,
         NewWorkspace,
         OpenSettings,
+        ShowHistory,
         CycleLayout,
         FocusComposer,
         Jump1,
@@ -76,6 +78,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("secondary-[", PreviousWorkspace, app),
         KeyBinding::new("secondary-n", NewWorkspace, app),
         KeyBinding::new("secondary-,", OpenSettings, app),
+        KeyBinding::new("secondary-shift-h", ShowHistory, app),
         KeyBinding::new("secondary-shift-l", CycleLayout, None),
         KeyBinding::new("secondary-shift-t", NewTerminal, None),
         KeyBinding::new("secondary-l", FocusComposer, app),
@@ -135,9 +138,11 @@ pub struct Shell {
     palette_input: Entity<InputState>,
     palette_index: usize,
     needs: Entity<crate::needs_you::NeedsYou>,
-    /// The slide-out list behind the title bar's counts: see
+    /// The slide-in list behind the title bar's counts and History: see
     /// [`crate::state_list`].
     state_list: Entity<crate::state_list::StateList>,
+    /// Settings, made the first time it slides in.
+    settings: Option<Entity<crate::layouts::paseo::SettingsPane>>,
     focus: FocusHandle,
     /// The zoom just set, shown briefly; the counter lets a newer change
     /// keep it up.
@@ -331,6 +336,7 @@ impl Shell {
             palette_index: 0,
             needs,
             state_list,
+            settings: None,
             focus: cx.focus_handle(),
             zoom_badge: None,
             customizing: false,
@@ -557,9 +563,13 @@ impl Shell {
                 }),
             ),
             ("Add project", PaletteAction::AddProject),
-            ("History", PaletteAction::Screen(Screen::History)),
+            ("History", PaletteAction::Pane(Pane::History)),
+            (
+                "Archived agents (Paseo history)",
+                PaletteAction::Screen(Screen::History),
+            ),
             ("Hosts", PaletteAction::Screen(Screen::Hosts)),
-            ("Settings", PaletteAction::Screen(Screen::Settings)),
+            ("Settings", PaletteAction::Pane(Pane::Settings)),
             ("Toggle sidebar", PaletteAction::ToggleSidebar),
             ("About Crusteo", PaletteAction::About),
             (
@@ -726,6 +736,7 @@ impl Shell {
                         nav.layout = "paseo".into();
                         nav.show(screen, cx);
                     }
+                    PaletteAction::Pane(pane) => nav.set_pane(Some((pane, Side::Right)), cx),
                     PaletteAction::Layout(id) => nav.layout = id.to_string(),
                     PaletteAction::ToggleSidebar => nav.sidebar_open = !nav.sidebar_open,
                     PaletteAction::ToggleGrouping => {
@@ -1226,6 +1237,30 @@ impl Shell {
                 .into_any_element(),
         )
     }
+    /// The open slide-in pane: see [`crate::pane`].
+    fn pane(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let (pane, side) = self.core.nav.read(cx).pane?;
+        let (key, width, content) = match pane {
+            Pane::State(_) | Pane::History => (
+                "list",
+                crate::state_list::WIDTH,
+                self.state_list.clone().cached_fill(),
+            ),
+            Pane::Settings => {
+                let core = self.core.clone();
+                let settings = self.settings.get_or_insert_with(|| {
+                    cx.new(|cx| crate::layouts::paseo::SettingsPane::new(core, window, cx))
+                });
+                (
+                    "settings",
+                    crate::layouts::paseo::SETTINGS_WIDTH,
+                    settings.clone().cached_fill(),
+                )
+            }
+        };
+        Some(crate::pane::layer(key, side, width, content, &self.core))
+    }
+
     /// A fleet-wide notice when an agent elsewhere finishes or needs you.
     /// Skipped for the conversation already on screen.
     #[allow(clippy::too_many_arguments)]
@@ -1397,6 +1432,8 @@ impl Shell {
 #[derive(Clone, PartialEq)]
 enum PaletteAction {
     Screen(Screen),
+    /// A slide-in pane, from the right as for a key.
+    Pane(Pane),
     Layout(&'static str),
     ToggleSidebar,
     ToggleGrouping,
@@ -1496,10 +1533,8 @@ impl Render for Shell {
                     if event.keystroke.key != "escape" {
                         return;
                     }
-                    if this.core.nav.read(cx).state_list.is_some() {
-                        this.core
-                            .nav
-                            .update(cx, |nav, cx| nav.set_state_list(None, cx));
+                    if this.core.nav.read(cx).pane.is_some() {
+                        this.core.nav.update(cx, |nav, cx| nav.set_pane(None, cx));
                         cx.stop_propagation();
                     } else if this.help_open {
                         this.help_open = false;
@@ -1512,17 +1547,15 @@ impl Render for Shell {
                 }),
             )
             // ...and at any click, which still does what it would have. A
-            // click outside the open list closes it too.
+            // click outside the open pane closes it too.
             .on_any_mouse_down(cx.listener(|this, _: &MouseDownEvent, _, cx| {
                 if this.core.nav.read(cx).state_highlight.is_some() {
                     this.core
                         .nav
                         .update(cx, |nav, cx| nav.set_state_highlight(None, cx));
                 }
-                if this.core.nav.read(cx).state_list.is_some() {
-                    this.core
-                        .nav
-                        .update(cx, |nav, cx| nav.set_state_list(None, cx));
+                if this.core.nav.read(cx).pane.is_some() {
+                    this.core.nav.update(cx, |nav, cx| nav.set_pane(None, cx));
                 }
             }))
             .on_action(cx.listener(|this, _: &ZoomIn, window, cx| this.zoom_step(1, window, cx)))
@@ -1580,10 +1613,17 @@ impl Render for Shell {
                     );
                 });
             }))
+            // From a key or a menu, the pane comes in from the right. Settings
+            // stays open when asked for again, as a menu's "Settings…" should;
+            // History's key opens and closes it, as its button does.
             .on_action(cx.listener(|this, _: &OpenSettings, _, cx| {
-                this.core.nav.update(cx, |nav, cx| {
-                    nav.layout = "paseo".into();
-                    nav.show(Screen::Settings, cx);
+                (this.core.nav).update(cx, |nav, cx| {
+                    nav.set_pane(Some((Pane::Settings, Side::Right)), cx)
+                });
+            }))
+            .on_action(cx.listener(|this, _: &ShowHistory, _, cx| {
+                (this.core.nav).update(cx, |nav, cx| {
+                    nav.toggle_pane(Pane::History, Side::Right, cx)
                 });
             }))
             .on_action(
@@ -1649,7 +1689,7 @@ impl Render for Shell {
                     .children(self.customize_layer(cx)),
             )
             .children(overlays)
-            .children(crate::state_list::layer(&self.state_list, &self.core, cx))
+            .children(self.pane(window, cx))
             .when(palette_open, |d| d.child(self.render_palette(cx)))
             .when(self.help_open, |d| {
                 let (close, customize) = (cx.entity().downgrade(), cx.entity().downgrade());

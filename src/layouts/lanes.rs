@@ -5985,6 +5985,17 @@ impl Lanes {
         let host = card.host.clone();
         let agent_id = card.agent_id.clone();
         let alone = matches!(frame, Frame::Alone);
+        // How long ago it last did something, as a conversation's turns say.
+        let ago = {
+            let store = self.core.store.read(cx);
+            (card.updated_at.clone())
+                .or_else(|| {
+                    (store.fleet.agent(&card.host, &card.agent_id))
+                        .and_then(|agent| agent.created_at.clone())
+                })
+                .map(|at| crate::app::store::time_ago(&at))
+                .filter(|ago| !ago.is_empty())
+        };
         let content = div()
             .pl(px(8. + SUBAGENT_INDENT * depth.saturating_sub(1) as f32))
             .pr(px(8.))
@@ -6015,7 +6026,16 @@ impl Lanes {
                 )
             })
             .child(div().flex_1())
-            .when(self.popped_out(card, cx), |row| row.child(popped_mark()));
+            .when(self.popped_out(card, cx), |row| row.child(popped_mark()))
+            .when_some(ago, |row, ago| {
+                row.child(
+                    div()
+                        .flex_shrink_0()
+                        .text_size(px(11.))
+                        .text_color(p.extra_muted)
+                        .child(ago),
+                )
+            });
         let id = eid_parts(
             "lane-compact",
             &[&lane.key, card.host.as_str(), &card.agent_id],

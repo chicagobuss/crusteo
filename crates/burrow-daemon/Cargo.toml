@@ -32,9 +32,19 @@ tokio-tungstenite.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 uuid.workspace = true
+# Push notifications to Paseo's apps, through Expo's push service.
+ureq.workspace = true
+# Schedules' cron cadences, in IANA time zones.
+jiff = "0.2"
+# The MCP server agents get Paseo's tools from.
+rmcp = { version = "3.8", default-features = false, features = ["server", "transport-streamable-http-server"] }
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http = "1"
+tower-service = "0.3"
+# Crusteo's timeline model and tool labels, for `get_agent_activity`.
+fleet.workspace = true
 
 [dev-dependencies]
 # Crusteo's own client, the reference consumer of this daemon.
 paseo-client.workspace = true
-# Crusteo's conversation model, to check what clients render.
-fleet.workspace = true

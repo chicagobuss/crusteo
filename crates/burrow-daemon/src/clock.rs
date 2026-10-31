@@ -50,6 +50,13 @@ pub fn parse_iso(stamp: &str) -> Option<i64> {
         .map(OffsetDateTime::unix_timestamp)
 }
 
+/// An ISO 8601 timestamp as milliseconds since the Unix epoch.
+pub fn parse_iso_ms(stamp: &str) -> Option<i64> {
+    OffsetDateTime::parse(stamp, &time::format_description::well_known::Rfc3339)
+        .ok()
+        .map(|at| (at.unix_timestamp_nanos() / 1_000_000) as i64)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

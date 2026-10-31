@@ -474,6 +474,72 @@ fn a_new_burrow_takes_paseos_server_id() {
 }
 
 #[test]
+fn the_phones_paseo_notified_come_over() {
+    let root = scratch();
+    let (paseo, claude) = paseo_home(&root);
+    write(
+        &paseo.join("push-tokens.json"),
+        r#"{"subscriptions": [
+            {"token": "ExponentPushToken[phone]", "expiresAt": "2099-01-01T00:00:00.000Z"},
+            {"token": "ExponentPushToken[lapsed]", "expiresAt": "2020-01-01T00:00:00.000Z"}]}"#,
+    );
+    let home = root.join("burrow");
+    let dry = import(&paseo, &home, &claude, true);
+    assert!(
+        dry.lines
+            .iter()
+            .any(|l| l == "1 push token for Paseo's apps"),
+        "{:?}",
+        dry.lines
+    );
+    assert!(
+        !home.join("push-tokens.json").exists(),
+        "a dry run writes nothing"
+    );
+    import(&paseo, &home, &claude, false);
+    let tokens = burrow_daemon::push::Tokens::open(Some(&home));
+    assert_eq!(tokens.active(), ["ExponentPushToken[phone]"]);
+    fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn paseos_schedules_come_over_as_they_are() {
+    let root = scratch();
+    let (paseo, claude) = paseo_home(&root);
+    let heartbeat = json!({
+        "id": "4f2a9c1e", "name": "Daily delivery", "prompt": "Report in",
+        "cadence": {"type": "cron", "expression": "0 9,17 * * *", "timezone": "America/Chicago"},
+        "target": {"type": "agent", "agentId": ACTIVE}, "status": "paused",
+        "createdAt": "2026-10-18T04:38:37.607Z", "updatedAt": "2026-10-19T05:53:43.528Z",
+        "nextRunAt": null, "lastRunAt": null, "pausedAt": "2026-10-19T05:53:43.528Z",
+        "expiresAt": null, "maxRuns": 44, "runs": [],
+    });
+    write(
+        &paseo.join("schedules/4f2a9c1e.json"),
+        &heartbeat.to_string(),
+    );
+    write(&paseo.join("schedules/broken.json"), "{");
+    let home = root.join("burrow");
+    let dry = import(&paseo, &home, &claude, true);
+    let line = "schedule 4f2a9c1e \"Daily delivery\", paused";
+    assert!(dry.lines.iter().any(|l| l == line), "{:?}", dry.lines);
+    assert!(!home.join("schedules").exists(), "a dry run writes nothing");
+    import(&paseo, &home, &claude, false);
+    let copied: Value =
+        serde_json::from_str(&fs::read_to_string(home.join("schedules/4f2a9c1e.json")).unwrap())
+            .unwrap();
+    assert_eq!(copied, heartbeat);
+    let again = import(&paseo, &home, &claude, false);
+    assert!(
+        again
+            .lines
+            .iter()
+            .any(|l| l == "already in burrow: schedule 4f2a9c1e \"Daily delivery\"")
+    );
+    fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
 fn refuses_a_home_inside_the_paseo_home() {
     let root = scratch();
     let (paseo, claude) = paseo_home(&root);

@@ -77,9 +77,6 @@ running turn as a message from it, the child was its own in its workspace, a bac
 started ended when it was archived, and the agents' CLIs ended with a Burrow restart.
 
 Still missing, by how often they come up:
-- **Schedules and heartbeats** (`paseo schedule …`, `paseo heartbeat`): not served, and
-  `import-paseo` leaves `~/.paseo/schedules/` behind.
-- **Push notifications** to Paseo's phone app: push tokens are accepted and nothing is sent.
 - **Live git state** of workspaces: branch, diff counts and PR state are read when a workspace is
   made and not again; a worktree removed by hand stays listed.
 - **Requests not answered:** `workspace rename`, `project rename`, `worktree create` and `worktree
@@ -90,12 +87,116 @@ Still missing, by how often they come up:
 - **Paseo's daemon settings** in `~/.paseo/config.json` are not read: a daemon-wide system
   prompt, per-provider `env` and `command` overrides, and `daemon.auth.password`. A password
   set for Paseo does not protect Burrow, which accepts every client.
-- **MCP servers** a client asks for are not passed to the agent; Burrow no longer says it supports
-  them.
+- **MCP servers** a client asks for are not passed to the agent (Burrow's own `paseo` server is;
+  [below](#agent-tools-mcp)); Burrow does not say it supports them.
 - **Paseo's orchestration skills** in `~/.claude`, `~/.codex` and `~/.agents` are not kept up to
   date.
 - **Logs:** Burrow logs to stderr. Under launchd and SysV init its log file is not rotated, and
   `daemon status` names `~/.paseo/daemon.log`, which Burrow does not write.
+
+## Agent tools (MCP)
+
+Paseo gives its agents an MCP server, `paseo`, with tools to make and steer other agents, make
+workspaces, keep heartbeats and schedules, and answer permissions (`mcp__paseo__create_agent`
+and so on). Burrow gives Claude and Codex agents the same server, with Paseo 0.14.0's own
+catalogue: its `tools/list` output (names, titles, descriptions, input schemas), captured from a
+real daemon, is what Burrow serves, the agent-scoped catalogue to agents and the top-level one to
+other clients. A test checks every tool Burrow serves against it. Checked with real agents
+through Paseo's CLI 0.14.0: Claude, Codex, Cursor, OpenCode, Gemini, pi and Antigravity agents
+each called `list_hosts` and `list_agents` and gave back the host's `serverId`, and a Claude agent
+made a child with `create_agent` and was told mid-session when it finished.
+
+- **Handed to the CLI** as Paseo does: Claude by `--mcp-config` (beside the user's own servers),
+  Codex by `config.mcp_servers` on `thread/start` and `thread/resume`, pi by an extension that
+  registers the server for that session (`pi.registerMcpServer`, as Paseo's own pi extension
+  does; the user's `mcp.json` is left alone).
+- **ACP agents** (Cursor, OpenCode, Gemini) get it in `mcpServers` on `session/new` and
+  `session/load`, where Paseo's ACP client sends none: over HTTP when the agent's
+  `mcpCapabilities.http` says it takes that, else as a stdio server, `burrow mcp-bridge`, which
+  relays each JSON-RPC line to the HTTP server with the agent's token (passed in its environment,
+  not its arguments). Gemini CLI connects MCP servers only in folders it trusts
+  (`~/.gemini/trustedFolders.json`) and asks permission before each tool call, as it does for its
+  own servers; Cursor asks too.
+- **Antigravity** reads MCP servers only from its global `mcp_config.json` and from installed
+  plugins, with no per-session way to add one, so Paseo gives it none. Burrow keeps a plugin,
+  `~/.gemini/config/plugins/burrow/`, written when an agy agent first starts and its
+  `mcp_config.json` rewritten whenever Burrow's path changes. It runs `burrow mcp-bridge`, which
+  takes the server and token from the environment Burrow starts `agy` with. Started any other way
+  (`agy` by hand) the bridge has no tools, so agy runs as before. The file holds no token; the
+  agent's shell does see `BURROW_MCP_URL` and `BURROW_MCP_TOKEN` (its own token), since agy hands
+  its whole environment to its servers. `agy plugin disable burrow` turns it off, and Burrow
+  leaves a disabled plugin disabled.
+- **Tool rows:** an MCP call by Cursor, OpenCode, Gemini or Antigravity is named
+  `mcp__<server>__<tool>`, with the tool's arguments as its input and `{output}` as Claude's
+  detail has them, so clients show "List hosts" with Paseo's context rather than "Other" or
+  "call_mcp_tool". ACP has no field for it: the name is read from
+  Cursor's `rawInput`, Gemini's title `<tool> (<server> MCP Server)` and OpenCode's `<server>_<tool>`
+  (for a server the session was given), and from agy's `call_mcp_tool` parameters, where its plugin
+  prefix (`burrow_`) is dropped.
+- **pi's extension** is `<home>/pi/burrow-mcp-servers.mjs`, written by Burrow; it holds no token.
+  The servers come in `BURROW_PI_MCP_SERVERS`, which it removes, so the commands pi runs do not
+  inherit it. pi reaches the tools through its `codemode` tool, as for any server it is given
+  without an `exposure`.
+- **Loopback only:** the server listens on `127.0.0.1` on a port of its own, whatever `--listen`
+  says, and rmcp checks `Host`. Each agent's entry carries a bearer token of its own, and the
+  token is what names the caller, so one agent cannot act as another; Paseo serves it on its main
+  port and takes the caller from a `?callerAgentId=` query anyone can write. A request without a
+  token is a top-level client; one with a token Burrow did not issue is refused.
+- **Served (32 of Paseo's 40):** `list_hosts` (this host only), `create_workspace` (local, or a
+  worktree branching off or checking out a branch), `list_workspaces`, `archive_workspace`,
+  `rename_workspace`, `create_agent`, `send_agent_prompt`, `get_agent_status`,
+  `get_agent_activity`, `list_agents`, `cancel_agent`, `archive_agent`, `kill_agent`,
+  `update_agent`, `set_agent_mode`, `list_pending_permissions`, `respond_to_permission`, the
+  schedule and heartbeat tools, `list_providers`, `list_models`, `list_profiles` (always empty)
+  and `inspect_provider`. Results carry `structuredContent` and Paseo's model-visible text (each
+  list's `_count` and `_ids`, then the JSON); errors are their message, as a thrown error is.
+- **Scoped to the calling agent,** as Paseo's are: what it makes is its child in its workspace,
+  paths resolve against its directory, `list_agents` defaults to its directory, heartbeats are its
+  own, and `send_agent_prompt` is a message from it (steering a running turn), answered with a
+  receipt.
+- **Finish notices:** `create_agent` and `send_agent_prompt` with `notifyOnFinish` (the agent
+  default) tell the caller when the other agent finishes, errors, needs permission (once per
+  request) or closes, in Paseo's `agent-notification` envelope and wording; kept in
+  `finish-subscriptions.json` across restarts.
+- **Not served:** the terminal tools, the workspace script tools and `speak` (Burrow has no
+  terminals, scripts or voice), checking out a pull request in `create_workspace`, provider
+  features in `create_agent` and `update_agent` (refused with a message), and `serverId` for
+  another host (Burrow has no connected hosts). Paseo's two-second batching of an agent's messages
+  is not done: a message is delivered at once.
+
+## Schedules
+
+`schedule/create`, `list`, `inspect`, `logs`, `pause`, `resume`, `delete`, `run-once` and `update`,
+as Paseo's `schedule/` service has them (`paseo schedule …`; `paseo heartbeat …` is the same
+requests with the calling agent as the target). Checked with Paseo's CLI 0.11.2 against a
+throwaway Burrow: create with `--every` and `--run-now`, `ls`, `inspect`, `logs`, `run-once`,
+`pause`, `resume`, `delete`, and `heartbeat create` from inside an agent.
+
+- **Cadence:** `every` N ms, or a five-field cron (`*`, lists, ranges, steps; no names) matched
+  minute by minute in its IANA time zone, UTC without one. `every` runs at once unless
+  `runOnCreate` is false; a cron waits for its first slot unless it is true. A cron updated
+  without a time zone keeps the one it had.
+- **Runs:** every second, an active schedule that is due claims its slot and moves `nextRunAt` to
+  the first slot after now, so each slot runs once and a long run queues none behind it; one run
+  at a time per schedule. A slot missed while Burrow was down is skipped. A run under way when
+  Burrow stops is failed at the next start ("Daemon restarted before the scheduled run
+  completed").
+- **An agent target** gets the prompt in a bare `<paseo-system>` envelope headed `Schedule "name"
+  fired (id=…, run=…).`; its timeline shows a `heartbeat` call (`callId` `paseo-system:<sha256>`,
+  sparkles icon), not a user prompt, and it does not title the agent. A busy agent fails the run;
+  a deleted or archived one completes the schedule, as archiving it later does. The run waits for
+  the turn: a permission request or an error fails it; its output is the last reply.
+- **A new-agent target** gets a new workspace for its `cwd` (a new worktree with `isolation:
+  "worktree"`), an agent labelled `paseo.schedule-id` and `paseo.schedule-run` with the prompt as
+  its first message, no attention notification, and its workspace archived after the run unless
+  `archiveOnFinish` is false. A `cwd` that is gone completes the schedule.
+- `maxRuns` and `expiresAt` complete a schedule; `run-once` runs outside the cadence, leaves it
+  alone, and answers when the run is over. Errors are `rpc_error` with code
+  `schedule_request_failed` and Paseo's messages.
+- **Kept** in `<home>/schedules/<id>.json` in Paseo's format; `import-paseo` copies Paseo's
+  `~/.paseo/schedules/` as they are, so a heartbeat carries on with its agent, paused or not.
+- Paseo's schedule and heartbeat MCP tools are served ([above](#agent-tools-mcp)), with the
+  `createOrReplace` only they use.
 
 ## Paseo's app against Burrow
 
@@ -116,7 +217,7 @@ folder and connected to a throwaway Burrow by **Direct connection**. Burrow was 
 | A workspace's **Setup** panel | yes | Needs `workspaceSetupObservation` |
 | Terminals | no | Burrow has no terminals; the app logs the refused subscription |
 | Changes (diffs) and review, file editing | no | Not served |
-| Schedules | no | Shows an empty page |
+| Schedules | served, not walked through | Burrow answers every `schedule/*` request ([below](#schedules)); the app's page was not tried against it |
 | Voice | no | |
 | Hosts management, connected hosts | no | |
 | Pairing link, relay | no | Direct connection only: Burrow has neither a relay nor passwords |
@@ -568,7 +669,8 @@ The daemon offers it when `agy --version` prints `x.y.z`, 1.1.15 or later (`--ag
 | Permissions and questions | None. The CLI cannot ask when another app drives it, so every tool runs | Same |
 | Opening notice | A warning `notification` each time a session opens | Same, recorded before the first prompt (the trait's `opening_items`) |
 | Text | `assistant_message` deltas, `messageId` `<turn key>:<step index>` | Same |
-| Tools | `tool_call`, `callId` `<turn key>:<step index>`. Details `shell`, `read`, `write`, `edit`, `sub_agent`, `plain_text`, `unknown`. Tools still running end with the turn | Same |
+| Tools | `tool_call`, `callId` `<turn key>:<step index>`. Details `shell`, `read`, `write`, `edit`, `sub_agent`, `plain_text`, `unknown`. Tools still running end with the turn | Same, except that an MCP call is named `mcp__<server>__<tool>` with its arguments as input (Paseo: `call_mcp_tool`) |
+| Agent tools (MCP) | None | Burrow's `paseo` server, through its plugin ([Agent tools](#agent-tools-mcp)); checked with agy 1.4.11 |
 | Denials by agy's own policy | One notification per new denial set: `Shell command denied`, `Action denied` or `N actions denied` | Same |
 | Interrupt | `SIGINT` to the group, `SIGTERM` after 1 s, `SIGKILL` after 2 s. `turn_canceled` with "Canceled by provider". The next prompt restarts the CLI on the conversation | Same |
 | Model change | Applied at the next prompt, by restarting the CLI | Same |
@@ -626,6 +728,9 @@ that provider when `cursor-agent` is on PATH, with the same shapes:
   `session/load`. Cursor replays the conversation, which Burrow does not show again: its own
   timeline already has it.
 
+Its MCP calls (and those of OpenCode and Gemini) are named by server and tool, where Paseo names
+them `other` ([above](#agent-tools-mcp)); checked with `cursor-agent` 2026.10.22.
+
 Verified against `cursor-agent` 2026.10.01 on GPT-5 Mini through
 `crates/burrow-daemon/examples/smoke.rs`: a plain turn, a shell command allowed through a
 permission prompt that really wrote its file, an interrupted turn, then a daemon restart and a
@@ -646,7 +751,21 @@ Where Burrow differs from Paseo on purpose:
 - Tool calls replayed by `session/load` are not kept, so a later cancel never marks them canceled.
 
 Not yet: the composer features Paseo lists for ACP agents (`auto_accept`, and Cursor's `fast`),
-slash commands (`available_commands_update`), and MCP servers (sessions get none).
+and slash commands (`available_commands_update`). Sessions get Burrow's `paseo` MCP server
+([above](#agent-tools-mcp)), where Paseo's get none.
+
+## OpenCode and Gemini (ACP)
+
+Two more ACP agents, through the same client as Cursor and offered when their CLI is on PATH
+(`--opencode-bin`, `--gemini-bin`; `--no-opencode`, `--no-gemini`):
+- **OpenCode**, `opencode acp`: id `opencode`, label `OpenCode`, Paseo's provider id. Paseo drives
+  OpenCode through `opencode serve` and its HTTP API instead, so the timeline, models and
+  resume are not Paseo's; an OpenCode agent made under Paseo does not resume under Burrow.
+- **Gemini**, `gemini --acp`: id `gemini`, label `Gemini`. Paseo has no Gemini provider; there it
+  is a custom ACP provider with the same command.
+- Models and modes come from the probe session's answer (`models`, else its `model` option),
+  with no default mode. Checked with OpenCode 1.18.33 (261 models, 2 modes) and Gemini CLI
+  0.64.0 (4 modes), each answering a turn that called Burrow's MCP tools.
 
 ## Deleting agents
 
@@ -739,11 +858,22 @@ them, on purpose:
   (`cancel_async_message`), which Paseo does before the CLI has started a turn.
 - **Provider subagents.** Claude's Task subagent frames are not mapped
   (`agent.provider_subagents.*` is unanswered).
-- **Notifications.** `shouldNotify` is always false, because `client_heartbeat` presence is not
-  tracked yet.
-- **Not offered yet:** ACP agents other than Cursor, terminals, checking out change requests and
+- **Notifications** are Paseo's (`agent-attention-policy.ts`, `push/`). A client that asked for
+  them (`session.events.set_subscription.request` with `notifications: true`) and whose last
+  `client_heartbeat` is under three minutes old is present. When an agent needs attention, a
+  present client that is visible and focused on it stops everything; otherwise the most recently
+  active present client gets `shouldNotify: true`; with nobody present, every phone that
+  registered a token (`register_push_token`, leased for 48 hours and renewed by that phone's
+  heartbeats) gets a push through Expo's push service, as from Paseo's daemon, except for an
+  error. Expo's `DeviceNotRegistered` and `InvalidCredentials` drop a token, and so does
+  `push.unregister.request` (`pushTokenRevocation`). Tokens are kept in `push-tokens.json` in
+  Paseo's format, and `import-paseo` brings Paseo's over. `--push-url` sends elsewhere and
+  `--no-push` sends none. Terminals' attention, which Paseo also pushes, does not arise: Burrow
+  has no terminals.
+- **Not offered yet:** ACP agents other than Cursor, OpenCode and Gemini, terminals, checking out
+  change requests and
   forge search ([above](#projects-and-workspaces)), `list_commands` content, search in the agent
-  history list (it lists every agent, unfiltered), rewind and fork, schedules, diffs and file
+  history list (it lists every agent, unfiltered), rewind and fork, diffs and file
   editing, voice, connected hosts, relay pairing and passwords.
 - **Antigravity:** the differences in [the table above](#antigravity): no `usage_updated`,
   Burrow turn ids, and no `isUnattended` on its mode. Antigravity's child conversations show only
@@ -786,8 +916,8 @@ pi files did not change after 0.12.0.
 - `persistence.nativeHandle` is pi's session id; Paseo's is the session file. pi 1.0 resumes from
   either.
 - Paseo loads an extension of its own into pi (system prompt, MCP servers, user entry capture,
-  rewind). Burrow loads none: the system prompt goes in with `--append-system-prompt`, and it
-  has no MCP servers or rewind to offer.
+  rewind). Burrow's only registers the session's MCP servers ([above](#agent-tools-mcp)): the
+  system prompt goes in with `--append-system-prompt`, and it has no rewind to offer.
 - Paseo's adapters for third-party pi extensions are not ported: `pi-ask-user`'s combined
   question with a comment, the subagent extensions (`provider_subagent` events), the todo and
   goal extensions, and `pi-mcp-adapter`'s tool names. Their dialogs still come through as plain

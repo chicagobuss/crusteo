@@ -12,7 +12,7 @@ pub mod usage;
 
 use gpui_kit::gpui::{AnyView, App, AppContext, Entity, Window};
 
-pub use nav::{Closed, Nav, Screen, Tab};
+pub use nav::{Closed, Nav, Pane, Screen, Tab};
 pub use store::{AgentSession, FleetEvent, FleetStore, TerminalSession, TerminalWatch};
 
 #[derive(Default)]

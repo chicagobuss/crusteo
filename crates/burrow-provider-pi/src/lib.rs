@@ -2,9 +2,10 @@
 //! Paseo does) in its JSONL RPC mode (`pi --mode rpc`).
 //!
 //! Paseo also loads an extension of its own into pi, for its system prompt,
-//! MCP servers and rewind. Burrow needs none of it: the system prompt
-//! goes in with `--append-system-prompt`, and it offers neither MCP servers
-//! nor rewind. Dialogs of the user's own extensions become questions.
+//! MCP servers and rewind. Burrow's system prompt goes in with
+//! `--append-system-prompt` and it offers no rewind, so its extension only
+//! registers the session's MCP servers ([`MCP_EXTENSION`]). Dialogs of the
+//! user's own extensions become questions.
 //!
 //! Set `BURROW_PI_TRACE=<dir>` to record every frame each session
 //! exchanges with pi as JSONL (`{"dir":"in"|"out","frame":...}`), the format
@@ -24,10 +25,10 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use burrow_provider::{
-    Capabilities, Model, Provider, ProviderError, ProviderInfo, Session as ProviderSession,
-    SessionSpec,
+    Capabilities, McpServer, Model, Provider, ProviderError, ProviderInfo,
+    Session as ProviderSession, SessionSpec,
 };
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use tokio::sync::mpsc;
 
 use crate::process::{JsonProcess, Output};
@@ -36,6 +37,23 @@ use crate::session::{Launcher, Session, Settings, Transport};
 /// How long reading pi's model catalog may take.
 const CATALOG_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// Carries a session's MCP servers, as `mcp.json` entries, to
+/// [`MCP_EXTENSION`].
+pub const MCP_SERVERS_ENV: &str = "BURROW_PI_MCP_SERVERS";
+
+/// The extension that gives a session its MCP servers. pi's own MCP support
+/// connects what it registers, for that session only, so the user's
+/// `mcp.json` is left alone. The servers come in [`MCP_SERVERS_ENV`], so the
+/// file holds no token, and it removes the variable so pi's commands do
+/// not inherit it.
+pub const MCP_EXTENSION: &str = r#"export default function burrowMcpServers(pi) {
+  const servers = JSON.parse(process.env.BURROW_PI_MCP_SERVERS || "{}");
+  delete process.env.BURROW_PI_MCP_SERVERS;
+  if (typeof pi.registerMcpServer !== "function") return;
+  for (const [name, config] of Object.entries(servers)) pi.registerMcpServer(name, config);
+}
+"#;
+
 /// pi, found, with the models it offers once read.
 #[derive(Debug, Clone)]
 pub struct PiProvider {
@@ -43,6 +61,9 @@ pub struct PiProvider {
     version: Option<String>,
     trace_dir: Option<PathBuf>,
     models: Arc<RwLock<Vec<Model>>>,
+    /// Where [`MCP_EXTENSION`] is written; without one, sessions get no
+    /// MCP servers.
+    extension_dir: Option<PathBuf>,
 }
 
 impl PiProvider {
@@ -64,11 +85,31 @@ impl PiProvider {
             version,
             trace_dir: burrow_provider::env::var_os("BURROW_PI_TRACE").map(PathBuf::from),
             models: Arc::default(),
+            extension_dir: None,
         })
+    }
+
+    /// Writes [`MCP_EXTENSION`] into `dir` when a session first needs it.
+    pub fn with_extension_dir(mut self, dir: PathBuf) -> Self {
+        self.extension_dir = Some(dir);
+        self
     }
 
     pub fn version(&self) -> Option<String> {
         self.version.clone()
+    }
+
+    /// The extension's path, written if it is missing or out of date.
+    fn mcp_extension(&self) -> std::io::Result<Option<PathBuf>> {
+        let Some(dir) = &self.extension_dir else {
+            return Ok(None);
+        };
+        let path = dir.join("burrow-mcp-servers.mjs");
+        if std::fs::read_to_string(&path).ok().as_deref() != Some(MCP_EXTENSION) {
+            std::fs::create_dir_all(dir)?;
+            std::fs::write(&path, MCP_EXTENSION)?;
+        }
+        Ok(Some(path))
     }
 
     /// Reads the models pi is configured with from a throwaway pi process
@@ -166,10 +207,27 @@ impl Provider for PiProvider {
     fn start(&self, spec: SessionSpec) -> Result<ProviderSession, ProviderError> {
         let (commands, command_rx) = mpsc::unbounded_channel();
         let (events, event_rx) = mpsc::unbounded_channel();
+        let mut env = spec.env.clone();
+        let mut extensions = Vec::new();
+        if !spec.mcp_servers.is_empty() {
+            match self.mcp_extension() {
+                Ok(Some(path)) => {
+                    extensions.push(path.display().to_string());
+                    env.push((
+                        MCP_SERVERS_ENV.into(),
+                        mcp_servers(&spec.mcp_servers).to_string(),
+                    ));
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::warn!(%error, "could not write pi's MCP extension; no agent tools");
+                }
+            }
+        }
         let launcher = CliLauncher {
             binary: self.binary.clone(),
             cwd: PathBuf::from(&spec.cwd),
-            env: spec.env.clone(),
+            env,
             unset: spec.unset.clone(),
             trace: self.trace_dir.as_ref().map(|dir| {
                 let name = format!("pi-{}.jsonl", uuid::Uuid::new_v4().simple());
@@ -180,6 +238,7 @@ impl Provider for PiProvider {
             model: spec.model.clone(),
             thinking: spec.thinking_option_id.clone(),
             append_system_prompt: spec.system_prompt.clone(),
+            extensions,
         };
         let session = Session::new(launcher, settings, spec.resume.clone(), events);
         tokio::spawn(session.run(command_rx));
@@ -224,7 +283,23 @@ pub fn arguments(resume: Option<&str>, settings: &Settings) -> Vec<String> {
     {
         args.extend(["--append-system-prompt".into(), prompt.clone()]);
     }
+    for extension in &settings.extensions {
+        args.extend(["--extension".into(), extension.clone()]);
+    }
     args
+}
+
+/// Servers as pi's `mcp.json` entries (`url` and `headers`; pi speaks
+/// Streamable HTTP), as Paseo's `toPiMcpConfig` makes them.
+pub fn mcp_servers(servers: &[McpServer]) -> Value {
+    let entries = servers.iter().map(|server| {
+        let headers: Map<String, Value> = (server.headers.iter())
+            .map(|(name, value)| (name.clone(), value.clone().into()))
+            .collect();
+        let entry = json!({"url": server.url, "headers": headers});
+        (server.name.clone(), entry)
+    });
+    Value::Object(entries.collect())
 }
 
 impl Launcher for CliLauncher {
@@ -305,11 +380,12 @@ mod tests {
             model: Some("google/gemini-2.5-flash-lite".into()),
             thinking: Some("low".into()),
             append_system_prompt: Some("Be brief.".into()),
+            extensions: vec!["/state/pi/burrow-mcp-servers.mjs".into()],
         };
         assert_eq!(
             arguments(None, &settings).join(" "),
             "--mode rpc --model google/gemini-2.5-flash-lite --thinking low \
-             --append-system-prompt Be brief."
+             --append-system-prompt Be brief. --extension /state/pi/burrow-mcp-servers.mjs"
         );
         let resumed = arguments(Some("abc"), &settings).join(" ");
         assert!(resumed.contains("--session abc"));
@@ -331,5 +407,40 @@ mod tests {
         assert_eq!(info.label, "Pi");
         assert!(info.modes.is_empty() && info.default_mode_id.is_none());
         assert!(!info.capabilities.mcp_servers && info.capabilities.steer);
+    }
+
+    #[test]
+    fn mcp_servers_become_http_entries_with_their_headers() {
+        let server = McpServer {
+            name: "paseo".into(),
+            url: "http://127.0.0.1:4100/mcp".into(),
+            headers: vec![("Authorization".into(), "Bearer t".into())],
+            stdio: None,
+        };
+        assert_eq!(
+            mcp_servers(&[server]),
+            json!({"paseo": {"url": "http://127.0.0.1:4100/mcp",
+                             "headers": {"Authorization": "Bearer t"}}})
+        );
+    }
+
+    #[test]
+    fn the_extension_is_written_once_and_sessions_without_servers_skip_it() {
+        let dir = std::env::temp_dir().join(format!("burrow-pi-ext-{}", uuid::Uuid::new_v4()));
+        let pi = PiProvider {
+            binary: "pi".into(),
+            version: None,
+            trace_dir: None,
+            models: Arc::default(),
+            extension_dir: None,
+        };
+        assert_eq!(pi.mcp_extension().unwrap(), None);
+        let pi = pi.with_extension_dir(dir.clone());
+        let path = pi.mcp_extension().unwrap().unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), MCP_EXTENSION);
+        std::fs::write(&path, "stale").unwrap();
+        pi.mcp_extension().unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), MCP_EXTENSION);
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

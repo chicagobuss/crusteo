@@ -273,6 +273,8 @@ pub fn run(options: &Options) -> io::Result<Report> {
         }
         (None, None) => String::new(),
     };
+    import_push_tokens(options, &mut report)?;
+    import_schedules(options, &mut report)?;
     if options.dry_run {
         let mut store = Store::restore(persist::read(&options.home)?);
         store.server_id = server_id;
@@ -300,6 +302,60 @@ pub fn run(options: &Options) -> io::Result<Report> {
         )));
     }
     Ok(report)
+}
+
+/// Paseo's apps' push tokens (`push-tokens.json`), so the phones that had
+/// notifications from Paseo get them from Burrow. A token Burrow already
+/// has keeps the later of the two leases.
+fn import_push_tokens(options: &Options, report: &mut Report) -> io::Result<()> {
+    let theirs = crate::push::read_leases(&options.from.join("push-tokens.json"));
+    let now = clock::now_ms();
+    let live: Vec<(String, i64)> = (theirs.into_iter())
+        .filter(|(_, ends)| *ends > now)
+        .collect();
+    if live.is_empty() {
+        return Ok(());
+    }
+    report.note(format!(
+        "{} push token{} for Paseo's apps",
+        live.len(),
+        if live.len() == 1 { "" } else { "s" }
+    ));
+    if options.dry_run {
+        return Ok(());
+    }
+    let path = options.home.join("push-tokens.json");
+    let mut ours = crate::push::read_leases(&path);
+    for (token, ends) in live {
+        let kept = ours.entry(token).or_insert(ends);
+        *kept = (*kept).max(ends);
+    }
+    crate::push::write_leases(&path, &ours)
+}
+
+/// Paseo's schedules (`schedules/<id>.json`), as they are: the agents they
+/// name keep their ids, so a heartbeat carries on with its agent, paused
+/// or not. One Burrow already has is left alone.
+fn import_schedules(options: &Options, report: &mut Report) -> io::Result<()> {
+    let theirs = crate::schedules::read_dir(&options.from.join("schedules"));
+    let dir = options.home.join("schedules");
+    let ours = crate::schedules::read_dir(&dir);
+    for (id, schedule) in theirs {
+        let name = schedule.name.as_deref().unwrap_or("unnamed");
+        if ours.contains_key(&id) {
+            report.present(format!("schedule {id} \"{name}\""));
+            continue;
+        }
+        let status = serde_json::to_value(schedule.status).unwrap_or_default();
+        report.note(format!(
+            "schedule {id} \"{name}\", {}",
+            status.as_str().unwrap_or("?")
+        ));
+        if !options.dry_run {
+            crate::schedules::write(&dir, &schedule)?;
+        }
+    }
+    Ok(())
 }
 
 /// `path` made absolute with its links resolved, as far as it exists.

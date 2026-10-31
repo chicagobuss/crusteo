@@ -26,7 +26,7 @@ phone: Skiff ──▶ Reef (6798) ────────────┘
 |---|---|---|---|
 | **Crusteo** | `crusteo` | your computer | The desktop app: every daemon at once, in one window. |
 | **Reef** | `reef` | one always-on machine | The fleet service: connects to every daemon and serves phones **Skiff**, a single-file web page, over a compact protocol. [Install](docs/reef/install.md) |
-| **Burrow** | `burrow` | each host that runs agents | Crusteo's own daemon, speaking Paseo's protocol. Runs Claude Code, Codex, Antigravity, pi and Cursor agents; runs next to Paseo's daemon or replaces it. [Install](docs/burrow/install.md) |
+| **Burrow** | `burrow` | each host that runs agents | Crusteo's own daemon, speaking Paseo's protocol. Runs Claude Code, Codex, Antigravity, pi, Cursor, OpenCode and Gemini CLI agents; runs next to Paseo's daemon or replaces it. [Install](docs/burrow/install.md) |
 
 Each part is optional and works with the others' Paseo counterparts: the desktop app and Reef
 connect to Paseo's daemons and Burrow alike, and the Paseo apps connect to Burrow. All three
@@ -210,7 +210,8 @@ extension with no settings stays off and makes no requests.
 | Ctrl/Cmd+N | New workspace |
 | Ctrl/Cmd+L | Focus the composer |
 | Ctrl/Cmd+V | Paste text or attach a clipboard image in the composer |
-| Ctrl/Cmd+, | Settings |
+| Ctrl/Cmd+, | Settings, sliding in over the layout |
+| Ctrl/Cmd+Shift+H | History: every agent, latest first |
 | Ctrl/Cmd+Shift+L | Cycle layouts |
 | Ctrl/Cmd+F | Find on the Lanes board |
 | Ctrl/Cmd+= / - / 0 | Zoom in, zoom out, actual size |
@@ -220,7 +221,9 @@ extension with no settings stays off and makes no requests.
 | Escape | Interrupt the running turn |
 
 The title bar's menu (≡) has Settings, Keyboard shortcuts, Customize toolbars and **About**, which
-shows the version, the Paseo protocol and each host's daemon version. On macOS the menu bar also has
+shows the version, the Paseo protocol and each host's daemon version. Settings, the title bar's
+History button and its state counts each slide a pane in over the layout, from the edge nearest
+what opened it (the right for a key); closing it leaves the layout as it was. On macOS the menu bar also has
 About, Cmd+Q, Cmd+H, Cmd+Option+H and Cmd+M.
 
 In a terminal, copy and paste are Ctrl+Shift+C / Ctrl+Shift+V on Linux and Windows, Cmd+C / Cmd+V
@@ -230,7 +233,7 @@ on macOS.
 
 | Layout | What it shows |
 |---|---|
-| **Paseo** | The reference app: sidebar, workspace header, tabs, conversation, composer, plus the New workspace, History, Hosts and Settings screens. |
+| **Paseo** | The reference app: sidebar, workspace header, tabs, conversation, composer, plus the New workspace, History (with archived agents) and Hosts screens. |
 | **Lanes** | Workspaces as cards in lanes grouped by label (individual labels, label combinations, or both), project, host or workspace. Expand a card to read and answer its conversation in place, relabel it, or archive it. Optional colored lanes and recency-tinted headers. |
 | **Fleet** | One column per host, every agent on it, most urgent first, with per-host state counts. Answer permission prompts and stop agents right from the cards. |
 | **Board** | Every workspace as a card, in columns by state: Needs input, Failed, Ready to review, Working, Done. |
@@ -326,8 +329,8 @@ folder (`~/.burrow`, or `BURROW_HOME`). It can also replace Paseo on a host, kee
 host's identity, and `burrow import-paseo` brings over its agents of every provider Burrow runs,
 which carry on their sessions; it only ever reads `~/.paseo`.
 
-**Status: early.** It runs Claude Code, Codex, Antigravity, pi and Cursor agents with your own
-installs of each. Requests it doesn't support yet get the same answer Paseo's daemon gives a
+**Status: early.** It runs Claude Code, Codex, Antigravity, pi, Cursor, OpenCode and Gemini CLI
+agents with your own installs of each. Requests it doesn't support yet get the same answer Paseo's daemon gives a
 request it doesn't know. There is no password support yet, so keep it on loopback or a
 locked-down network.
 

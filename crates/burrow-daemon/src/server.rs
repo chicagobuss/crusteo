@@ -64,6 +64,17 @@ pub async fn start(daemon: Arc<Daemon>) -> std::io::Result<Running> {
         daemon.clone(),
         shutdown_rx.clone(),
     )));
+    tasks.push(tokio::spawn(crate::schedules::run_loop(
+        daemon.clone(),
+        shutdown_rx.clone(),
+    )));
+    // Agents started from now on get the tools; one that cannot listen
+    // only means agents go without them.
+    match crate::mcp::serve(daemon.clone(), shutdown_rx.clone()).await {
+        Ok(task) => tasks.push(task),
+        Err(err) => tracing::warn!(%err, "agent tools (MCP) not served"),
+    }
+    crate::mcp::finish::resume(&daemon);
     Ok(Running {
         daemon,
         local_addr,

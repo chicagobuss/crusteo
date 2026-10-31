@@ -47,6 +47,9 @@ pub struct Config {
     /// Where Burrow's git worktrees go. Defaults to `<home>/worktrees`,
     /// or a temporary directory without a home.
     pub worktrees_root: Option<PathBuf>,
+    /// Where push notifications to Paseo's apps go (Expo's push service,
+    /// [`crate::push::EXPO_PUSH_URL`]); `None` sends none.
+    pub push_url: Option<String>,
 }
 
 /// Protocol timers. Paseo's values by default; tests shorten them.
@@ -93,6 +96,7 @@ impl Config {
             allowed_origins: Vec::new(),
             timing: Timing::default(),
             worktrees_root: None,
+            push_url: None,
         }
     }
 
@@ -151,6 +155,16 @@ pub struct Daemon {
     pub local_endpoint: OnceLock<String>,
     /// When it started, as Paseo's `daemon.get_status` says it.
     pub started_at: String,
+    /// Connected clients, as notifications see them.
+    pub clients: crate::push::Clients,
+    /// Paseo's apps' push tokens.
+    pub push_tokens: crate::push::Tokens,
+    /// Paseo's schedules.
+    pub schedules: crate::schedules::Schedules,
+    /// The agent tools' MCP server: its address and tokens.
+    pub mcp: crate::mcp::Mcp,
+    /// Agents waiting to be told another finished.
+    pub finish: crate::mcp::finish::Finish,
 }
 
 impl Daemon {
@@ -173,6 +187,9 @@ impl Daemon {
     fn with_store(config: Config, mut store: Store, writer: Option<Writer>) -> Arc<Self> {
         let (events, _) = broadcast::channel(EVENT_BACKLOG);
         let attachments = Attachments::new(config.home.as_deref(), &config.server_id);
+        let push_tokens = crate::push::Tokens::open(config.home.as_deref());
+        let schedules = crate::schedules::Schedules::open(config.home.as_deref());
+        let finish = crate::mcp::finish::Finish::open(config.home.as_deref());
         store.server_id = config.server_id.clone();
         Arc::new(Self {
             config,
@@ -185,6 +202,11 @@ impl Daemon {
             setups: Mutex::new(HashMap::new()),
             local_endpoint: OnceLock::new(),
             started_at: crate::clock::now_iso(),
+            clients: crate::push::Clients::default(),
+            push_tokens,
+            schedules,
+            mcp: crate::mcp::Mcp::default(),
+            finish,
         })
     }
 

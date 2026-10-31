@@ -81,8 +81,29 @@ pub enum Screen {
         project: Option<String>,
     },
     Hosts,
-    Settings,
     History,
+}
+
+/// What a slide-in pane shows. One is open at a time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Pane {
+    /// The agents in one state, after a click on its count: see
+    /// [`crate::state_list`].
+    State(fleet::Bucket),
+    /// Every agent, the latest change first, from the History button.
+    History,
+    Settings,
+}
+
+impl Pane {
+    /// The agents a list pane lists: Some state, or None for every state.
+    pub fn listing(self) -> Option<Option<fleet::Bucket>> {
+        match self {
+            Pane::State(state) => Some(Some(state)),
+            Pane::History => Some(None),
+            Pane::Settings => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -302,9 +323,9 @@ pub struct Nav {
     /// Agents of one state singled out on the Lanes board, after a click on
     /// the title bar's counts; not saved.
     pub state_highlight: Option<fleet::Bucket>,
-    /// The state whose agents the slide-out list shows, after a click on
-    /// its count in the title bar; not saved.
-    pub state_list: Option<fleet::Bucket>,
+    /// The slide-in pane open over the window, and the edge it came in
+    /// from, the one nearest what opened it; not saved.
+    pub pane: Option<(Pane, crate::toolbars::Side)>,
     /// Local display overrides by canonical label-derived lane key. Retained when a label
     /// disappears so returning hosts keep their choices; renames use a new key.
     pub lane_color_choices: BTreeMap<String, String>,
@@ -429,7 +450,7 @@ impl Nav {
             card_order: ui.card_order,
             ordering_revision: 0,
             state_highlight: None,
-            state_list: None,
+            pane: None,
             lane_color_choices: ui.lane_color_choices,
             agent_colors: ui.agent_colors,
             popout_bounds: ui.popout_bounds,
@@ -1020,13 +1041,27 @@ impl Nav {
         }
     }
 
-    /// Opens the slide-out list of one state's agents, or with None closes
-    /// it.
-    pub fn set_state_list(&mut self, state: Option<fleet::Bucket>, cx: &mut Context<Self>) {
-        if self.state_list != state {
-            self.state_list = state;
+    /// Opens a slide-in pane at the `Side` edge, in place of any other, or
+    /// with None closes it.
+    pub fn set_pane(
+        &mut self,
+        pane: Option<(Pane, crate::toolbars::Side)>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.pane != pane {
+            self.pane = pane;
             cx.notify();
         }
+    }
+
+    /// Opens `pane`, or closes it if it is open.
+    pub fn toggle_pane(&mut self, pane: Pane, side: crate::toolbars::Side, cx: &mut Context<Self>) {
+        let open = self.pane.is_some_and(|(open, _)| open == pane);
+        self.set_pane((!open).then_some((pane, side)), cx);
+    }
+
+    pub fn pane_open(&self, pane: Pane) -> bool {
+        self.pane.is_some_and(|(open, _)| open == pane)
     }
 
     /// Reef mode: what Lanes saved by label name (lane order, collapsed

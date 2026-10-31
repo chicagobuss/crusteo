@@ -49,6 +49,7 @@ const SECTIONS: &[Section] = &[
             (&["Mod", "L"], "Focus the composer"),
             (&["Mod", "B"], "Show or hide the sidebar"),
             (&["Mod", ","], "Settings"),
+            (&["Mod", "Shift", "H"], "History: every agent, latest first"),
             (&["Mod", "="], "Zoom in"),
             (&["Mod", "-"], "Zoom out"),
             (&["Mod", "0"], "Actual size"),
