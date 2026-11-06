@@ -93,6 +93,27 @@ pub struct Session<L: Launcher> {
     /// A prompt sent right after the interrupt is a new turn by then, and
     /// that stale result must not end it.
     aborting: bool,
+    /// The foreground turn's prompt, as the CLI's `command_lifecycle`
+    /// frames tell of it.
+    prompt: Option<Prompt>,
+}
+
+/// Where a turn's prompt is in the CLI's queue. A prompt the CLI has
+/// queued but not started waits behind another query, such as the one a
+/// background task's notification starts: that query's `result` is not
+/// this turn's.
+struct Prompt {
+    uuid: String,
+    queued: bool,
+    started: bool,
+}
+
+impl Prompt {
+    /// Queued behind another query. Only a CLI that reports its queue says
+    /// so; with an older one no result is held back.
+    fn waiting(&self) -> bool {
+        self.queued && !self.started
+    }
 }
 
 impl<L: Launcher> Session<L> {
@@ -122,6 +143,7 @@ impl<L: Launcher> Session<L> {
             permissions: HashMap::new(),
             usage: Usage::default(),
             aborting: false,
+            prompt: None,
         }
     }
 
@@ -172,6 +194,7 @@ impl<L: Launcher> Session<L> {
         self.initialized = false;
         self.restart_needed = false;
         self.aborting = false;
+        self.prompt = None;
         let mut initialize = json!({"subtype": "initialize"});
         if let Some(prompt) = &self.settings.append_system_prompt {
             initialize["appendSystemPrompt"] = prompt.clone().into();
@@ -305,7 +328,13 @@ impl<L: Launcher> Session<L> {
                 self.emit(ProviderEvent::TurnStarted {
                     turn: Some(turn_id),
                 });
-                let message = self.user_message(&text, &images, &uuid_for(&message_id), false);
+                let uuid = uuid_for(&message_id);
+                let message = self.user_message(&text, &images, &uuid, false);
+                self.prompt = Some(Prompt {
+                    uuid,
+                    queued: false,
+                    started: false,
+                });
                 self.write(message);
             }
             Command::Steer {
@@ -324,6 +353,7 @@ impl<L: Launcher> Session<L> {
                 let turn = self.turn_id();
                 self.turn = None;
                 self.aborting = true;
+                self.prompt = None;
                 self.emit(ProviderEvent::TurnCanceled {
                     turn,
                     reason: "Interrupted".into(),
@@ -430,6 +460,7 @@ impl<L: Launcher> Session<L> {
             // `/clear`: a new, empty conversation (its `init` follows), so
             // the meter starts from nothing rather than the old context.
             "conversation_reset" => self.usage.context_used = Some(0),
+            "command_lifecycle" => self.on_lifecycle(&message),
             "control_request" => self.on_cli_request(&message),
             "control_response" => self.on_control_response(&message["response"]),
             "control_cancel_request" => {
@@ -663,12 +694,36 @@ impl<L: Launcher> Session<L> {
         }
     }
 
+    /// The CLI's word on a prompt in its queue (`queued`, `started`,
+    /// `completed`), kept for the foreground turn's own prompt.
+    fn on_lifecycle(&mut self, message: &Value) {
+        let Some(prompt) = self.prompt.as_mut() else {
+            return;
+        };
+        if message["command_uuid"].as_str() != Some(prompt.uuid.as_str()) {
+            return;
+        }
+        match message["state"].as_str() {
+            Some("queued") => prompt.queued = true,
+            Some("started") => prompt.started = true,
+            _ => {}
+        }
+    }
+
     fn on_result(&mut self, message: &Value) {
         if std::mem::take(&mut self.aborting) {
             // The interrupted turn's own result, before the next turn's
             // `init`: it ends that turn, already closed, not this one.
             return;
         }
+        if matches!(self.turn, Some(Turn::Foreground(_)))
+            && self.prompt.as_ref().is_some_and(Prompt::waiting)
+        {
+            // The query ahead of the prompt ended (a background task's
+            // notification, say); the prompt's own runs next.
+            return;
+        }
+        self.prompt = None;
         let Some(_) = self.turn else {
             // A result after an interrupt or for a turn already closed.
             return;

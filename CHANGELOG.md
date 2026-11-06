@@ -33,8 +33,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   lanes "Lower band". Bands are kept on the device, like its other map choices. Each band is a
   section of the map of its own, above the other lanes (beside them on a wide screen), and no
   lane is packed thinner than its name and a tile where the map has room.
-- Skiff: a swipe left from a conversation opens Recent, every agent with the latest activity
-  first. Its order holds still for five seconds at a time, so a row stays where it was while you
+- Skiff: History, every agent with the latest activity first, from a History button at the
+  right of the tabs (after Filters) or a swipe left from a conversation. Its order holds still for five seconds at a time, so a row stays where it was while you
   reach for it: a line under the heading fills while a re-sort is coming, stops while you touch
   the list, and sorts now when tapped; rows slide to their new places.
 - Skiff's map tiles show how fresh each agent is as well as its state: each tile is split on
@@ -63,6 +63,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Burrow: a prompt to a Claude agent no longer ends its turn at once, with a "finished"
+  notification in crusteo and Skiff as it starts and the work then shown as a turn of its own.
+  When a background task's notification woke Claude Code just as the prompt arrived, the
+  notification's query ran first and its result was taken for the prompt's. Burrow now starts
+  Claude with `--replay-user-messages` and follows the prompt through Claude's queue
+  (`command_lifecycle`), so only the prompt's own result ends its turn.
+- The Reef and Burrow archives for macOS and Linux build again: the packaging script copied
+  `packaging/<component>/` with `install`, which stopped at `packaging/reef/record/`, the
+  Vector example. Subfolders are copied now, and the Windows zip has the example's files too
+  rather than an empty folder.
 - Skiff no longer shows another agent's thinking. A thought's text, once opened, was kept by
   its id alone, and every agent's timeline numbers its thoughts the same way (`thought_1`,
   `thought_2`, ...), so opening a second agent showed the first one's thought under the same

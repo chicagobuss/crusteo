@@ -171,6 +171,14 @@ select, input, textarea { font: inherit; color: inherit; background: var(--surfa
 .toolbar { flex-shrink: 0; padding: 8px 12px; display: flex; flex-direction: column; gap: 8px; border-bottom: 1px solid var(--border); }
 .tabs { display: flex; gap: 6px; align-items: center; }
 .tabs .grow { flex: 1; }
+/* One line each, History at the far right; a narrow phone gets them a
+   little smaller rather than wrapped or cut off. */
+.tabs button { white-space: nowrap; flex-shrink: 0; }
+@media (max-width: 400px) {
+  .tabs { gap: 4px; }
+  .tabs button { font-size: 14px; padding: 6px 8px; }
+  .tabs button.plain { padding: 4px 2px; }
+}
 .controls { display: flex; flex-wrap: wrap; gap: 6px; }
 .controls input { flex: 1 1 140px; }
 .controls select { flex: 0 1 auto; }
@@ -459,6 +467,7 @@ button.primary.danger { background: var(--bad); border-color: var(--bad); color:
         <button id="tab-map">Map</button>
         <span class="grow"></span>
         <button class="plain" id="filters-toggle" hidden>Filters</button>
+        <button id="tab-history">History</button>
       </div>
       <div class="controls" id="controls" hidden>
         <input id="query" type="search" placeholder="Search" autocomplete="off">
@@ -519,7 +528,7 @@ button.primary.danger { background: var(--bad); border-color: var(--bad); color:
   </section>
   <section class="pane recent" id="recentpane" hidden>
     <div class="recenthead"><button class="plain" id="recentback" aria-label="Back"></button>
-      <h2>Recent</h2><span class="n" id="recentcount"></span></div>
+      <h2>History</h2><span class="n" id="recentcount"></span></div>
     <button class="resort idle" id="resort" aria-label="Sort now"><i></i></button>
     <div class="scroll" id="recentscroll"><div id="recentbody"></div></div>
   </section>
@@ -3140,6 +3149,9 @@ $("dots").onclick = () => showSheet("hosts");
 $("tab-ny").onclick = () => { leaveMap(); prefs.tab = "ny"; savePrefs(); delete views.list; subscribeList(); drawAll(); };
 $("tab-all").onclick = () => { leaveMap(); prefs.tab = "all"; savePrefs(); delete views.list; subscribeList(); drawAll(); };
 $("tab-map").onclick = () => { if (open) openAgent(null); prefs.tab = "map"; savePrefs(); mapState.size = null; subscribeList(); drawAll(); };
+// History: every agent, the latest activity first, over whatever is shown
+// (the list a swipe left from a conversation brings in).
+$("tab-history").onclick = () => openRecent();
 $("filters-toggle").onclick = () => { prefs.filters = !prefs.filters; savePrefs(); drawChrome(); };
 $("back").onclick = goBack;
 $("recentback").innerHTML = icon("back", 26);

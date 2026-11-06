@@ -778,8 +778,11 @@ daemon itself.
 - **Going back:** Back, Esc, or a swipe to the right, which drags what it leaves (the conversation,
   the open card, a lane, Recent, a picture, the usage drawer) with the finger; past a third of the
   screen, or flicked, it goes, otherwise it springs back.
-- **Recent:** a swipe left from a conversation (on a phone, or the map's open card) brings in every
-  agent in one list, the latest activity first, the agent just left highlighted. A tap opens one
+- **History** (the Recent pane): the History button at the right of the tabs, after Filters,
+  opens it over any tab, and a swipe left from a conversation (on a phone, or the map's open
+  card) brings it in: every agent in one list, the latest activity first, the agent just left
+  highlighted. On a narrow phone (under 400px) the tabs shrink a little so the row stays one
+  line. A tap opens one
   where conversations open; a swipe right goes back to the conversation left. The order holds
   still: rows change in place, and move, sliding, only once a line under the heading has filled,
   five seconds after the order first differs. The line shows only while a re-sort is coming;

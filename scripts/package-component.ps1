@@ -38,7 +38,8 @@ New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 try {
     Copy-Item $Binary (Join-Path $Dir "$Exe.exe")
     Copy-Item (Join-Path $Root $Guide) (Join-Path $Dir "INSTALL.md")
-    Copy-Item (Join-Path $Root "packaging/$Component/*") (Join-Path $Dir "examples")
+    # -Recurse: packaging/reef/record/ holds a whole example.
+    Copy-Item (Join-Path $Root "packaging/$Component/*") (Join-Path $Dir "examples") -Recurse
     foreach ($f in "LICENSE", "NOTICE", "CHANGELOG.md") {
         $src = Join-Path $Root $f
         if (Test-Path $src) { Copy-Item $src $Dir }

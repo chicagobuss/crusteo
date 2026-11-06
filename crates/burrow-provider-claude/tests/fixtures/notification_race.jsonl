@@ -1,0 +1,15 @@
+// A prompt that arrives as a background task's notification wakes the CLI (frames as Claude Code 2.1.317 sends them with --replay-user-messages): the notification's query runs first and its result is not the prompt's; the turn ends with the prompt's own result, and no autonomous turn opens.
+{"dir":"in","frame":{"type":"control_request","request":{"subtype":"initialize"}}}
+{"dir":"out","frame":{"type":"control_response","response":{"subtype":"success","request_id":"$REQ","response":{}}}}
+{"cmd":{"prompt":{"turn":"foreground-turn-1","text":"Say just: ok","messageId":"28148d08-0f8c-45db-83c1-8fe9ac36a002"}}}
+{"dir":"in","frame":{"type":"user","uuid":"28148d08-0f8c-45db-83c1-8fe9ac36a002"}}
+{"dir":"out","frame":{"type":"command_lifecycle","command_uuid":"28148d08-0f8c-45db-83c1-8fe9ac36a002","state":"queued","uuid":"5d4e3cc4-c327-4938-8277-a6a6a9918be6","session_id":"sess-6"}}
+{"dir":"out","frame":{"type":"system","subtype":"init","session_id":"sess-6","permissionMode":"default"}}
+{"dir":"out","frame":{"type":"assistant","message":{"id":"msg_8","role":"assistant","content":[{"type":"text","text":"The background sleep finished with exit code 0."}]},"parent_tool_use_id":null,"session_id":"sess-6"}}
+{"dir":"out","frame":{"type":"result","subtype":"success","is_error":false,"result":"The background sleep finished with exit code 0.","session_id":"sess-6","usage":{"input_tokens":5,"output_tokens":9}}}
+{"dir":"out","frame":{"type":"command_lifecycle","command_uuid":"28148d08-0f8c-45db-83c1-8fe9ac36a002","state":"started","uuid":"e821d62b-d59c-45fa-99c0-df25abcbe441","session_id":"sess-6"}}
+{"dir":"out","frame":{"type":"system","subtype":"init","session_id":"sess-6","permissionMode":"default"}}
+{"dir":"out","frame":{"type":"user","message":{"role":"user","content":[{"type":"text","text":"Say just: ok"}]},"parent_tool_use_id":null,"session_id":"sess-6","uuid":"28148d08-0f8c-45db-83c1-8fe9ac36a002","isReplay":true}}
+{"dir":"out","frame":{"type":"assistant","message":{"id":"msg_9","role":"assistant","content":[{"type":"text","text":"ok"}]},"parent_tool_use_id":null,"session_id":"sess-6"}}
+{"dir":"out","frame":{"type":"result","subtype":"success","is_error":false,"result":"ok","session_id":"sess-6","usage":{"input_tokens":5,"output_tokens":1}}}
+{"dir":"out","frame":{"type":"command_lifecycle","command_uuid":"28148d08-0f8c-45db-83c1-8fe9ac36a002","state":"completed","uuid":"eebed3d9-2fe3-4d86-99c8-80d016844484","session_id":"sess-6"}}

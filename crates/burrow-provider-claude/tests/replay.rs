@@ -362,6 +362,36 @@ async fn a_prompt_right_after_an_interrupt_is_not_ended_by_the_aborted_result() 
 }
 
 #[tokio::test]
+async fn a_prompt_queued_behind_a_notification_ends_with_its_own_result() {
+    let played = play(include_str!("fixtures/notification_race.jsonl"), None, None).await;
+    let e = &played.events;
+    let ends: Vec<&ProviderEvent> = (e.iter())
+        .filter(|x| {
+            matches!(
+                x,
+                ProviderEvent::TurnCompleted { .. } | ProviderEvent::TurnFailed { .. }
+            )
+        })
+        .collect();
+    assert_eq!(ends.len(), 1, "one turn, ended once: {e:?}");
+    assert!(
+        matches!(ends[0], ProviderEvent::TurnCompleted { turn: Some(t), .. } if t == "foreground-turn-1"),
+        "the prompt's turn ends: {e:?}"
+    );
+    assert!(
+        !e.iter()
+            .any(|x| matches!(x, ProviderEvent::TurnStarted { turn: None })),
+        "the prompt's own query is not an autonomous turn"
+    );
+    // It ends after the reply to the prompt, not the notification's.
+    let end = e
+        .iter()
+        .position(|x| matches!(x, ProviderEvent::TurnCompleted { .. }))
+        .unwrap();
+    assert!(text(&e[..end]).ends_with("ok"));
+}
+
+#[tokio::test]
 async fn the_cli_can_start_a_turn_by_itself() {
     let played = play(
         include_str!("fixtures/autonomous.jsonl"),

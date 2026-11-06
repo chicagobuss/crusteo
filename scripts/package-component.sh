@@ -50,7 +50,11 @@ case "$target" in
 esac
 
 install -m 0644 "$root/$guide" "$dir/INSTALL.md"
-install -m 0644 "$root/packaging/$component/"* "$dir/examples/"
+# Subfolders too (packaging/reef/record/ holds a whole example), every
+# file 0644 as before.
+cp -R "$root/packaging/$component/." "$dir/examples/"
+find "$dir/examples" -type d -exec chmod 0755 {} +
+find "$dir/examples" -type f -exec chmod 0644 {} +
 for f in LICENSE NOTICE CHANGELOG.md; do
   if [ -f "$root/$f" ]; then install -m 0644 "$root/$f" "$dir/"; fi
 done

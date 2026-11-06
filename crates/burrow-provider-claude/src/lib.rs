@@ -141,6 +141,10 @@ pub fn arguments(resume: Option<&str>, settings: &Settings) -> Vec<String> {
         "--input-format",
         "stream-json",
         "--include-partial-messages",
+        // Echoes each prompt as it enters a query, with `command_lifecycle`
+        // frames (queued, started, completed) under its uuid: how a turn
+        // tells its own result from that of a query run ahead of it.
+        "--replay-user-messages",
         "--permission-prompt-tool",
         "stdio",
         "--setting-sources=user,project,local",
