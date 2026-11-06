@@ -183,11 +183,10 @@ pub use text::{
     html, markdown, markdown_ast,
 };
 pub use text_selection::{
-    TextSelection, TextSelectionContentKey, TextSelectionCoverage, TextSelectionEndpoint,
-    TextSelectionEvent, TextSelectionGroupId, TextSelectionHandle, TextSelectionLayer,
-    TextSelectionProjection, TextSelectionRegistration, TextSelectionRun, TextSelectionScopeId,
-    TextSelectionSnapshot,
-    TextSelectionWindowPoints, TouchHandleLayout,
+    SelectionMotion, TextSelection, TextSelectionContentKey, TextSelectionCoverage,
+    TextSelectionEndpoint, TextSelectionEvent, TextSelectionGroupId, TextSelectionHandle,
+    TextSelectionLayer, TextSelectionProjection, TextSelectionRegistration, TextSelectionRun,
+    TextSelectionScopeId, TextSelectionSnapshot, TextSelectionWindowPoints, TouchHandleLayout,
 };
 pub use theme::{PlotTheme, ResizableTheme, ScrollbarTheme, Theme, ThemeAppearance};
 pub use theme_tokens::{

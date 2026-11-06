@@ -29,7 +29,8 @@ pub(crate) enum FromServer {
     },
     Message {
         conn: u64,
-        message: ClientMsg,
+        // Boxed: a list's spec is the bulk of it.
+        message: Box<ClientMsg>,
     },
     Closed {
         conn: u64,
@@ -97,8 +98,12 @@ pub async fn start(config: ReefConfig) -> std::io::Result<ReefHandle> {
         if let Some(feed) = config.usage {
             crate::usage::watch_feed(feed, config.limits.usage_feed, apply_tx.clone());
         }
-        let mut upstream = Upstream::new(config.hosts, config.client_id, events_tx, apply_tx);
+        let mut upstream =
+            Upstream::new(config.hosts, config.client_id, events_tx, apply_tx.clone());
         upstream.usage_every = limits.usage_ask;
+        // Recording, from record.json in the data dir.
+        let record_dir = config.record_dir.as_deref().or(config.data_dir.as_deref());
+        upstream.record = crate::record::Recorder::new(record_dir, apply_tx);
         // Reef keeps the fleet's labels; agents carry them.
         let labels_path = config.data_dir.as_ref().map(|dir| dir.join(catalog::FILE));
         upstream.fleet.labels = Some(
@@ -358,6 +363,8 @@ impl State {
         let tick = (usage_source::reports::ASK_TICK).min(self.limits.usage_ask);
         let mut usage = tokio::time::interval(tick);
         usage.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut record = tokio::time::interval(self.limits.record);
+        record.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             tokio::select! {
                 Some((host, generation, event)) = events.recv() => {
@@ -371,6 +378,7 @@ impl State {
                     self.up.ask_usage();
                     self.up.dirty_usage |= !self.up.usage.is_empty();
                 }
+                _ = record.tick() => self.up.record_tick(),
                 else => break,
             }
             self.deliver();
@@ -427,7 +435,7 @@ impl State {
                     self.phones.insert(conn, Phone { out, subs });
                 }
             }
-            FromServer::Message { conn, message } => self.on_message(conn, message),
+            FromServer::Message { conn, message } => self.on_message(conn, *message),
             FromServer::Closed { conn } => self.drop_phone(conn),
             FromServer::Image { key, reply } => {
                 if let Some(image) = self.image(key) {

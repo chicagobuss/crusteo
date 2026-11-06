@@ -1002,6 +1002,7 @@ mod tests {
             id: "claude".into(),
             label: "Claude".into(),
             status: "ready".into(),
+            error: None,
             enabled: true,
             default_mode: Some("gone".into()),
             modes: vec![Choice {

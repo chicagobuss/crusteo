@@ -43,6 +43,9 @@ pub struct Limits {
     /// feed read: as often as crusteo asks them.
     pub usage_ask: Duration,
     pub usage_feed: Duration,
+    /// How often recording looks at `record.json`, reads due agents and
+    /// sends sinks their next batch.
+    pub record: Duration,
 }
 
 impl Default for Limits {
@@ -62,6 +65,7 @@ impl Default for Limits {
             session_grace: Duration::from_secs(300),
             usage_ask: usage_source::reports::ASK_EVERY,
             usage_feed: crate::usage::FEED_EVERY,
+            record: Duration::from_secs(1),
         }
     }
 }
@@ -156,7 +160,14 @@ pub struct ListSpec {
     pub collapsed: Vec<String>,
     /// Groups shown longer than `limit`, by group key.
     pub more: BTreeMap<String, usize>,
+    /// The map's label groups raised to bands (`label:<id>`), as the
+    /// phone keeps them: their agents' lanes sit together under the label,
+    /// split by their other labels, as crusteo's Lanes bands do.
+    pub bands: Vec<String>,
 }
+
+/// The most bands a map is asked for.
+pub const BANDS_MAX: usize = 32;
 
 impl Default for ListSpec {
     fn default() -> Self {
@@ -168,6 +179,7 @@ impl Default for ListSpec {
             limit: 30,
             collapsed: Vec::new(),
             more: BTreeMap::new(),
+            bands: Vec::new(),
         }
     }
 }
@@ -398,6 +410,16 @@ fn list_spec(value: &Value, limits: &Limits) -> ListSpec {
         limit: count(&value["limit"], limits.list_default, limits.list_max),
         collapsed: strings(&value["collapsed"]),
         more,
+        bands: {
+            let mut bands: Vec<String> = strings(&value["bands"])
+                .into_iter()
+                .filter(|key| key.len() > "label:".len() && key.starts_with("label:"))
+                .collect();
+            bands.sort();
+            bands.dedup();
+            bands.truncate(BANDS_MAX);
+            bands
+        },
     }
 }
 

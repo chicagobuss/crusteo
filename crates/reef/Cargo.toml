@@ -16,7 +16,10 @@ serde_json.workspace = true
 paseo-client.workspace = true
 fleet.workspace = true
 usage-source.workspace = true
-tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "sync", "macros", "io-util"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "sync", "macros", "io-util", "process"] }
+# Recording: scrubbing patterns, and the dedupe key.
+regex = "1"
+sha2.workspace = true
 tokio-tungstenite = "0.28"
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 # Device tokens come from the operating system's random source.

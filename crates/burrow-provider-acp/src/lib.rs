@@ -90,6 +90,57 @@ pub fn opencode(binary: Option<&Path>) -> AgentConfig {
     }
 }
 
+/// How old an unpacked Bun library must be before it is cleared.
+const BUN_LEFTOVER_AGE: Duration = Duration::from_secs(60 * 60);
+
+/// Has a Bun-built agent (OpenCode is one) unpack its native libraries
+/// into `dir` rather than the shared temporary directory. Bun writes a new
+/// copy (`.<hash>-00000000.so`, about 4 MB for OpenCode) at every launch
+/// and never removes it; `/tmp` is often memory, so the copies from
+/// Burrow's probes and sessions add up to gigabytes a day. Each probe clears
+/// the old ones here ([`sweep_bun_leftovers`]).
+pub fn with_bun_tmpdir(mut config: AgentConfig, dir: &Path) -> AgentConfig {
+    if let Err(error) = std::fs::create_dir_all(dir) {
+        tracing::warn!(dir = %dir.display(), %error, "could not make Bun's directory; leaving Bun's default");
+        return config;
+    }
+    config
+        .env
+        .push(("BUN_TMPDIR".into(), dir.display().to_string()));
+    config
+}
+
+/// Removes unpacked Bun libraries in `dir` older than `age`. A library is
+/// loaded at launch, and a loaded library outlives its file, so this is
+/// safe while agents run. Returns how many went.
+pub fn sweep_bun_leftovers(dir: &Path, age: Duration) -> usize {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    let now = std::time::SystemTime::now();
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        let library = name.starts_with('.')
+            && name.contains('-')
+            && [".so", ".dylib", ".node"]
+                .iter()
+                .any(|ext| name.ends_with(ext));
+        let old = entry
+            .metadata()
+            .ok()
+            .filter(|meta| meta.is_file())
+            .and_then(|meta| meta.modified().ok())
+            .and_then(|modified| now.duration_since(modified).ok())
+            .is_some_and(|elapsed| elapsed >= age);
+        if library && old && std::fs::remove_file(entry.path()).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
+}
+
 /// Google's Gemini CLI over ACP, `gemini --acp`. Paseo has no Gemini
 /// provider of its own; there it is a custom ACP agent.
 pub fn gemini(binary: Option<&Path>) -> AgentConfig {
@@ -141,6 +192,11 @@ pub struct AcpProvider {
     catalog: Arc<RwLock<Catalog>>,
     /// Set until the first probe has finished, well or not.
     probing: Arc<AtomicBool>,
+    /// The last probe's error while no probe has succeeded yet. One that
+    /// once succeeded stays offered with what it found, so a passing
+    /// failure (a timeout, the network) does not take a working agent away.
+    failure: Arc<RwLock<Option<String>>>,
+    probed_ok: Arc<AtomicBool>,
     trace_dir: Option<PathBuf>,
 }
 
@@ -150,6 +206,7 @@ impl AcpProvider {
         let program = config.command.first()?;
         let output = std::process::Command::new(program)
             .arg("--version")
+            .envs(config.env.iter().map(|(k, v)| (k, v)))
             .output()
             .ok()?;
         let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -158,6 +215,8 @@ impl AcpProvider {
             version: Some(version).filter(|v| output.status.success() && !v.is_empty()),
             catalog: Arc::default(),
             probing: Arc::new(AtomicBool::new(true)),
+            failure: Arc::default(),
+            probed_ok: Arc::default(),
             trace_dir: burrow_provider::env::var_os("BURROW_ACP_TRACE").map(PathBuf::from),
         })
     }
@@ -173,6 +232,33 @@ impl AcpProvider {
     /// Asks the agent for its modes and models (one throwaway session in
     /// the home directory) and keeps them for [`Provider::info`].
     pub async fn refresh(&self) -> Result<(), String> {
+        let result = self.probe_catalog().await;
+        // A launch failure ends the first probe too, or it would say
+        // `loading` for good.
+        self.probing.store(false, Ordering::Release);
+        match &result {
+            Ok(()) => {
+                self.probed_ok.store(true, Ordering::Release);
+                *self.failure.write().unwrap_or_else(|p| p.into_inner()) = None;
+            }
+            Err(error) => {
+                *self.failure.write().unwrap_or_else(|p| p.into_inner()) = Some(error.clone());
+            }
+        }
+        result
+    }
+
+    async fn probe_catalog(&self) -> Result<(), String> {
+        if let Some((_, dir)) = self.config.env.iter().find(|(k, _)| k == "BUN_TMPDIR") {
+            let removed = sweep_bun_leftovers(Path::new(dir), BUN_LEFTOVER_AGE);
+            if removed > 0 {
+                tracing::info!(
+                    provider = self.config.id,
+                    removed,
+                    "cleared Bun's old unpacked libraries"
+                );
+            }
+        }
         let home = std::env::var_os("HOME")
             .or_else(|| std::env::var_os("USERPROFILE"))
             .map(PathBuf::from)
@@ -197,7 +283,6 @@ impl AcpProvider {
             .await
             .map_err(|_| format!("probing {} timed out", config.id))
             .and_then(|probed| probed);
-        self.probing.store(false, Ordering::Release);
         *self.catalog.write().unwrap_or_else(|p| p.into_inner()) = catalog?;
         Ok(())
     }
@@ -268,6 +353,16 @@ impl Provider for AcpProvider {
         self.probing.load(Ordering::Acquire)
     }
 
+    fn unavailable(&self) -> Option<String> {
+        if self.probed_ok.load(Ordering::Acquire) {
+            return None;
+        }
+        self.failure
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+    }
+
     /// Paseo's ACP turns are named by UUIDs.
     fn foreground_turn_id(&self, _number: u64) -> String {
         uuid::Uuid::new_v4().to_string()
@@ -305,6 +400,69 @@ impl Launcher for AgentLauncher {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A CLI that dies at once (as Gemini's does when its vendor refuses
+    /// the client) ends the first probe, so the provider stops saying
+    /// `loading`, and is unavailable with the reason until a probe succeeds.
+    /// One that has probed well keeps being offered through later failures.
+    #[tokio::test]
+    async fn a_probe_that_never_succeeds_makes_the_provider_unavailable() {
+        let mut config = gemini(None);
+        config.command = vec!["/nonexistent/acp-agent".into(), "--acp".into()];
+        let provider = AcpProvider {
+            config: Arc::new(config),
+            version: Some("0.0.0".into()),
+            catalog: Arc::default(),
+            probing: Arc::new(AtomicBool::new(true)),
+            failure: Arc::default(),
+            probed_ok: Arc::default(),
+            trace_dir: None,
+        };
+        assert!(provider.loading() && provider.unavailable().is_none());
+        assert!(provider.refresh().await.is_err());
+        assert!(!provider.loading());
+        assert!(provider.unavailable().is_some());
+
+        provider.probed_ok.store(true, Ordering::Release);
+        assert!(provider.refresh().await.is_err());
+        assert!(
+            provider.unavailable().is_none(),
+            "a passing failure keeps it offered"
+        );
+    }
+
+    /// Old unpacked libraries go; new ones, and anything else, stay.
+    #[test]
+    fn only_old_bun_libraries_are_swept() {
+        let dir = std::env::temp_dir().join(format!("burrow-bun-sweep-{}", std::process::id()));
+        let config = with_bun_tmpdir(opencode(None), &dir);
+        assert!(
+            config
+                .env
+                .contains(&("BUN_TMPDIR".into(), dir.display().to_string()))
+        );
+        for name in [
+            ".98e7f7dfebfe57fe-00000000.so",
+            ".a1b2-00000000.dylib",
+            "notes.so",
+            "keep.txt",
+        ] {
+            std::fs::write(dir.join(name), b"x").unwrap();
+        }
+        assert_eq!(
+            sweep_bun_leftovers(&dir, Duration::from_secs(3600)),
+            0,
+            "all new"
+        );
+        assert_eq!(sweep_bun_leftovers(&dir, Duration::ZERO), 2);
+        let mut left: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        left.sort();
+        assert_eq!(left, ["keep.txt", "notes.so"]);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn cursor_is_configured_as_paseo_adds_it() {

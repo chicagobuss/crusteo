@@ -992,6 +992,8 @@ impl Element for Inline {
                 .text_view_state()
                 .map(|state| state.read(cx).text_view_style.selection())
                 .unwrap_or_else(|| crate::Theme::global(cx).tokens.colors.selection);
+            // crusteo: keyboard.
+            let color = crate::text_selection::selection_color(color, window, cx);
             Self::paint_selection(selection, &text_layout, &bounds, window, color);
             if let Some((start, end)) = Self::selection_edges(selection, &text_layout)
                 && let Some(text_view_state) = GlobalState::global(cx).text_view_state().cloned()

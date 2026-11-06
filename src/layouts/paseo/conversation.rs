@@ -13,7 +13,8 @@ use fleet::display::{self, AgentLink, ToolDisplay};
 use fleet::prompt_index::{self, PromptMark};
 use fleet::timeline::{ItemKind, TaskActivity, ToolCall, Turn};
 use gpui_kit::base::{
-    Disableable as _, ElementExt as _, SelectableText, TextSelection, TextSelectionGroupId,
+    Disableable as _, ElementExt as _, SelectableText, SelectionMotion, TextSelection,
+    TextSelectionGroupId,
 };
 use gpui_kit::component::Sizable;
 use gpui_kit::component::button::{Button, ButtonVariants};
@@ -22,10 +23,10 @@ use gpui_kit::component::text::{SelectionFormat, TextView, TextViewState};
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::gpui::{
     AnyElement, App, AppContext, ClickEvent, Context, DismissEvent, Entity, EventEmitter,
-    Focusable, FollowMode, InteractiveElement, IntoElement, ListAlignment, ListOffset, ListState,
-    MouseButton, MouseDownEvent, ParentElement, Pixels, Point, Render, SharedString,
-    StatefulInteractiveElement, Styled, Subscription, WeakEntity, Window, anchored, deferred, div,
-    list, px, relative, svg,
+    FocusHandle, Focusable, FollowMode, InteractiveElement, IntoElement, KeyDownEvent,
+    ListAlignment, ListOffset, ListState, MouseButton, MouseDownEvent, MouseUpEvent, ParentElement,
+    Pixels, Point, Render, SharedString, StatefulInteractiveElement, Styled, Subscription,
+    WeakEntity, Window, anchored, deferred, div, list, px, relative, svg,
 };
 use gpui_kit::prelude::FluentBuilder;
 use serde_json::{Value, json};
@@ -133,6 +134,11 @@ pub struct Conversation {
     copy_menu: Option<(Point<Pixels>, Entity<PopupMenu>, Subscription)>,
     /// A form for each pending question, by permission id.
     question_forms: QuestionForms,
+    /// Has the keyboard while a selection in the stream does: keys move the
+    /// selection, and copy copies it rather than the composer's.
+    keyboard: FocusHandle,
+    /// A left press began in the stream; its release settles the keyboard.
+    pressed: bool,
 }
 
 /// Pending questions' forms by permission id.
@@ -311,6 +317,8 @@ impl Conversation {
             replies: Rc::default(),
             copy_menu: None,
             question_forms: Rc::default(),
+            keyboard: cx.focus_handle().tab_stop(false),
+            pressed: false,
         };
         let weak = cx.entity().downgrade();
         this.list.set_scroll_handler(move |event, _, cx| {
@@ -402,6 +410,76 @@ impl Conversation {
         if let Some(composer) = &self.composer {
             composer.update(cx, |composer, cx| composer.focus(window, cx));
         }
+    }
+
+    /// After a press in the stream: a selection takes the keyboard, so one
+    /// blinking caret shows where keys go. A click that selected nothing
+    /// gives it back to the composer, if the selection had it.
+    fn settle_keyboard(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !std::mem::take(&mut self.pressed) {
+            return;
+        }
+        if TextSelection::has_selection(window, cx) {
+            self.keyboard.focus(window, cx);
+            TextSelection::give_keyboard(&self.keyboard, window, cx);
+        } else if self.keyboard.is_focused(window) {
+            self.focus_composer(window, cx);
+        }
+    }
+
+    /// Keys while a selection has the keyboard. Shift with the arrows,
+    /// Home and End moves its end; typing and pasting go to the composer.
+    fn selection_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.keyboard.is_focused(window) {
+            return;
+        }
+        let keystroke = &event.keystroke;
+        let mods = &keystroke.modifiers;
+        // Alt with an arrow on a Mac, Ctrl elsewhere, goes a word at a time.
+        let word = if cfg!(target_os = "macos") {
+            mods.alt
+        } else {
+            mods.control
+        };
+        let line = cfg!(target_os = "macos") && mods.platform;
+        let motion = match (keystroke.key.as_str(), mods.shift) {
+            ("left", true) if line => Some(SelectionMotion::LineStart),
+            ("right", true) if line => Some(SelectionMotion::LineEnd),
+            ("left", true) if word => Some(SelectionMotion::WordLeft),
+            ("right", true) if word => Some(SelectionMotion::WordRight),
+            ("left", true) => Some(SelectionMotion::Left),
+            ("right", true) => Some(SelectionMotion::Right),
+            ("up", true) => Some(SelectionMotion::Up),
+            ("down", true) => Some(SelectionMotion::Down),
+            ("home", true) => Some(SelectionMotion::LineStart),
+            ("end", true) => Some(SelectionMotion::LineEnd),
+            ("a", false) if mods.secondary() => Some(SelectionMotion::All),
+            _ => None,
+        };
+        if let Some(motion) = motion {
+            TextSelection::move_caret(motion, window, cx);
+            cx.stop_propagation();
+            return;
+        }
+        let composer = self.composer.clone();
+        if keystroke.key == "escape" && !mods.modified() {
+            TextSelection::clear(window, cx);
+            self.focus_composer(window, cx);
+        } else if keystroke.key == "v" && mods.secondary() && !mods.shift {
+            let Some(composer) = composer else { return };
+            composer.update(cx, |composer, cx| composer.paste(window, cx));
+        } else if let Some(text) = &keystroke.key_char
+            && !(mods.control || mods.alt || mods.platform)
+            && !text.chars().any(char::is_control)
+        {
+            // Not Backspace, Delete, Enter or Tab: a draft out of sight is
+            // never changed or sent by them.
+            let Some(composer) = composer else { return };
+            composer.update(cx, |composer, cx| composer.type_text(text, window, cx));
+        } else {
+            return;
+        }
+        cx.stop_propagation();
     }
 
     pub fn draft(&self, cx: &App) -> Option<fleet::prompt::Prompt> {
@@ -1676,6 +1754,10 @@ impl Render for Conversation {
                     .min_h(px(0.))
                     .pt(px(12.))
                     .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _: &MouseDownEvent, _, _| this.pressed = true),
+                    )
+                    .on_mouse_down(
                         MouseButton::Right,
                         cx.listener(|this, event: &MouseDownEvent, window, cx| {
                             this.open_copy_menu(event.position, None, window, cx);
@@ -1724,6 +1806,18 @@ impl Render for Conversation {
             .children(self.track_bar(cx))
             .children(self.composer.clone())
             .children(self.copy_menu_layer(window, cx))
+            // Where keys go while a selection has the keyboard: too small to
+            // be clicked, so a click never takes the keyboard by itself.
+            .child(div().absolute().track_focus(&self.keyboard))
+            .on_key_down(cx.listener(Self::selection_key))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _: &MouseUpEvent, window, cx| this.settle_keyboard(window, cx)),
+            )
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(|this, _: &MouseUpEvent, window, cx| this.settle_keyboard(window, cx)),
+            )
             .into_any_element()
     }
 }
@@ -2063,7 +2157,11 @@ fn render_row(
                                 .mt(px(4.))
                                 .text_size(size::sm())
                                 .text_color(p.muted)
-                                .child(text.clone()),
+                                // Selectable like a prompt, within its turn.
+                                .child(SelectableText::new(
+                                    SharedString::from(format!("thought-{}", item.id)),
+                                    text.clone(),
+                                )),
                         );
                     }
                     col.into_any_element()

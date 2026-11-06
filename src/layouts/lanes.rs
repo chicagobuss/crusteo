@@ -5571,12 +5571,11 @@ impl Lanes {
         let host = card.host.clone();
         let agent_id = card.agent_id.clone();
         let scope = element_scope(&[&lane.key, card.host.as_str(), &card.agent_id]);
-        let activity = activity::label(
-            card.updated_at
-                .as_deref()
-                .or_else(|| agent.and_then(|agent| agent.created_at.as_deref())),
-            now_millis(),
-        );
+        let at = (card.updated_at.as_deref())
+            .or_else(|| agent.and_then(|agent| agent.created_at.as_deref()));
+        let activity = activity::label(at, now_millis());
+        // A blurb takes the line, and the age keeps to its right edge.
+        let age = (blurb.is_some() && at.is_some()).then(|| activity.clone());
         let footer = blurb.clone().unwrap_or(activity);
         let actions = agent.and_then(|agent| {
             crate::widgets::agent_controls::permission_buttons(
@@ -5647,6 +5646,7 @@ impl Lanes {
                             .when(blurb.is_none(), |d| d.italic())
                             .child(footer),
                     )
+                    .when_some(age, |d, age| d.child(card_age(age)))
                     .when_some(actions, |d, actions| {
                         d.child(
                             div()
@@ -6091,14 +6091,11 @@ impl Lanes {
         let blurb = blurb(store, card, cx);
         let focused = self.card_focused(&lane.key, card);
         let scope = element_scope(&[&lane.key, card.host.as_str(), &card.agent_id]);
-        let footer = blurb.clone().unwrap_or_else(|| {
-            activity::label(
-                card.updated_at
-                    .as_deref()
-                    .or_else(|| agent.and_then(|agent| agent.created_at.as_deref())),
-                now_millis(),
-            )
-        });
+        let at = (card.updated_at.as_deref())
+            .or_else(|| agent.and_then(|agent| agent.created_at.as_deref()));
+        let activity = activity::label(at, now_millis());
+        let age = (blurb.is_some() && at.is_some()).then(|| activity.clone());
+        let footer = blurb.clone().unwrap_or(activity);
         let actions = agent.and_then(|agent| {
             crate::widgets::agent_controls::permission_buttons(
                 &self.core, &card.host, agent, &scope,
@@ -6158,6 +6155,7 @@ impl Lanes {
                             .when(blurb.is_none(), |d| d.italic())
                             .child(footer),
                     )
+                    .when_some(age, |row, age| row.child(card_age(age)))
                     .when_some(actions, |row, actions| {
                         row.child(
                             div()
@@ -7687,6 +7685,18 @@ fn blurb(store: &crate::app::FleetStore, card: &LaneCard, cx: &App) -> Option<St
         Some(other) if !other.is_empty() => Some(other.to_string()),
         _ => None,
     }
+}
+
+/// How long ago a card's agent last did something, kept whole at the end of
+/// its footer while the blurb before it is cut short.
+fn card_age(age: String) -> AnyElement {
+    div()
+        .flex_shrink_0()
+        .line_height(px(16.))
+        .text_size(size::sm())
+        .text_color(palette().extra_muted)
+        .child(age)
+        .into_any_element()
 }
 
 /// Marks a subagent's row as started by the row above.

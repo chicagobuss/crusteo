@@ -923,7 +923,8 @@ impl<M: InputModeKind> TextElement<M> {
         cx: &mut App,
     ) -> Vec<Path<Pixels>> {
         let state = self.state.read(cx);
-        if !state.focus_handle.is_focused(window) {
+        // crusteo: keyboard.
+        if !state.focus_handle.is_focused(window) && !state.blurred_selection {
             return vec![];
         }
 
@@ -3020,8 +3021,17 @@ impl<M: InputModeKind> Element for TextElement<M> {
                 }
             }
 
+            // crusteo: keyboard. Grey while another place has the keyboard.
+            let selection = if focused {
+                editor_style.selection
+            } else {
+                Hsla {
+                    s: 0.,
+                    ..editor_style.selection
+                }
+            };
             for path in prepaint.selection_paths.drain(..) {
-                window.paint_path(path, editor_style.selection);
+                window.paint_path(path, selection);
             }
 
             // Paint hover highlight

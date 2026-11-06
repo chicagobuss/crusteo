@@ -971,9 +971,9 @@ pub fn exchange(agent_id: &str) -> Value {
         "direction": "tail",
         "reset": true,
         "epoch": "stress",
-        "window": { "maxSeq": base + 7 },
+        "window": { "maxSeq": base + 8 },
         "startCursor": { "seq": 1 },
-        "endCursor": { "seq": base + 7 },
+        "endCursor": { "seq": base + 8 },
         "hasOlder": false,
         "hasNewer": false,
         "entries": [
@@ -1014,7 +1014,12 @@ pub fn exchange(agent_id: &str) -> Value {
                 "text": "The nightly benchmark finished: still 0.3 s, so the change holds.",
                 "messageId": "stress-reply-2",
             })),
-            entry(7, "stress-turn-3", "20:00", json!({
+            entry(7, "stress-turn-3", "19:58", json!({
+                "type": "reasoning",
+                "text": "The quota feed says 09:20. That is before the pull request runs, \
+    so there is room for it; worth saying so before anyone asks.",
+            })),
+            entry(8, "stress-turn-3", "20:00", json!({
                 "type": "assistant_message",
                 "text": "Quota at 09:20: plenty left for the pull request.",
                 "messageId": "stress-reply-3",

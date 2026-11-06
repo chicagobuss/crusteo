@@ -23,6 +23,8 @@ pub struct Provider {
     pub id: String,
     pub label: String,
     pub status: String,
+    /// Why a provider whose status is `error` cannot run, as the daemon says.
+    pub error: Option<String>,
     pub enabled: bool,
     pub default_mode: Option<String>,
     pub modes: Vec<Choice>,
@@ -109,6 +111,7 @@ pub fn parse(payload: &Value) -> Vec<Provider> {
                 id: entry["provider"].as_str()?.to_string(),
                 label: entry["label"].as_str().unwrap_or_default().to_string(),
                 status: entry["status"].as_str().unwrap_or_default().to_string(),
+                error: entry["error"].as_str().map(str::to_string),
                 enabled: entry["enabled"].as_bool().unwrap_or(true),
                 default_mode: entry["defaultModeId"].as_str().map(str::to_string),
                 modes: choices(&entry["modes"]),

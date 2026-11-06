@@ -58,6 +58,21 @@ selectable. Text in no group selects across the window as before. crusteo
 groups each conversation turn, so a drag never runs on into the next turn or
 across other cards.
 
+## A selection can have the keyboard
+
+`TextSelection::give_keyboard` (selection_keys.rs) hands the window's
+selection a focus handle. While that handle has focus, the selection's moving
+end is a caret: it blinks, painted over everything once participants have
+painted, and `TextSelection::move_caret` moves it by character, word, row on
+screen, line end, or over the whole group, as Shift with the arrows does in a
+text box. While the handle doesn't have focus the selection is painted grey
+(`selection_color`, used by `SelectableText` and Markdown text). The next
+press or clear takes the keyboard back. A selection never given the keyboard
+looks and behaves as before.
+
+`blurred_selection(true)` on a text box keeps its selection painted, grey,
+while it doesn't have focus; upstream hides it.
+
 ## Up and Down at the first or last line go to the start or end
 
 `move_vertical` (input/base/movement.rs) kept the cursor where it was when

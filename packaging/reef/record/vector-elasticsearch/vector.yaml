@@ -1,0 +1,39 @@
+# Vector as a Reef sink: records arrive on stdin, one JSON line each (the
+# exec sink's plain mode), and go to Elasticsearch, a daily index.
+#
+# Each record's `id` is the document id, so a reply sent again as it grew,
+# or a tool call once it finished, replaces the earlier one.
+
+sources:
+  reef:
+    type: stdin
+    decoding:
+      codec: json
+
+transforms:
+  # Each tool's input and output has its own shape; as JSON text they never
+  # clash in the index's mapping, and they stay searchable as text.
+  flatten:
+    type: remap
+    inputs: [reef]
+    source: |
+      if exists(.tool.input) { .tool.input = encode_json(.tool.input) }
+      if exists(.tool.output) { .tool.output = encode_json(.tool.output) }
+      if exists(.tool.error) { .tool.error = encode_json(.tool.error) }
+      if exists(.todo) { .todo = encode_json(.todo) }
+
+sinks:
+  elasticsearch:
+    type: elasticsearch
+    inputs: [flatten]
+    endpoints: [http://elasticsearch:9200]
+    api_version: v8
+    mode: bulk
+    bulk:
+      index: reef-fleet-%Y.%m.%d
+      action: index
+    id_key: id
+    # Vector holds records here while Elasticsearch catches up.
+    buffer:
+      type: memory
+      max_events: 10000

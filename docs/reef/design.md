@@ -740,18 +740,30 @@ daemon itself.
   messages show one line each with Steer and drop. Stop sits beside the working timer.
 - **The Map tab**, a board of every agent you move around like a map, drawn differently at each
   distance:
-  - *Far:* each lane of the current grouping is a block of small tiles (state colour, a pulse
-    while working, a glow for the last few minutes' work, a mark when it waits on someone), the
-    block named and carrying a count of those waiting. Blocks are packed into the map's own shape
+  - *Far:* each lane of the current grouping is a block of small tiles, each split on the
+    diagonal: the state colour above, and below how fresh it is, from white just now to black at
+    two weeks on a log scale (an hour is 40% of the way, a day 73%, a week 93%). The key is a
+    strip above the map, not over any tile; × hides it for good on that device, and the help
+    button (?) beside Settings brings it back, on the map. A tile pulses while working and carries a mark when it waits on someone; the
+    block is named and carries a count of those waiting. Blocks are packed into the map's own shape
     by an ordered squarified treemap, sized by agent count, so a portrait phone stacks them and a
     desk lays them out wide; tiles wrap inside each block. A new shape (rotation, resize) re-packs
-    with an animation.
+    with an animation. Grouped by label, a label can be raised to a *band*, as crusteo's Lanes
+    bands are: its agents leave their other lanes and sit together in one framed cell under the
+    label's name, split by their other labels, those with no other in "just <label>". Filters'
+    Bands choice raises any label or lowers one, and a lane's heading has "Raise to band" and
+    "Lower band"; the bands are the phone's own (`prefs.bands` in local storage), sent with the
+    map's subscription (`bands`, `label:<id>` keys) for Reef to arrange. Each band is a section
+    of its own along the map's longer side, then one section for the other lanes, each at least
+    120px; within a section a lane that would pack thinner than 76px is given more room and the
+    section packed again, so a lane of one agent beside big ones keeps its name and a tile.
   - *Middle:* tapping a block, or zooming in past one, shows its agents as cards as wide as the
     screen: title, host, state, time and the latest reply. Only cards in view are drawn, and only
     they are the map's `focus`.
   - *Near:* a card opens into the live conversation where it is and grows to fill the map: the
     same pane, composer, permission buttons and question forms as elsewhere. Back, Esc or pinching
-    out closes it into its card.
+    out closes it into its card; a swipe right goes all the way out to the whole map, where the
+    agent's tile pulses.
 
   One finger pans and two pinch (the map has `touch-action: none`, so the page never zooms);
   on a desk the wheel pans and a trackpad pinch (a wheel with Ctrl) zooms. Fit all returns to the
@@ -764,8 +776,16 @@ daemon itself.
   crusteo's meters are, and hidden when nothing reports usage; a tap slides in a drawer with every
   account, its plan, the use-before-reset hint and each window's use and reset.
 - **Going back:** Back, Esc, or a swipe to the right, which drags what it leaves (the conversation,
-  the open card, a lane, a picture, the usage drawer) with the finger; past a third of the screen,
-  or flicked, it goes, otherwise it springs back.
+  the open card, a lane, Recent, a picture, the usage drawer) with the finger; past a third of the
+  screen, or flicked, it goes, otherwise it springs back.
+- **Recent:** a swipe left from a conversation (on a phone, or the map's open card) brings in every
+  agent in one list, the latest activity first, the agent just left highlighted. A tap opens one
+  where conversations open; a swipe right goes back to the conversation left. The order holds
+  still: rows change in place, and move, sliding, only once a line under the heading has filled,
+  five seconds after the order first differs. The line shows only while a re-sort is coming;
+  agents new to the list wait for it, and ones that left stay, dimmed, until then. Touching or
+  scrolling the list stops the line (and its redraws) until a second after you let go; tapping
+  the line sorts now. It is the `agents` view, ungrouped and newest first, 50 rows at a time.
 - **New agent:** the + in the top bar opens a form: the host, then its ready providers, model,
   mode and thinking (when the model has thinking options), a directory (the host's workspaces, or
   another typed in), labels, and the first message. It remembers the last choices on each host,

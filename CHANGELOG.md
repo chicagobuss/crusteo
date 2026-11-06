@@ -7,6 +7,90 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.0-beta.5] - 2026-11-06
+
+### Added
+
+- Text selected in a conversation takes the keyboard, and one blinking caret shows where keys
+  go. Shift with the arrows, Home and End moves the selection's end (Ctrl, or Option on a Mac,
+  a word at a time), within its turn; Ctrl/Cmd+A selects the turn, and Esc clears it and goes
+  back to the message box. Typing or pasting goes back to the message box too. The selection
+  that doesn't have the keyboard, in the conversation or the message box, stays in grey.
+- Reef records the fleet: with `record.json` in its data dir it follows every agent and sends
+  each prompt, reply, thought, tool call and finished turn, as `fleet-event/1` records scrubbed
+  of keys, tokens and email addresses, to any number of sinks. A sink is a file a day of JSON
+  lines, or a program Reef starts and feeds over stdin: one that acknowledges each batch
+  (`reef-sink/1`), or any tool that reads JSON lines, such as Vector, which reaches
+  Elasticsearch, S3 and R2, Kafka, Loki and more. Each sink has a cursor per agent, so after the
+  sink, the store behind it or Reef itself was down, recording resumes from the daemon's
+  timeline where it stopped. The file is read again on every change; `reef --demo --data-dir`
+  records the demo fleet. See `docs/reef/record.md`; `packaging/reef/record/` has Vector into
+  Elasticsearch, in Docker.
+- Skiff's map can raise a label to a band, as crusteo's Lanes does: its agents sit together in
+  one framed cell under the label's name, split into lanes by their other labels ("just <label>"
+  for those with none), instead of in those labels' own lanes. Filters has a Bands choice that
+  raises any label or lowers a raised one; a lane's heading has "Raise to band", and a band's
+  lanes "Lower band". Bands are kept on the device, like its other map choices. Each band is a
+  section of the map of its own, above the other lanes (beside them on a wide screen), and no
+  lane is packed thinner than its name and a tile where the map has room.
+- Skiff: a swipe left from a conversation opens Recent, every agent with the latest activity
+  first. Its order holds still for five seconds at a time, so a row stays where it was while you
+  reach for it: a line under the heading fills while a re-sort is coming, stops while you touch
+  the list, and sorts now when tapped; rows slide to their new places.
+- Skiff's map tiles show how fresh each agent is as well as its state: each tile is split on
+  the diagonal, its state colour above and, below, white for just now darkening to black at two
+  weeks on a log scale (a week is nearly black). A key in a strip above the map explains it; ×
+  hides it and the new help button (?) beside Settings brings it back. Idle tiles are a muted
+  blue rather than grey, to stand apart from the grey of age, and in the light theme the map's
+  lanes are a stone grey, so the white of a fresh tile shows.
+
+### Changed
+
+- Skiff's map: a group opened from the map is a grid of boxes, two across on a phone, the most
+  recently active agent first (top left), strictly by activity. Each box has the agent's name,
+  how it is and since when ("Done · 3m"), and its host, in its tile's state colour with its age
+  along the bottom; one waiting on you has an amber outline. The boxes hold their order as
+  Recent's rows do: they move once the line under the group's heading has filled, never under a
+  finger, and tapping the line sorts now (one shared implementation for both).
+- The map's group names sit on a strip of the label's colour, dark text in light mode and light
+  in dark, with the count beside them; a name too long for its group wraps to two lines instead
+  of being cut short.
+- Skiff: a swipe right from the map's open card goes all the way out to the whole map, rather
+  than to its lane, and the agent's tile pulses to show where it was.
+- Lanes: a card's last line keeps how long ago its agent was active at its right edge when it
+  shows a status ("Finished", "Needs permission") or the agent's last reply, rather than losing
+  it.
+
+### Fixed
+
+- Skiff no longer shows another agent's thinking. A thought's text, once opened, was kept by
+  its id alone, and every agent's timeline numbers its thoughts the same way (`thought_1`,
+  `thought_2`, ...), so opening a second agent showed the first one's thought under the same
+  number. Opened details now belong to the open agent and are dropped when another opens, and a
+  thought opened while it was still streaming is read again once it has grown. Reef's demo fleet
+  gives each agent a thought of its own.
+- Burrow no longer offers a provider that cannot run. An ACP agent whose probe has never
+  succeeded since Burrow started, such as Gemini's CLI signed in with a personal Google account
+  ("This client is no longer supported for Gemini Code Assist for individuals"), is listed as
+  `error` with that reason: crusteo's New agent dialog leaves it out, Skiff names it under "Not
+  ready here" with the reason, and creating an agent on it is refused at once instead of failing
+  at its first prompt. A provider that has probed well once stays offered through later
+  failures. A CLI that cannot even start no longer leaves its provider "loading" for good.
+- Burrow: `/clear` on a Claude agent empties its context meter, rather than leaving the cleared
+  conversation's size until the next reply.
+- Burrow: a message that interrupts a busy Claude agent (as another agent's send does) no longer
+  shows a `[System Error] … error_during_execution` and marks the new turn failed while the agent
+  works on. That error was the interrupted turn's own aborted result, arriving after the new
+  prompt; it is now dropped.
+- Burrow no longer fills the temporary directory with OpenCode's native library. Burrow ran every
+  provider's CLI for its `--version` each 5 minutes, and OpenCode, built with Bun, unpacks a 4 MB
+  library into `/tmp` at each launch and never removes it: about 2 GB a day, in memory where
+  `/tmp` is a RAM disk. A CLI is now run for its version only when its file changed, and
+  OpenCode's probes and sessions unpack into Burrow's home (`tmp/bun`), where each probe clears
+  copies over an hour old.
+- Ctrl/Cmd+C after selecting text in a conversation copies it, rather than the message box's
+  selection, or nothing, over the clipboard.
+
 ## [0.1.0-beta.4] - 2026-10-31
 
 ### Added
@@ -622,7 +706,8 @@ First alpha, for a few early testers. Early software: expect rough edges.
 - Patched GPUI (`vendor/gpui-pre`) that skips redraws on window moves and lets cached views be
   reused after they move.
 
-[Unreleased]: https://github.com/chicagobuss/crusteo/compare/v0.1.0-beta.4...HEAD
+[Unreleased]: https://github.com/chicagobuss/crusteo/compare/v0.1.0-beta.5...HEAD
+[0.1.0-beta.5]: https://github.com/chicagobuss/crusteo/releases/tag/v0.1.0-beta.5
 [0.1.0-beta.4]: https://github.com/chicagobuss/crusteo/releases/tag/v0.1.0-beta.4
 [0.1.0-beta.3]: https://github.com/chicagobuss/crusteo/releases/tag/v0.1.0-beta.3
 [0.1.0-beta.2]: https://github.com/chicagobuss/crusteo/releases/tag/v0.1.0-beta.2

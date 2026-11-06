@@ -10,13 +10,16 @@
   --bg: #f6f6f8; --surface: #ffffff; --surface2: #eeeef2; --text: #17171c; --muted: #6b6b76;
   --faint: #9a9aa4; --border: #dcdce2; --accent: #3b6cf6; --warn: #c27c00; --bad: #d13b3b;
   --run: #2f8f5b; --sel: #e6ecff; --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  --pace: #2b7fd1;
+  --pace: #2b7fd1; --idle: oklch(0.68 0.07 255);
+  /* A map lane: stone, so the white of a fresh tile and the blue of idle both show. */
+  --block: #d9d5ce;
 }
 @media (prefers-color-scheme: dark) {
   :root {
     --bg: #111114; --surface: #1b1b20; --surface2: #25252c; --text: #ececf1; --muted: #a0a0ab;
     --faint: #6e6e78; --border: #2f2f37; --accent: #7b9dff; --warn: #f0b13a; --bad: #ff6b6b;
-    --run: #4cc38a; --sel: #23283a; --pace: #79c0ff;
+    --run: #4cc38a; --sel: #23283a; --pace: #79c0ff; --idle: oklch(0.56 0.07 255);
+    --block: #25252c;
   }
 }
 * { box-sizing: border-box; }
@@ -46,8 +49,9 @@ select, input, textarea { font: inherit; color: inherit; background: var(--surfa
 .swatch { display: inline-block; width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; background: var(--c); }
 .column.tinted { border-top: 3px solid var(--c); }
 .column.tinted h3 { color: var(--c); }
-.block.tinted { background: color-mix(in srgb, var(--c) 9%, var(--surface2)); border-color: color-mix(in srgb, var(--c) 40%, var(--border)); }
-.block.tinted .name { color: var(--c); }
+.block.tinted { background: color-mix(in srgb, var(--c) 9%, var(--block)); border-color: color-mix(in srgb, var(--c) 40%, var(--border)); }
+.block.tinted .name { color: #111; background: color-mix(in srgb, var(--c) 55%, white); }
+@media (prefers-color-scheme: dark) { .block.tinted .name { color: #fff; background: color-mix(in srgb, var(--c) 50%, black); } }
 /* Map */
 #mappane { flex: 1; }
 .app.map { flex-direction: column; }
@@ -57,17 +61,45 @@ select, input, textarea { font: inherit; color: inherit; background: var(--surfa
   background: var(--bg); }
 .mboard { position: absolute; left: 0; top: 0; transform-origin: 0 0; will-change: transform; }
 .mboard.fly { transition: transform .28s ease; }
-.block { position: absolute; border-radius: 10px; background: var(--surface2); border: 1px solid var(--border);
+.block { position: absolute; border-radius: 10px; background: var(--block); border: 1px solid var(--border);
   transition: left .4s, top .4s, width .4s, height .4s; overflow: hidden; }
-.block .name { position: absolute; left: 6px; top: 3px; right: 30px; font-size: 12px; font-weight: 600; color: var(--muted);
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* A group's name on a strip of its colour, dark or light text by theme so
+   it reads at a glance; two lines rather than cut off in a narrow block. */
+.block .name { position: absolute; left: 4px; top: 3px; right: 4px; padding: 1px 6px; border-radius: 6px;
+  font-size: 13px; line-height: 16px; font-weight: 650; color: var(--text);
+  background: color-mix(in srgb, var(--muted) 16%, transparent);
+  overflow: hidden; overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+.block .name .n { font-weight: 500; opacity: .7; }
+.block.waiting .name { right: 30px; }
+/* A label raised to a band: its lanes inside one frame, its name on top. */
+.band { position: absolute; border-radius: 12px; border: 2px solid var(--border); background: color-mix(in srgb, var(--muted) 8%, transparent);
+  transition: left .4s, top .4s, width .4s, height .4s; }
+.band .name { position: absolute; left: 8px; right: 8px; top: 2px; font-size: 12px; line-height: 16px; font-weight: 700;
+  letter-spacing: .02em; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.band.tinted { border-color: color-mix(in srgb, var(--c) 60%, var(--border)); background: color-mix(in srgb, var(--c) 14%, transparent); }
+.band.tinted .name { color: color-mix(in srgb, var(--c) 70%, var(--text)); }
+.mlane .lanehead .bandbtn { font-size: 12.5px; font-weight: 500; padding: 3px 9px; border-radius: 12px; border: 1px solid var(--border);
+  background: var(--surface); color: var(--text); }
+.mlane .lanehead .bandbtns { margin-left: auto; display: flex; gap: 6px; }
 .block .badge { position: absolute; right: 4px; top: 2px; min-width: 20px; height: 20px; border-radius: 10px; padding: 0 6px;
   background: var(--warn); color: #111; font-weight: 700; font-size: 12px; display: grid; place-items: center; }
-.tile { position: absolute; border-radius: 3px; background: var(--faint); transition: left .4s, top .4s, width .4s, height .4s; }
-.tile.s-needs_input { background: var(--warn); } .tile.s-failed { background: var(--bad); } .tile.s-running { background: var(--run); }
-.tile.s-done { background: color-mix(in srgb, var(--faint) 55%, var(--surface2)); }
+/* Idle is a muted blue, not grey, so it stays apart from the grey of age. */
+.tile { --st: var(--idle); position: absolute; border-radius: 3px; transition: left .4s, top .4s, width .4s, height .4s; }
+/* Two colours split on the diagonal: the agent's state above, and below
+   how fresh it is (--age, set per tile). */
+.mboard .tile { background: linear-gradient(135deg, var(--st) 50%, var(--age, var(--st)) 50%); }
+.tile.s-needs_input { --st: var(--warn); } .tile.s-failed { --st: var(--bad); } .tile.s-running { --st: var(--run); }
+.tile.s-done { --st: color-mix(in srgb, var(--idle) 55%, var(--surface2)); }
 .tile.s-running { animation: pulse 1.6s ease-in-out infinite; }
-.tile.fresh { box-shadow: 0 0 0 2px var(--accent); }
+/* The agent just left, on coming back out to the whole map. */
+.tile.found { z-index: 1; animation: found .7s ease-in-out 2; }
+@keyframes found { 50% { box-shadow: 0 0 0 3px var(--accent), 0 0 12px 4px var(--accent); } }
+/* The key to the tiles' ages, a strip over the map until dismissed; the
+   help button brings it back. */
+.agekey { flex-shrink: 0; display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted);
+  padding: 2px 4px 2px 12px; border-bottom: 1px solid var(--border); }
+.agekey i { display: block; flex: 0 1 160px; min-width: 60px; height: 8px; border-radius: 2px; }
+.agekey .grow { flex: 1; }
 .tile.ask::after { content: "!"; position: absolute; inset: 0; display: grid; place-items: center; font-weight: 800;
   font-size: 70%; color: #111; }
 @keyframes pulse { 50% { opacity: .45; } }
@@ -76,6 +108,23 @@ select, input, textarea { font: inherit; color: inherit; background: var(--surfa
 .mlane .lanehead { position: sticky; top: 0; z-index: 2; display: flex; align-items: center; gap: 8px; padding: 8px 12px;
   background: var(--bg); border-bottom: 1px solid var(--border); font-weight: 600; }
 .mlane .lanehead .n { color: var(--faint); font-weight: 400; }
+/* A group's agents up close: a box each, coloured by state as its tile is,
+   its age along the bottom, newest activity first. */
+.mbox { --st: var(--idle); position: absolute; box-sizing: border-box; border-radius: 10px; padding: 8px 10px 11px;
+  display: flex; flex-direction: column; gap: 2px; overflow: hidden; cursor: pointer; }
+/* Under the lane's class, so the page's solid state colours (.s-failed and
+   the rest, for dots) do not paint over the box. */
+.mlane .mbox { background: color-mix(in srgb, var(--st) 18%, var(--surface)); border: 1px solid color-mix(in srgb, var(--st) 50%, var(--border)); }
+.mbox::after { content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 5px; background: var(--age, transparent); }
+.mbox.s-needs_input { --st: var(--warn); } .mlane .mbox.s-needs_input { border: 2px solid var(--warn); } .mbox.s-failed { --st: var(--bad); }
+.mbox.s-running { --st: var(--run); } .mbox.s-done { --st: color-mix(in srgb, var(--idle) 55%, var(--surface2)); }
+.mbox .name { font-weight: 650; font-size: 14px; line-height: 1.25; overflow: hidden; overflow-wrap: anywhere;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+.mbox .line { margin-top: auto; font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mbox .host { font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mbox.flash { animation: flash 1.2s ease 2; }
+.mlane .lanehead { flex-wrap: wrap; }
+.mlane .lanehead .resort { flex-basis: 100%; margin: 2px -12px -8px; }
 .mcard { position: absolute; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 8px 10px;
   overflow: hidden; cursor: pointer; display: flex; flex-direction: column; gap: 2px; }
 .mcard .title { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: flex; gap: 6px; align-items: center; }
@@ -87,7 +136,8 @@ select, input, textarea { font: inherit; color: inherit; background: var(--surfa
   display: flex; flex-direction: column; transition: left .25s ease, top .25s ease, width .25s ease, height .25s ease, border-radius .25s; }
 .mnear.full { border-radius: 0; border: none; }
 .mnear #convpane { flex: 1; border: none; min-height: 0; touch-action: pan-y; }
-.mtools { position: absolute; z-index: 4; right: 10px; bottom: calc(env(safe-area-inset-bottom) + 10px); display: flex; gap: 6px; }
+.mtools { position: absolute; z-index: 4; right: 10px; bottom: calc(env(safe-area-inset-bottom) + 10px); display: flex; gap: 6px;
+  align-items: center; }
 .minimap { position: absolute; z-index: 4; left: 10px; bottom: calc(env(safe-area-inset-bottom) + 10px); width: 84px; pointer-events: auto;
   background: color-mix(in srgb, var(--surface) 85%, transparent); border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
 .minimap i { position: absolute; background: var(--faint); opacity: .5; border-radius: 1px; }
@@ -105,7 +155,7 @@ select, input, textarea { font: inherit; color: inherit; background: var(--surfa
 .dots i.offline, .dots i.refused { background: var(--bad); }
 
 /* Panes */
-.app { flex: 1; min-height: 0; display: flex; }
+.app { position: relative; flex: 1; min-height: 0; display: flex; }
 .pane { min-width: 0; min-height: 0; display: flex; flex-direction: column; }
 #listpane { flex: 1; }
 #convpane { flex: 1; border-left: 1px solid var(--border); }
@@ -192,8 +242,26 @@ select, input, textarea { font: inherit; color: inherit; background: var(--surfa
 .lightbox img { max-width: 100%; max-height: 100%; object-fit: contain; }
 /* A swipe back: what is being left follows the finger. */
 .swiping { will-change: transform; box-shadow: -8px 0 24px rgba(0,0,0,.25); }
-.app.peek { position: relative; }
 .app.peek #convpane { position: absolute; inset: 0; z-index: 3; background: var(--bg); }
+/* A swipe left: the conversation leaves that way, over Recent. */
+.swiping.leftward { box-shadow: 8px 0 24px rgba(0,0,0,.25); }
+#convpane.leftward { position: relative; z-index: 6; background: var(--bg); }
+/* Recent: every agent, the latest activity first, over everything else;
+   under the conversation while a swipe brings it in. */
+.recent { position: absolute; inset: 0; z-index: 7; background: var(--bg); }
+.recent.under { z-index: 4; }
+.recenthead { flex-shrink: 0; display: flex; align-items: center; gap: 6px; padding: 6px 12px 2px 4px; }
+.recenthead h2 { margin: 0; font-size: 16px; }
+.recenthead .n { color: var(--faint); font-size: 13px; }
+.recenthead #recentback { width: 36px; height: 36px; padding: 0; display: grid; place-items: center; }
+/* The next re-sort: a line that fills while the order waits, and stops
+   while you touch the list. Its room is kept, so nothing jumps. */
+.resort { flex-shrink: 0; display: block; width: 100%; height: 12px; margin: 0; padding: 4px 12px; border: none;
+  border-bottom: 1px solid var(--border); border-radius: 0; background: none; }
+.resort i { display: block; height: 3px; width: 0; border-radius: 2px; background: var(--accent); transition: width .1s linear, opacity .2s; }
+.resort.idle i { opacity: 0; }
+.resort.held i { opacity: .45; }
+.row.gone { opacity: .45; }
 /* Usage: the tightest account's dial in the top bar, and a panel that
    slides in from the right with every account. */
 .ugauge { display: flex; align-items: center; gap: 4px; background: none; border: none; padding: 4px 6px;
@@ -379,6 +447,7 @@ button.primary.danger { background: var(--bad); border-color: var(--bad); color:
   <span class="grow" id="down"></span>
   <button class="ugauge" id="usage" aria-label="Usage" hidden></button>
   <button class="icon accent" id="new" aria-label="New agent" title="New agent"></button>
+  <button class="icon" id="help" aria-label="Help" title="Show the map's key"></button>
   <button class="icon" id="gear" aria-label="Settings"></button>
 </div>
 <div class="app phone" id="app">
@@ -397,6 +466,7 @@ button.primary.danger { background: var(--bad); border-color: var(--bad); color:
         <select id="sort" aria-label="Sort"></select>
         <select id="host" aria-label="Host"></select>
         <select id="label" aria-label="Label"></select>
+        <select id="bands" aria-label="Bands" hidden></select>
         <select id="state" aria-label="State"></select>
         <select id="background" aria-label="Background workspaces"></select>
       </div>
@@ -436,6 +506,9 @@ button.primary.danger { background: var(--bad); border-color: var(--bad); color:
     </div></div>
   </section>
   <section class="pane" id="mappane" hidden>
+    <div class="agekey" id="agekey" title="How long since each agent last did something">
+      <span>Last active</span><span>now</span><i></i><span>2w</span><span class="grow"></span>
+      <button class="icon" id="agekey-close" aria-label="Hide the key" title="Hide the key"></button></div>
     <div class="map" id="map">
       <div class="mboard" id="board"></div>
       <div class="mlane" id="lane" hidden></div>
@@ -443,6 +516,12 @@ button.primary.danger { background: var(--bad); border-color: var(--bad); color:
       <div class="minimap" id="minimap"></div>
       <div class="mtools"><button class="small" id="fit">Fit all</button></div>
     </div>
+  </section>
+  <section class="pane recent" id="recentpane" hidden>
+    <div class="recenthead"><button class="plain" id="recentback" aria-label="Back"></button>
+      <h2>Recent</h2><span class="n" id="recentcount"></span></div>
+    <button class="resort idle" id="resort" aria-label="Sort now"><i></i></button>
+    <div class="scroll" id="recentscroll"><div id="recentbody"></div></div>
   </section>
 </div>
 <div class="toasts" id="toasts"></div>
@@ -455,7 +534,10 @@ button.primary.danger { background: var(--bad); border-color: var(--bad); color:
 const $ = (id) => document.getElementById(id);
 const views = {};          // "list" | "conv" -> {seq, fields, parts}
 const pending = {};        // req -> callback
-const details = {};        // item id -> detail, once fetched
+// A tool call's or thought's detail, once fetched, by detailKey: one
+// agent's items share ids with another's (each timeline numbers its own
+// thoughts thought_1, thought_2...), so the agent is part of the key.
+let details = {};
 const busy = {};           // action key -> true while it runs
 const failed = {};         // action key -> what went wrong
 const forms = {};          // ask id -> {selected, other}
@@ -486,7 +568,7 @@ for (const [from, to] of [["hub-prefs", "skiff-prefs"], ["hub-token", "skiff-tok
 
 // background: "" follows Reef's setting, else "shown" or "hidden".
 const prefs = Object.assign({ tab: "ny", group: "label", sort: "recent", query: "", host: "", label: "", state: "",
-  background: "", collapsed: {}, more: {}, filters: false }, (() => { try { return JSON.parse(localStorage.getItem("skiff-prefs")) || {}; } catch (e) { return {}; } })());
+  background: "", collapsed: {}, more: {}, filters: false, bands: [] }, (() => { try { return JSON.parse(localStorage.getItem("skiff-prefs")) || {}; } catch (e) { return {}; } })());
 // Labels are how a fleet is organised, as in crusteo's Lanes: group by
 // them unless this device chose otherwise.
 if (!prefs.groupChosen) prefs.group = "label";
@@ -586,7 +668,7 @@ function receive(m) {
       // Keep showing what was there until each view's new snapshot replaces
       // it: wiping first flashes "Loading..." and loses the reader's place.
       for (const id in views) views[id].stale = true;
-      fillSelects(); subscribeList(); if (open) subscribeConv();
+      fillSelects(); subscribeList(); if (open) subscribeConv(); if (recent.subscribed) subscribeRecent();
       // Usage is one small view Reef keeps current itself.
       send({ type: "subscribe", id: "usage", view: "usage" });
       return drawAll();
@@ -617,7 +699,7 @@ function receive(m) {
     default: return;
   }
   if (m.id === "list") drawList(); else if (m.id === "conv") drawConv(); else if (m.id === "map") drawMap();
-  else if (m.id === "usage") drawUsage();
+  else if (m.id === "usage") drawUsage(); else if (m.id === "recent") drawRecent();
 }
 
 function reorder(parts, order, key) {
@@ -679,7 +761,9 @@ function subscribeList() {
   if (prefs.tab === "map") {
     send({ type: "unsubscribe", id: "list" }); delete views.list;
     mapState.focusSent = "";
-    return send({ type: "subscribe", id: "map", view: "map", group: prefs.group, filter, focus: [] });
+    // The labels this device raised to bands; only a label map has them.
+    return send({ type: "subscribe", id: "map", view: "map", group: prefs.group, filter, focus: [],
+      bands: prefs.group === "label" ? prefs.bands : [] });
   }
   const grouped = prefs.group !== "none";
   const board = layout() === "board";
@@ -693,9 +777,12 @@ function subscribeConv() {
   send({ type: "subscribe", id: "conv", view: "conversation", host: open.host, agent: open.id, turns: convTurns });
 }
 
+function detailKey(item) { return open ? open.host + "/" + open.id + "|" + item.id + "|" + (item.at || "") : ""; }
+
 function openAgent(agent) {
   if (open && views.conv) send({ type: "unsubscribe", id: "conv" });
   delete views.conv;
+  details = {};
   convTurns = 3; following = true;
   $("draft").value = ""; sizeDraft();
   attached = []; drawAttached();
@@ -788,6 +875,7 @@ const ICON = {
   gear: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>',
   arrow: '<path d="M12 19V5"/><path d="m5 12 7-7 7 7"/>',
   close: '<path d="M18 6 6 18"/><path d="m6 6 12 12"/>',
+  help: '<circle cx="12" cy="12" r="10"/><path d="M9.1 9a3 3 0 0 1 5.8 1c0 2-3 3-3 3"/><path d="M12 17h.01"/>',
   back: '<path d="m15 18-6-6 6-6"/>',
   more: '<path d="m6 9 6 6 6-6"/>',
   plus: '<path d="M12 5v14"/><path d="M5 12h14"/>',
@@ -830,6 +918,7 @@ function drawChrome() {
   $("listpane").querySelector(".toolbar").hidden = mode === "map" && mapState.level === "near";
   $("tab-map").className = prefs.tab === "map" ? "on" : "";
   $("sort").hidden = mode === "map";
+  $("bands").hidden = mode !== "map" || prefs.group !== "label";
   $("convpane").querySelector(".composer").hidden = !open;
   $("convpane").querySelector(".convhead").hidden = !open;
   $("back").hidden = mode !== "phone" && mode !== "map";
@@ -871,6 +960,12 @@ function fillSelects() {
   if (dropped) { prefs.label = ""; savePrefs(); }
   fill("label", [["", "Any label"], ...labels, ...(showsBackground() ? [[BG_LABEL, "Background"]] : [])],
     prefs.label);
+  // The map's bands: raise any label, or lower a raised one.
+  const raised = new Set(prefs.bands || []), choices = bandChoices();
+  const up = choices.filter(([k]) => raised.has(k)), down = choices.filter(([k]) => !raised.has(k));
+  // A raised label since deleted is kept (it may come back) but not counted.
+  fill("bands", [["", up.length ? "Bands (" + up.length + ")" : "Bands"],
+    ...up.map(([k, name]) => ["-" + k, "Lower " + name]), ...down.map(([k, name]) => ["+" + k, "Raise " + name])], "");
   fill("state", [["", "Any state"], ...Object.entries(STATES)], prefs.state);
   fill("background", [["", "Background: " + (settings.show_background === false ? "hidden" : "shown") + " (Reef)"],
     ["shown", "Background shown"], ["hidden", "Background hidden"]], prefs.background);
@@ -1007,6 +1102,171 @@ function drawList() {
     }
     body.append(section);
   }
+}
+
+// ---- a held order: newest first, without moving under your finger -------------------
+//
+// A list or grid sorted by activity holds still: its items change in place,
+// and move only once its line has filled, five seconds after the order
+// first differs, so an item is still where it was when you reach for it.
+// Touching or scrolling it stops the line until a second after you let go;
+// tapping the line sorts now. Recent and a map group's boxes use it.
+// `keys()` is the order as it is now; `order` is the one shown.
+
+const RESORT_MS = 5000, HOLD_MS = 1000;
+function heldOrder(how) {
+  return Object.assign({ order: [], waited: 0, touching: false, holdUntil: 0, last: 0, timer: null }, how);
+}
+function sortPending(s) {
+  const keys = s.keys();
+  if (!keys) return false;
+  return keys.length !== s.order.length || keys.some((k, i) => k !== s.order[i]);
+}
+function resortTimer(s, on) {
+  if (on && !s.timer) { s.last = Date.now(); s.timer = setInterval(() => resortTick(s), 100); }
+  if (!on && s.timer) { clearInterval(s.timer); s.timer = null; }
+}
+function resortTick(s) {
+  const now = Date.now();
+  if (now >= s.holdUntil) s.waited += now - s.last;
+  s.last = now;
+  if (s.waited >= RESORT_MS) return resort(s);
+  drawResort(s);
+}
+function drawResort(s) {
+  const line = s.line(), pending = sortPending(s);
+  if (!line) return;
+  line.classList.toggle("idle", !pending);
+  line.classList.toggle("held", pending && Date.now() < s.holdUntil);
+  line.querySelector("i").style.width = (pending ? Math.min(100, (s.waited * 100) / RESORT_MS) : 0) + "%";
+}
+// Items slide from where they were to where they go, so the eye can follow.
+function resort(s) {
+  const keys = s.keys();
+  if (!keys) return;
+  const at = (e) => e.getBoundingClientRect();
+  const before = new Map([...s.items()].map((e) => [e.dataset.key, at(e)]));
+  s.order = keys;
+  s.waited = 0;
+  if (s.sorted) s.sorted();
+  const wasPressing = pressing;
+  pressing = false; s.redraw(); pressing = wasPressing;
+  for (const e of s.items()) {
+    if (!e.animate) break;
+    const was = before.get(e.dataset.key);
+    if (!was) { e.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 250 }); continue; }
+    const now = at(e), dx = was.left - now.left, dy = was.top - now.top;
+    if (Math.abs(dx) > 1 || Math.abs(dy) > 1) {
+      e.animate([{ transform: "translate(" + dx + "px," + dy + "px)" }, { transform: "none" }], { duration: 250, easing: "ease-out" });
+    }
+  }
+}
+// The order waits while a finger is on `scroll`, and a second after. A
+// minute caps a hold whose end never comes.
+function holdWhileTouched(s, scroll) {
+  const hold = () => { s.touching = true; s.holdUntil = Date.now() + 60000; drawResort(s); };
+  const release = () => {
+    if (!s.touching) return;
+    s.touching = false; s.holdUntil = Date.now() + HOLD_MS;
+    setTimeout(payOwed, 0);
+  };
+  const nudge = () => { if (!s.touching) s.holdUntil = Date.now() + HOLD_MS; };
+  scroll.addEventListener("touchstart", hold, { passive: true });
+  scroll.addEventListener("pointerdown", hold);
+  for (const end of ["touchend", "touchcancel", "pointerup"]) document.addEventListener(end, release, { capture: true, passive: true });
+  scroll.addEventListener("scroll", nudge, { passive: true });
+  scroll.addEventListener("wheel", nudge, { passive: true });
+}
+
+// ---- recent: every agent, the latest activity first ---------------------------------
+//
+// To the left of a conversation, in a held order. Agents new to the list
+// wait for the re-sort too, and ones that left it stay, dimmed, until then.
+
+const recent = { open: false, subscribed: false, limit: 50, rows: new Map(), append: false };
+recent.sort = heldOrder({
+  line: () => $("resort"),
+  keys: () => views.recent && views.recent.parts.map((r) => r.key),
+  items: () => $("recentbody").querySelectorAll(".row"),
+  redraw: () => drawRecent(),
+  sorted: () => { const live = new Set(recent.sort.order); for (const key of [...recent.rows.keys()]) if (!live.has(key)) recent.rows.delete(key); },
+});
+
+function subscribeRecent() {
+  const filter = { query: "" };
+  if (prefs.background) filter.background = prefs.background === "shown";
+  send({ type: "subscribe", id: "recent", view: "agents", group: "none", sort: "recent", filter, limit: recent.limit });
+}
+
+// Shown under a conversation a swipe is moving, or over everything.
+function showRecent(under) {
+  const pane = $("recentpane");
+  pane.classList.toggle("under", !!under);
+  pane.hidden = false;
+  if (!recent.subscribed) { recent.subscribed = true; subscribeRecent(); }
+  drawRecent();
+}
+function openRecent() { recent.open = true; showRecent(false); }
+function closeRecent() {
+  recent.open = false;
+  $("recentpane").hidden = true;
+  $("recentpane").classList.remove("under");
+  if (recent.subscribed) send({ type: "unsubscribe", id: "recent" });
+  delete views.recent;
+  Object.assign(recent, { subscribed: false, limit: 50, append: false });
+  Object.assign(recent.sort, { order: [], waited: 0 });
+  recent.rows.clear();
+  resortTimer(recent.sort, false);
+}
+
+// An agent picked from Recent opens where conversations open: the map's
+// card, or the list's pane.
+function openFromRecent(row) {
+  const agent = { host: row.host, id: row.id, title: row.title };
+  closeRecent();
+  if (prefs.tab !== "map") return openAgent(agent);
+  const key = row.host + "/" + row.id;
+  if (mapState.level === "near") { mapState.near = key; openAgent(agent); } else enterNear(key, null);
+}
+
+function recentPending() { return sortPending(recent.sort); }
+
+function drawRecent() {
+  const pane = $("recentpane");
+  if (pane.hidden) return;
+  if (held(pane) || (recent.sort.touching && Date.now() < recent.sort.holdUntil)) return later(drawRecent);
+  const body = $("recentbody"), v = views.recent;
+  body.innerHTML = "";
+  if (!v) return body.append(el("div", "note", "Loading..."));
+  for (const r of v.parts) recent.rows.set(r.key, r);
+  const order = recent.sort.order;
+  if (!order.length) recent.sort.order = v.parts.map((r) => r.key);
+  // More asked for: the older agents go on below, now.
+  if (recent.append) {
+    recent.append = false;
+    const have = new Set(recent.sort.order);
+    for (const r of v.parts) if (!have.has(r.key)) recent.sort.order.push(r.key);
+  }
+  const live = new Set(v.parts.map((r) => r.key));
+  for (const key of recent.sort.order) {
+    const row = recent.rows.get(key);
+    if (!row) continue;
+    const r = agentRow(row);
+    r.dataset.key = key;
+    if (!live.has(key)) r.classList.add("gone");
+    r.onclick = () => openFromRecent(row);
+    body.append(r);
+  }
+  if (!recent.sort.order.length) body.append(el("div", "empty", "No agents"));
+  if (v.fields.total > v.parts.length) {
+    const more = el("button", "more", "Show more");
+    more.onclick = () => { recent.limit += 50; recent.append = true; subscribeRecent(); };
+    body.append(more);
+  }
+  $("recentcount").textContent = v.fields.total ? String(v.fields.total) : "";
+  if (!recentPending()) recent.sort.waited = 0;
+  resortTimer(recent.sort, recentPending());
+  drawResort(recent.sort);
 }
 
 // ---- the conversation ---------------------------------------------------------------
@@ -1473,15 +1733,23 @@ function renderItem(item) {
       } else b.append(name);
       if (item.summary) b.append(el("span", "sum" + (a ? " prose" : ""), item.summary));
       wrap.append(b);
-      const shown = details[item.id];
+      const key = detailKey(item);
+      const fetchDetail = () => ask({ type: "detail", id: "conv", item: item.id }, (r) => {
+        // Kept only if the same agent's conversation is still open.
+        if (r.ok && detailKey(item) === key) details[key] = Object.assign(r.detail, { chars: item.chars });
+        drawConv();
+      });
+      const shown = details[key];
+      // A thought that has grown since it was read (it was streaming) is read again.
+      if (shown && item.kind === "thought" && shown.chars !== item.chars && !shown.stale) { shown.stale = true; fetchDetail(); }
       if (shown) {
         const d = el("div", "detail" + (item.kind === "thought" ? " prose" : ""));
         for (const s of shown.sections) { if (s.title) d.append(el("h4", "", s.title)); d.append(el("pre", "", s.text)); }
         wrap.append(d);
       }
       if (item.detail) b.onclick = () => {
-        if (details[item.id]) { delete details[item.id]; return drawConv(); }
-        ask({ type: "detail", id: "conv", item: item.id }, (r) => { if (r.ok) details[item.id] = r.detail; drawConv(); });
+        if (details[key]) { delete details[key]; return drawConv(); }
+        fetchDetail();
       };
       return wrap;
     }
@@ -1935,7 +2203,7 @@ function drawCreate(head, body, foot) {
       }
       body.append(pair2);
     }
-    if (c.unready.length) body.append(el("div", "small", "Not ready here: " + c.unready.map((p) => p.label + " (" + p.status + ")").join(", ")));
+    if (c.unready.length) body.append(el("div", "small", "Not ready here: " + c.unready.map((p) => p.label + " (" + (p.error || p.status) + ")").join(", ")));
   }
   if (c) {
     field(body, "Directory");
@@ -2087,12 +2355,47 @@ function flash(title, text) {
 // portrait phone stacks them and a desk spreads them out). Middle: one
 // lane's agents as cards, a grid as wide as the screen. Near: one card
 // opens into its live conversation. Tiles keep the order agents were made
-// in, so places stay put; recent work glows instead of moving.
+// in, so places stay put; how fresh each is shows in its colour instead.
 
 const mapState = { level: "far", lane: null, cam: { x: 0, y: 0, s: 1 }, layout: null, size: null,
   focusSent: "", near: null };
-const tileEls = new Map(), blockEls = new Map();
-const MID_CARD_W = 280, MID_CARD_H = 104, GAP = 8;
+const tileEls = new Map(), blockEls = new Map(), bandEls = new Map();
+const MID_BOX_W = 150, MID_BOX_H = 92, GAP = 8;
+// A band's name strip, over its lanes.
+const BAND_HEAD = 22;
+// How thin a section of the map (a band, or the other lanes) may get, and
+// a lane's block, where the shape allows.
+const MIN_SECTION = 120, MIN_BLOCK = 76;
+
+// `length` split by `weights`, none under `min` while they all fit: the
+// small ones get `min` and the rest share what is left.
+function splitMin(weights, length, min) {
+  if (weights.length * min > length) min = 0;
+  let small = weights.map(() => false), sizes = [];
+  for (let pass = 0; pass < weights.length; pass++) {
+    const fixed = small.filter(Boolean).length * min;
+    const rest = weights.reduce((a, w, i) => a + (small[i] ? 0 : w), 0) || 1;
+    sizes = weights.map((w, i) => (small[i] ? min : (w / rest) * (length - fixed)));
+    const more = sizes.map((s, i) => small[i] || s < min);
+    if (more.every((m, i) => m === small[i])) break;
+    small = more;
+  }
+  return sizes;
+}
+
+// The label groups this device can raise, by name: Reef's catalog.
+function bandChoices() {
+  return Object.entries(labelColors).map(([id, l]) => ["label:" + id, l.name]).sort((a, b) => a[1].localeCompare(b[1]));
+}
+
+// Raises a label group to a band on this device's map, or lowers it.
+function setBand(key, raised) {
+  const bands = new Set(prefs.bands || []);
+  if (raised) bands.add(key); else bands.delete(key);
+  prefs.bands = [...bands]; savePrefs();
+  if (mapState.level === "mid") leaveMid();
+  fillSelects(); subscribeList();
+}
 
 function mapView() { return views.map; }
 function mapCards() {
@@ -2106,9 +2409,15 @@ function mapCards() {
 function treemap(weights, W, H) {
   const total = weights.reduce((a, b) => a + b, 0) || 1;
   const areas = weights.map((w) => (w * W * H) / total);
+  // A row's worst block shape; one thinner than MIN_BLOCK (a lane too thin
+  // for its name and a tile) counts as far worse, so the row is cut
+  // differently where it can be.
   const worst = (row, side) => {
-    const s = row.reduce((a, b) => a + b, 0);
-    return Math.max(...row.map((r) => Math.max((side * side * r) / (s * s), (s * s) / (side * side * r))));
+    const s = row.reduce((a, b) => a + b, 0), thick = s / side;
+    return Math.max(...row.map((r) => {
+      const len = r / thick, shape = Math.max(thick / len, len / thick);
+      return Math.min(thick, len) < MIN_BLOCK ? shape * 1000 : shape;
+    }));
   };
   const rects = [];
   let x = 0, y = 0, w = W, h = H, i = 0;
@@ -2134,6 +2443,31 @@ function treemap(weights, W, H) {
   return rects;
 }
 
+// A treemap with no block thinner than MIN_BLOCK where the space allows:
+// a lane that comes out thinner is given more room and the map packed
+// again, so a lane of one agent beside big ones still shows its name.
+function packRects(weights, W, H) {
+  const w = [...weights];
+  let rects = treemap(w, W, H);
+  if (Math.min(W, H) < MIN_BLOCK) return rects;
+  for (let pass = 0; pass < 8; pass++) {
+    const thin = rects.map((r) => Math.min(r.w, r.h) < MIN_BLOCK);
+    if (!thin.some(Boolean)) break;
+    thin.forEach((t, i) => { if (t) w[i] *= 1.6; });
+    rects = treemap(w, W, H);
+  }
+  return rects;
+}
+
+// Whether a tile's agent waits on you, for its group's badge.
+const waits = (t) => t.ask || t.state === "needs_input" || t.state === "failed";
+// How wide a group's name and count are on its strip.
+const textCanvas = document.createElement("canvas").getContext("2d");
+function textWidth(text) {
+  textCanvas.font = "650 13px " + getComputedStyle(document.body).fontFamily;
+  return textCanvas.measureText(text).width;
+}
+
 function packMap() {
   const v = mapView();
   const box = $("map");
@@ -2143,18 +2477,55 @@ function packMap() {
   const byLane = new Map(lanes.map((l) => [l.key, []]));
   for (const t of v.parts) if (byLane.has(t.lane)) byLane.get(t.lane).push(t);
   const pad = 6;
-  const rects = treemap(lanes.map((l) => (byLane.get(l.key).length || 1) + 3), W - pad * 2, H - pad * 2);
-  const blocks = lanes.map((lane, i) => {
-    const r = rects[i];
+  const weight = (l) => (byLane.get(l.key).length || 1) + 3;
+  // A band's lanes come together (Reef sorts them so). Each band is a
+  // section of its own across the map, its name on a strip on top and its
+  // lanes packed inside, and the other lanes share one section: packed all
+  // in one, a small lane beside a big band could only be a sliver.
+  const sections = [], plain = [];
+  for (const lane of lanes) {
+    if (!lane.band) { plain.push(lane); continue; }
+    const last = sections[sections.length - 1];
+    if (last && last.band.key === lane.band.key) last.lanes.push(lane);
+    else sections.push({ band: lane.band, lanes: [lane] });
+  }
+  if (plain.length) sections.push({ band: null, lanes: plain });
+  const IW = W - pad * 2, IH = H - pad * 2;
+  // Stacked along the longer side, each at least MIN_SECTION thick.
+  const along = IH >= IW;
+  const sizes = splitMin(sections.map((s) => s.lanes.reduce((a, l) => a + weight(l), 0)), along ? IH : IW, MIN_SECTION);
+  const placed = [], bands = [];
+  let off = 0;
+  sections.forEach((s, i) => {
+    const sec = along ? { x: 0, y: off, w: IW, h: sizes[i] } : { x: off, y: 0, w: sizes[i], h: IH };
+    off += sizes[i];
+    if (!s.band) {
+      packRects(s.lanes.map(weight), sec.w, sec.h).forEach((q, j) =>
+        placed.push({ lane: s.lanes[j], r: { x: sec.x + q.x, y: sec.y + q.y, w: q.w, h: q.h } }));
+      return;
+    }
+    const f = { key: s.band.key, label: s.band.label, x: sec.x + pad + 1, y: sec.y + pad + 1,
+      w: Math.max(sec.w - 2, 10), h: Math.max(sec.h - 2, 10) };
+    bands.push(f);
+    // Inner rects in the outer ones' terms: a block sits 3px inside its rect.
+    const top = BAND_HEAD, inset = 1;
+    packRects(s.lanes.map(weight), Math.max(f.w - inset * 2, 10), Math.max(f.h - top - inset, 10)).forEach((q, j) =>
+      placed.push({ lane: s.lanes[j], r: { x: f.x + inset + q.x - pad, y: f.y + top + q.y - pad, w: q.w, h: q.h } }));
+  });
+  const blocks = placed.map(({ lane, r }) => {
     const b = { key: lane.key, label: lane.label, x: r.x + pad + 3, y: r.y + pad + 3, w: Math.max(r.w - 6, 10), h: Math.max(r.h - 6, 10),
-      tiles: byLane.get(lane.key) };
-    const iw = b.w - 8, ih = b.h - 26, n = Math.max(b.tiles.length, 1);
+      tiles: byLane.get(lane.key), band: lane.band || null, group: lane.group || null };
+    // The name's strip takes two lines when one cannot hold it.
+    const waiting = b.tiles.some(waits);
+    const room = b.w - 8 - 12 - (waiting ? 26 : 0);
+    b.head = textWidth(b.label + " " + b.tiles.length) > room ? 40 : 24;
+    const iw = b.w - 8, ih = b.h - b.head - 4, n = Math.max(b.tiles.length, 1);
     let t = Math.max(4, Math.floor(Math.sqrt((iw * ih) / n)));
     while (t > 4 && Math.floor(iw / t) * Math.floor(ih / t) < n) t--;
     b.tile = t; b.cols = Math.max(1, Math.floor(iw / t));
     return b;
   });
-  return { W, H, blocks };
+  return { W, H, blocks, bands };
 }
 
 function camTransform(animate) {
@@ -2193,16 +2564,36 @@ function blockAt(px, py) {
   return L.blocks.find((b) => wx >= b.x && wx <= b.x + b.w && wy >= b.y && wy <= b.y + b.h) || null;
 }
 
-function fresh(at) {
+// A tile's other half: how long since its agent last did something, white
+// now and black at two weeks, on a log scale (an hour is 40% of the way,
+// a day 73%, a week 93%), in AGE_LEVELS steps of lightness.
+const AGE_LEVELS = 40;
+const AGE_BLACK_MINUTES = 14 * 24 * 60;
+const AGES = Array.from({ length: AGE_LEVELS + 1 }, (_, i) =>
+  "oklch(" + (1 - i / AGE_LEVELS).toFixed(3) + " 0 0)");
+function ageStep(at) {
   const t = Date.parse(at + ":00Z");
-  return t && Date.now() - t < 3 * 60000;
+  if (!t) return AGE_LEVELS;
+  const minutes = Math.max(0, (Date.now() - t) / 60000);
+  const f = Math.log1p(minutes) / Math.log1p(AGE_BLACK_MINUTES);
+  return Math.min(AGE_LEVELS, Math.round(f * AGE_LEVELS));
 }
+$("agekey").querySelector("i").style.background = "linear-gradient(90deg, " + AGES[0] + ", " + AGES[AGE_LEVELS] + ")";
 
 function drawFar() {
   const L = mapState.layout;
   const board = $("board");
   board.style.width = L.W + "px"; board.style.height = L.H + "px";
-  const seenBlocks = new Set(), seenTiles = new Set();
+  const seenBlocks = new Set(), seenTiles = new Set(), seenBands = new Set();
+  for (const f of L.bands || []) {
+    seenBands.add(f.key);
+    let fe = bandEls.get(f.key);
+    if (!fe) { fe = el("div", "band"); fe.append(el("div", "name")); board.prepend(fe); bandEls.set(f.key, fe); }
+    Object.assign(fe.style, { left: f.x + "px", top: f.y + "px", width: f.w + "px", height: f.h + "px" });
+    fe.className = "band"; fe.style.removeProperty("--c"); tint(fe, groupColor(f.key));
+    fe.querySelector(".name").textContent = f.label;
+  }
+  for (const [k, e] of bandEls) if (!seenBands.has(k)) { e.remove(); bandEls.delete(k); }
   for (const b of L.blocks) {
     seenBlocks.add(b.key);
     let be = blockEls.get(b.key);
@@ -2212,8 +2603,11 @@ function drawFar() {
     }
     Object.assign(be.style, { left: b.x + "px", top: b.y + "px", width: b.w + "px", height: b.h + "px" });
     be.className = "block"; be.style.removeProperty("--c"); tint(be, groupColor(b.key));
-    be.querySelector(".name").textContent = b.label + " · " + b.tiles.length;
-    const waiting = b.tiles.filter((t) => t.ask || t.state === "needs_input" || t.state === "failed").length;
+    const name = be.querySelector(".name");
+    name.textContent = b.label + " ";
+    name.append(el("span", "n", String(b.tiles.length)));
+    const waiting = b.tiles.filter(waits).length;
+    be.classList.toggle("waiting", waiting > 0);
     const badge = be.querySelector(".badge");
     badge.hidden = !waiting; badge.textContent = waiting ? "!" + waiting : "";
     b.tiles.forEach((t, i) => {
@@ -2222,8 +2616,10 @@ function drawFar() {
       if (!te) { te = el("div"); board.append(te); tileEls.set(t.key, te); }
       const col = i % b.cols, row = Math.floor(i / b.cols);
       const size = Math.max(b.tile - 2, 2);
-      te.className = "tile s-" + t.state + (t.ask && size >= 9 ? " ask" : "") + (fresh(t.at) ? " fresh" : "");
-      Object.assign(te.style, { left: b.x + 4 + col * b.tile + "px", top: b.y + 22 + row * b.tile + "px",
+      te.className = "tile s-" + t.state + (t.ask && size >= 9 ? " ask" : "") + (t.agent === mapState.found ? " found" : "");
+      const age = String(ageStep(t.at));
+      if (te.dataset.age !== age) { te.dataset.age = age; te.style.setProperty("--age", AGES[age]); }
+      Object.assign(te.style, { left: b.x + 4 + col * b.tile + "px", top: b.y + b.head + row * b.tile + "px",
         width: size + "px", height: size + "px" });
     });
   }
@@ -2233,26 +2629,44 @@ function drawFar() {
 
 function midGeometry() {
   const W = $("map").clientWidth;
-  const cols = Math.max(1, Math.floor((W - GAP) / (MID_CARD_W + GAP)));
+  const cols = Math.max(1, Math.floor((W - GAP) / (MID_BOX_W + GAP)));
   const cw = (W - GAP * (cols + 1)) / cols;
   return { cols, cw };
 }
 
-// A lane's cards: agents waiting on you, then working ones, then the rest,
-// each newest first. (The far view keeps creation order, so tiles stay put.)
-const ACTIVE = { needs_input: 0, running: 1 };
+// A lane's agents, the latest activity first, strictly (the far view keeps
+// creation order, so tiles stay put). Agents active in the same minute keep
+// the order they were made in, so the order does not churn.
 function laneTiles() {
   const L = mapState.layout;
   const b = L && L.blocks.find((x) => x.key === mapState.lane);
   if (!b) return [];
-  const rank = (t) => (t.state in ACTIVE ? ACTIVE[t.state] : 2);
-  return [...b.tiles].sort((x, y) => rank(x) - rank(y) || (y.at || "").localeCompare(x.at || ""));
+  return [...b.tiles].sort((x, y) => (y.at || "").localeCompare(x.at || ""));
+}
+
+// The boxes hold their order as Recent's rows do: they move once the line
+// under the lane's heading has filled.
+const midSort = heldOrder({
+  line: () => $("lane").querySelector(".resort"),
+  keys: () => (mapState.level === "far" ? null : laneTiles().map((t) => t.agent)),
+  items: () => $("lane").querySelectorAll(".mbox"),
+  redraw: () => drawMid(),
+});
+// The lane's tiles in the order shown; agents new to the lane go on at the
+// end until the order catches up.
+function midTiles() {
+  const tiles = laneTiles(), by = new Map(tiles.map((t) => [t.agent, t]));
+  if (!midSort.order.length) midSort.order = tiles.map((t) => t.agent);
+  const shown = midSort.order.filter((a) => by.has(a)).map((a) => by.get(a));
+  const have = new Set(midSort.order);
+  for (const t of tiles) if (!have.has(t.agent)) shown.push(t);
+  return shown;
 }
 
 // Only the cards in view are drawn, and only theirs are asked for.
 function drawMid() {
   const lane = $("lane");
-  const tiles = laneTiles();
+  const tiles = midTiles();
   const { cols, cw } = midGeometry();
   const rows = Math.ceil(tiles.length / cols);
   let head = lane.querySelector(".lanehead"), space = lane.querySelector(".space");
@@ -2261,35 +2675,59 @@ function drawMid() {
     space = el("div", "space"); space.style.position = "relative";
     lane.append(head, space);
   }
+  let line = head.querySelector(".resort");
   const block = mapState.layout.blocks.find((b) => b.key === mapState.lane);
   head.innerHTML = "";
   const back = el("button", "plain"); back.innerHTML = icon("back", 20) + "All"; back.onclick = () => leaveMid();
-  head.append(back, el("span", "", block ? block.label : ""), el("span", "n", String(tiles.length)));
-  space.style.height = rows * (MID_CARD_H + GAP) + GAP + "px";
+  if (!line) {
+    line = el("button", "resort idle"); line.setAttribute("aria-label", "Sort now"); line.append(el("i"));
+    line.onclick = () => { if (sortPending(midSort)) resort(midSort); };
+  }
+  const title = block ? (block.band ? block.band.label + " › " + block.label : block.label) : "";
+  head.append(back, el("span", "", title), el("span", "n", String(tiles.length)));
+  // A label's lane can be raised to a band, on this device; a band's lane
+  // lowers its band, or raises the label it holds.
+  if (block && prefs.group === "label") {
+    const bandButton = (text, key, raised) => {
+      const b = el("button", "bandbtn", text);
+      b.onclick = () => setBand(key, raised);
+      return b;
+    };
+    const isLabel = (key) => key && key.startsWith("label:") && key.length > 6;
+    const box = el("span", "bandbtns");
+    if (block.band) box.append(bandButton("Lower band", block.band.key, false));
+    const inner = block.band ? block.group : block.key;
+    if (isLabel(inner)) box.append(bandButton("Raise to band", inner, true));
+    if (box.childElementCount) head.append(box);
+  }
+  head.append(line);
+  space.style.height = rows * (MID_BOX_H + GAP) + GAP + "px";
   const top = lane.scrollTop - 60, bottom = lane.scrollTop + lane.clientHeight;
   const cards = mapCards();
   const shown = [];
   space.innerHTML = "";
   tiles.forEach((t, i) => {
     const row = Math.floor(i / cols), col = i % cols;
-    const y = GAP + row * (MID_CARD_H + GAP);
-    if (y + MID_CARD_H < top - MID_CARD_H || y > bottom + MID_CARD_H) return;
+    const y = GAP + row * (MID_BOX_H + GAP);
+    if (y + MID_BOX_H < top - MID_BOX_H || y > bottom + MID_BOX_H) return;
     shown.push(t.agent);
     const c = cards.get(t.agent) || {};
-    const card = el("div", "mcard");
-    card.dataset.agent = t.agent;
-    Object.assign(card.style, { left: GAP + col * (cw + GAP) + "px", top: y + "px", width: cw + "px", height: MID_CARD_H + "px" });
-    const title = el("div", "title"); title.append(el("span", "dot s-" + t.state), el("span", "", c.title || "…"));
-    card.append(title);
-    card.append(el("div", "line", [c.host || t.agent.split("/")[0], STATES[t.state], ago(c.reply_at || c.at || t.at + ":00Z")].filter(Boolean).join(" · ")));
-    if (c.ask) card.append(el("div", "line ask", c.ask.question || c.ask.title));
-    else if (c.reply) card.append(el("div", "line reply", c.reply));
-    if (c.labels && c.labels.length) card.append(chips(c.labels));
+    // The agent's name, then how it is and since when, then its host.
+    const card = el("div", "mbox s-" + t.state);
+    card.dataset.agent = t.agent; card.dataset.key = t.agent;
+    card.style.setProperty("--age", AGES[ageStep(t.at)]);
+    Object.assign(card.style, { left: GAP + col * (cw + GAP) + "px", top: y + "px", width: cw + "px", height: MID_BOX_H + "px" });
+    card.append(el("div", "name", c.title || "…"));
+    card.append(el("div", "line", [STATES[t.state], ago(c.at || t.at + ":00Z")].filter(Boolean).join(" · ")));
+    card.append(el("div", "host", c.host || t.agent.split("/")[0]));
     card.onclick = () => enterNear(t.agent, card);
     if (mapState.flash === t.agent) { card.classList.add("flash"); }
     space.append(card);
   });
   mapFocus(shown);
+  if (!sortPending(midSort)) midSort.waited = 0;
+  resortTimer(midSort, sortPending(midSort));
+  drawResort(midSort);
 }
 
 let focusTimer = null;
@@ -2309,6 +2747,9 @@ function drawMinimap() {
   // On a narrow screen the cards need all the width.
   mm.hidden = !L || mapState.level === "near" || (mapState.level === "far" && mapState.cam.s <= 1.01) ||
     (mapState.level === "mid" && L.W < 600);
+  // The key to the tiles' colours, over the map until dismissed. It stays
+  // in a lane too, so the board does not shift on the way in and out.
+  $("agekey").hidden = !!prefs.ageKeyHidden || mapState.level === "near";
   if (!L) return;
   const k = 84 / L.W;
   mm.style.height = L.H * k + "px";
@@ -2360,6 +2801,7 @@ function enterMid(laneKey, then) {
   mapState.cam = laneCam(b);
   camTransform(true);
   mapState.level = "mid"; mapState.lane = laneKey;
+  Object.assign(midSort, { order: [], waited: 0 });
   const lane = $("lane");
   lane.innerHTML = ""; lane.scrollTop = 0; lane.style.opacity = "0"; lane.hidden = false;
   setTimeout(() => { lane.style.opacity = "1"; drawMid(); if (then) then(); }, 220);
@@ -2371,6 +2813,7 @@ function leaveMid() {
   const lane = $("lane");
   lane.style.opacity = "0";
   mapState.level = "far";
+  resortTimer(midSort, false);
   setTimeout(() => { lane.hidden = true; }, 200);
   mapState.cam = { x: 0, y: 0, s: 1 };
   camTransform(true);
@@ -2420,6 +2863,23 @@ function leaveNear() {
   }, 260);
 }
 
+// A swipe right from an open card goes all the way out, to the whole map,
+// and the agent's tile pulses to show where it was.
+function nearToMap() {
+  if (mapState.level !== "near") return;
+  const agent = mapState.near, lane = $("lane");
+  $("near").hidden = true;
+  $("app").insertBefore($("convpane"), $("mappane"));
+  mapState.level = "far"; mapState.lane = null;
+  lane.hidden = true; lane.style.opacity = "0";
+  mapState.cam = { x: 0, y: 0, s: 1 }; camTransform(false);
+  mapFocus([]);
+  mapState.found = agent;
+  openAgent(null);
+  drawMap();
+  setTimeout(() => { if (mapState.found === agent) { mapState.found = null; drawMap(); } }, 1600);
+}
+
 // Leaving the map puts the conversation pane back where lists use it.
 function leaveMap() {
   if (prefs.tab !== "map") return;
@@ -2441,9 +2901,9 @@ function flyTo(host, id) {
   if (mapState.level === "near") leaveNear();
   if (!tile) return enterNear(agent, null);
   const show = () => {
-    const tiles = laneTiles(), i = tiles.findIndex((t) => t.agent === agent);
+    const i = midTiles().findIndex((t) => t.agent === agent);
     const { cols } = midGeometry();
-    $("lane").scrollTop = Math.max(0, Math.floor(i / cols) * (MID_CARD_H + GAP) - 40);
+    $("lane").scrollTop = Math.max(0, Math.floor(i / cols) * (MID_BOX_H + GAP) - 40);
     mapState.flash = agent; drawMid();
     setTimeout(() => { mapState.flash = null; }, 2600);
   };
@@ -2551,6 +3011,7 @@ function goBack() {
   if (usageOpen()) return hideUsage();
   const shown = document.querySelector(".lightbox");
   if (shown) return shown.remove();
+  if (recent.open) return closeRecent();
   if (prefs.tab === "map") {
     if (mapState.level === "near") leaveNear(); else if (mapState.level === "mid") leaveMid();
   } else if (open && layout() === "phone") openAgent(null);
@@ -2558,11 +3019,12 @@ function goBack() {
 document.addEventListener("keydown", (e) => { if (e.key === "Escape" && (panel || !composing())) goBack(); });
 
 // A swipe to the right goes back, as zooming out does, and the level
-// being left follows the finger: the conversation, the open card, a lane's
-// cards or a picture slides away showing what is under it. Let go past a
-// third of the screen, or flick, and it goes; short of that it springs
-// back. Touch events, not pointers: the browser cancels pointers once it
-// starts scrolling.
+// being left follows the finger: the conversation, a lane's cards, Recent
+// or a picture slides away showing what is under it. From an open card it
+// goes all the way out, to the whole map. A swipe left from a
+// conversation brings in Recent. Let go past a third of the screen, or
+// flick, and it goes; short of that it springs back. Touch events, not
+// pointers: the browser cancels pointers once it starts scrolling.
 let swipe = null;
 function sideScrolls(elm) {
   for (let e = elm; e && e !== document.body; e = e.parentElement) {
@@ -2576,7 +3038,14 @@ function swipeTarget() {
   if (usageOpen()) return document.querySelector(".drawer");
   const shown = document.querySelector(".lightbox");
   if (shown) return shown;
+  if (recent.open) return $("recentpane");
   if (prefs.tab === "map") return mapState.level === "near" ? $("near") : mapState.level === "mid" ? $("lane") : null;
+  return open && layout() === "phone" ? $("convpane") : null;
+}
+// What a swipe left moves: a conversation, to bring in Recent.
+function swipeLeftTarget() {
+  if (panel || usageOpen() || recent.open || document.querySelector(".lightbox")) return null;
+  if (prefs.tab === "map") return mapState.level === "near" ? $("near") : null;
   return open && layout() === "phone" ? $("convpane") : null;
 }
 function slide(target, x, animate) {
@@ -2585,39 +3054,46 @@ function slide(target, x, animate) {
 }
 document.addEventListener("touchstart", (e) => {
   const t = e.touches[0];
-  const target = e.touches.length === 1 && !/INPUT|TEXTAREA|SELECT/.test(e.target.tagName) && !sideScrolls(e.target) && swipeTarget();
-  swipe = target ? { x: t.clientX, y: t.clientY, at: Date.now(), target, dragging: false, last: { x: t.clientX, at: Date.now() }, v: 0 } : null;
+  const free = e.touches.length === 1 && !/INPUT|TEXTAREA|SELECT/.test(e.target.tagName) && !sideScrolls(e.target);
+  const right = free && swipeTarget(), left = free && swipeLeftTarget();
+  swipe = right || left ? { x: t.clientX, y: t.clientY, at: Date.now(), right, left, target: null, dir: 0, dragging: false,
+    last: { x: t.clientX, at: Date.now() }, v: 0 } : null;
 }, { passive: true });
 document.addEventListener("touchmove", (e) => {
   if (!swipe) return;
   if (e.touches.length !== 1) return cancelSwipe();
   const t = e.touches[0], dx = t.clientX - swipe.x, dy = t.clientY - swipe.y;
   if (!swipe.dragging) {
-    // Mostly up or down is a scroll, not a swipe; mostly right starts one.
+    // Mostly up or down is a scroll, not a swipe; mostly sideways, where
+    // there is somewhere to go, starts one.
     if (Math.abs(dy) > 12 && Math.abs(dy) > Math.abs(dx)) { swipe = null; return; }
-    if (dx < 12 || dx < Math.abs(dy) * 1.2) return;
+    const dir = dx >= 12 && swipe.right ? 1 : dx <= -12 && swipe.left ? -1 : 0;
+    if (!dir || Math.abs(dx) < Math.abs(dy) * 1.2) return;
+    swipe.dir = dir; swipe.target = dir > 0 ? swipe.right : swipe.left;
     swipe.dragging = true;
-    swipe.x = t.clientX - 1;
+    swipe.x = t.clientX - dir;
     swipe.target.classList.add("swiping");
+    if (dir < 0) { swipe.target.classList.add("leftward"); showRecent(true); }
     // On a phone the list sits under the conversation; show it.
-    if (swipe.target === $("convpane")) { $("app").classList.add("peek"); $("listpane").hidden = false; }
+    else if (swipe.target === $("convpane")) { $("app").classList.add("peek"); $("listpane").hidden = false; }
   }
   e.preventDefault();
-  const now = Date.now(), x = Math.max(0, t.clientX - swipe.x);
+  const now = Date.now(), moved = t.clientX - swipe.x;
   swipe.v = (t.clientX - swipe.last.x) / Math.max(1, now - swipe.last.at);
   swipe.last = { x: t.clientX, at: now };
-  slide(swipe.target, x, false);
+  slide(swipe.target, swipe.dir > 0 ? Math.max(0, moved) : Math.min(0, moved), false);
 }, { passive: false });
 document.addEventListener("touchend", (e) => {
   if (!swipe || !swipe.dragging) { swipe = null; return; }
-  const { target } = swipe;
-  const x = Math.max(0, e.changedTouches[0].clientX - swipe.x);
-  const go = x > window.innerWidth / 3 || (x > 40 && swipe.v > 0.5);
+  const { target, dir } = swipe;
+  const moved = e.changedTouches[0].clientX - swipe.x;
+  const x = dir > 0 ? Math.max(0, moved) : -Math.min(0, moved);
+  const go = x > window.innerWidth / 3 || (x > 40 && swipe.v * dir > 0.5);
   swipe = null;
   if (!go) return settle(target, false);
-  slide(target, target.getBoundingClientRect().width || window.innerWidth, true);
+  slide(target, dir * (target.getBoundingClientRect().width || window.innerWidth), true);
   setTimeout(() => {
-    goBack();
+    if (dir < 0) openRecent(); else if (target === $("near")) nearToMap(); else goBack();
     // Put it back once what it was showing has gone.
     setTimeout(() => settle(target, true), 320);
   }, 200);
@@ -2627,9 +3103,11 @@ document.addEventListener("touchcancel", cancelSwipe, { passive: true });
 function settle(target, gone) {
   slide(target, 0, !gone);
   setTimeout(() => {
-    target.classList.remove("swiping");
+    target.classList.remove("swiping", "leftward");
     target.style.transition = "";
     if (target === $("convpane")) { $("app").classList.remove("peek"); drawChrome(); }
+    // Recent came in under a swipe that sprang back.
+    if (!recent.open && !$("recentpane").hidden) closeRecent();
   }, gone ? 0 : 220);
 }
 new ResizeObserver(() => { if (prefs.tab === "map") drawMap(); }).observe($("map"));
@@ -2650,12 +3128,27 @@ $("convmore").onclick = (e) => { e.stopPropagation(); headFull = !headFull; fitH
 new ResizeObserver(fitHead).observe($("convpane").querySelector(".convhead"));
 $("add").innerHTML = icon("plus", 22);
 $("gear").onclick = () => showSheet("settings");
+$("help").innerHTML = icon("help");
+$("agekey-close").innerHTML = icon("close", 16);
+$("agekey-close").onclick = () => { prefs.ageKeyHidden = true; savePrefs(); drawMinimap(); };
+// Help brings the key back, on the map.
+$("help").onclick = () => {
+  prefs.ageKeyHidden = false; savePrefs();
+  if (prefs.tab !== "map") $("tab-map").onclick(); else drawMinimap();
+};
 $("dots").onclick = () => showSheet("hosts");
 $("tab-ny").onclick = () => { leaveMap(); prefs.tab = "ny"; savePrefs(); delete views.list; subscribeList(); drawAll(); };
 $("tab-all").onclick = () => { leaveMap(); prefs.tab = "all"; savePrefs(); delete views.list; subscribeList(); drawAll(); };
 $("tab-map").onclick = () => { if (open) openAgent(null); prefs.tab = "map"; savePrefs(); mapState.size = null; subscribeList(); drawAll(); };
 $("filters-toggle").onclick = () => { prefs.filters = !prefs.filters; savePrefs(); drawChrome(); };
 $("back").onclick = goBack;
+$("recentback").innerHTML = icon("back", 26);
+$("recentback").onclick = closeRecent;
+$("resort").onclick = () => { if (recentPending()) resort(recent.sort); };
+// Recent's list is not redrawn under a finger (drawRecent waits): a row
+// taken out of the page would take the touch's end with it.
+holdWhileTouched(recent.sort, $("recentscroll"));
+holdWhileTouched(midSort, $("lane"));
 $("close").onclick = () => openAgent(null);
 $("bell").onclick = () => { const a = views.conv && views.conv.fields.agent; if (a) toggleNotify(a); };
 $("archive").onclick = () => confirmGone("archive");
@@ -2671,6 +3164,11 @@ for (const id of ["group", "sort", "host", "label", "state", "background"]) {
     delete views.list; subscribeList(); drawAll();
   };
 }
+// "+label:<id>" raises that label to a band, "-label:<id>" lowers it.
+$("bands").onchange = () => {
+  const v = $("bands").value;
+  if (v) setBand(v.slice(1), v[0] === "+");
+};
 let typing = null;
 $("query").oninput = () => {
   clearTimeout(typing);
@@ -2702,6 +3200,8 @@ for (const q of [wide, wider]) { try { q.addEventListener("change", relayout); }
 setInterval(() => send({ type: "ping", t: Date.now() }), 25000);
 setInterval(() => { const e = document.querySelector("#working .elapsed"); if (e) e.textContent = elapsed(); }, 1000);
 setInterval(drawChrome, 30000);
+// Tiles age between updates too.
+setInterval(() => { if (prefs.tab === "map" && mapState.layout && !document.hidden) drawFar(); }, 30000);
 document.addEventListener("visibilitychange", () => { if (!document.hidden && !ws) connect(); });
 connect();
 </script>

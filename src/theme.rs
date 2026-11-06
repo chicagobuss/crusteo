@@ -245,7 +245,9 @@ pub fn apply(cx: &mut gpui_kit::gpui::App) {
         c.danger_foreground = h(rgb(0xffffff));
         c.list_hover = h(p.surface2);
         c.list_active = h(p.surface2);
-        c.selection = with_alpha(p.accent, 0.35);
+        // The bright accent: the dark one at any alpha landed within a few
+        // shades of the surfaces, and selected text could not be seen.
+        c.selection = with_alpha(p.accent_bright, 0.32);
         c.caret = h(p.foreground);
         c.scrollbar_thumb = with_alpha(p.extra_muted, 0.4);
         c.scrollbar_thumb_hover = h(p.muted);

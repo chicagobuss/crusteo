@@ -51,6 +51,9 @@ pub struct ReefConfig {
     /// A usage feed's `http://` base URL, read for the `usage` view
     /// besides the daemons' own reports. None reads only the daemons.
     pub usage: Option<String>,
+    /// Where `record.json` and the sinks' cursors are, when not in
+    /// `data_dir`: the demo records into a dir given it, saving nothing else.
+    pub record_dir: Option<PathBuf>,
 }
 
 impl ReefConfig {
@@ -66,6 +69,7 @@ impl ReefConfig {
             hosts_file: None,
             host_names: Vec::new(),
             usage: None,
+            record_dir: None,
         }
     }
 }

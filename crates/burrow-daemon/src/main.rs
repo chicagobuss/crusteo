@@ -423,14 +423,21 @@ fn discoveries(args: &Args, home: Option<&std::path::Path>) -> Vec<Discovery> {
             burrow_provider_acp::gemini,
         ),
     ];
+    // OpenCode is built with Bun, which unpacks a library at each launch and
+    // leaves it: those go under Burrow's home, where its probes clear them.
+    let bun_tmpdir = home.map(|home| home.join("tmp").join("bun"));
     for (off, binary, default, config) in acp {
         if off {
             continue;
         }
         let cli = program(&binary, default);
         let id = config(binary.as_deref()).id;
+        let bun_tmpdir = bun_tmpdir.clone().filter(|_| id == "opencode");
         found.push(Discovery::cli(id, cli, move || {
-            let config = config(binary.as_deref());
+            let mut config = config(binary.as_deref());
+            if let Some(dir) = &bun_tmpdir {
+                config = burrow_provider_acp::with_bun_tmpdir(config, dir);
+            }
             let label = config.label.clone();
             match AcpProvider::detect(config) {
                 Some(agent) => {

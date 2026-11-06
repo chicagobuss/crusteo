@@ -13,6 +13,7 @@
 
 mod actions;
 mod agents;
+mod recording;
 mod replies;
 
 pub use actions::{QUEUE_MAX, Queued, Reply};
@@ -235,6 +236,8 @@ pub struct Upstream {
     pub usage_every: Duration,
     /// Each host's providers, read when a phone opens a new-agent form.
     providers: HashMap<String, agents::Providers>,
+    /// The fleet's recorder ([`crate::record`]), idle until configured.
+    pub record: crate::record::Recorder,
 }
 
 impl Upstream {
@@ -252,6 +255,7 @@ impl Upstream {
             next_generation: 0,
             next_epoch: 0,
             events,
+            record: crate::record::Recorder::new(None, apply.clone()),
             apply,
             dirty_fleet: true,
             dirty_sessions: HashSet::new(),
@@ -439,6 +443,7 @@ impl Upstream {
         self.forget_providers(name);
         self.set_usage(&crate::usage::host_key(name), None);
         self.forget_host(name);
+        self.record.forget_host(name);
         self.dirty_fleet = true;
         true
     }
@@ -601,6 +606,12 @@ impl Upstream {
             "agent_stream" => {
                 let agent = payload["agentId"].as_str().unwrap_or_default().to_string();
                 let key = (name.to_string(), agent.clone());
+                // Recording reads it soon, and at once when a turn ends.
+                let ended = matches!(
+                    payload["event"]["type"].as_str(),
+                    Some("turn_completed" | "turn_failed" | "turn_canceled")
+                );
+                self.record.touch(key.clone(), ended);
                 if let Some(session) = self.sessions.get_mut(&key) {
                     let follow = session.timeline.apply_live(payload);
                     self.mark_session(name, &agent);
@@ -654,6 +665,7 @@ impl Upstream {
                     .unwrap_or_default()
                     .to_string();
                 let was_running = (kind == "agent_update").then(|| self.running(name, &agent_id));
+                let known = self.fleet.agent(&host_id(name), &agent_id).is_some();
                 let Some(host) = self.fleet.host_mut(&host_id(name)) else {
                     return;
                 };
@@ -670,6 +682,15 @@ impl Upstream {
                     if gone {
                         // Archived or removed: nothing kept for it stays.
                         self.forget_agent(name, &agent_id);
+                        self.record.forget(&(name.to_string(), agent_id.clone()));
+                    } else {
+                        let ended = was && !self.running(name, &agent_id);
+                        self.record
+                            .touch((name.to_string(), agent_id.clone()), ended);
+                        // A new agent is followed from its first turn.
+                        if !known && self.record.following() {
+                            self.resubscribe_timelines(name, false);
+                        }
                     }
                 }
                 if changed.any() {
@@ -928,6 +949,11 @@ impl Upstream {
                     for message in held {
                         up.on_push(&name, message);
                     }
+                    // Recording follows the agents now listed.
+                    if up.record.following() {
+                        up.resubscribe_timelines(&name, false);
+                        up.record_host_ready(&name);
+                    }
                     up.dirty_fleet = true;
                 }));
             }
@@ -1031,7 +1057,7 @@ impl Upstream {
             return;
         }
         let epoch = link.epoch.load(Ordering::SeqCst);
-        let agents: Vec<String> = link.watched.iter().cloned().collect();
+        let agents = self.timeline_agents(host);
         let reply = guarded(
             &link.client,
             json!({ "type": "agent.timeline.set_subscription.request", "agentIds": agents }),

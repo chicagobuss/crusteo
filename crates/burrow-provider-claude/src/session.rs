@@ -89,6 +89,10 @@ pub struct Session<L: Launcher> {
     permissions: HashMap<String, Permission>,
     usage: Usage,
     mode: Option<String>,
+    /// An interrupted turn whose aborted `result` the CLI has yet to send.
+    /// A prompt sent right after the interrupt is a new turn by then, and
+    /// that stale result must not end it.
+    aborting: bool,
 }
 
 impl<L: Launcher> Session<L> {
@@ -117,6 +121,7 @@ impl<L: Launcher> Session<L> {
             tools: HashMap::new(),
             permissions: HashMap::new(),
             usage: Usage::default(),
+            aborting: false,
         }
     }
 
@@ -166,6 +171,7 @@ impl<L: Launcher> Session<L> {
         self.transport = Some(transport);
         self.initialized = false;
         self.restart_needed = false;
+        self.aborting = false;
         let mut initialize = json!({"subtype": "initialize"});
         if let Some(prompt) = &self.settings.append_system_prompt {
             initialize["appendSystemPrompt"] = prompt.clone().into();
@@ -317,6 +323,7 @@ impl<L: Launcher> Session<L> {
                 self.cancel_tools("canceled");
                 let turn = self.turn_id();
                 self.turn = None;
+                self.aborting = true;
                 self.emit(ProviderEvent::TurnCanceled {
                     turn,
                     reason: "Interrupted".into(),
@@ -420,6 +427,9 @@ impl<L: Launcher> Session<L> {
             "assistant" => self.on_assistant(&message),
             "user" => self.on_user(&message),
             "result" => self.on_result(&message),
+            // `/clear`: a new, empty conversation (its `init` follows), so
+            // the meter starts from nothing rather than the old context.
+            "conversation_reset" => self.usage.context_used = Some(0),
             "control_request" => self.on_cli_request(&message),
             "control_response" => self.on_control_response(&message["response"]),
             "control_cancel_request" => {
@@ -438,6 +448,9 @@ impl<L: Launcher> Session<L> {
     fn on_system(&mut self, message: &Value) {
         match message["subtype"].as_str() {
             Some("init") => {
+                // Each turn opens with an `init`: one that came with no
+                // result for the interrupted turn means none is coming.
+                self.aborting = false;
                 if let Some(session_id) = message["session_id"].as_str()
                     && self.session_id.as_deref() != Some(session_id)
                 {
@@ -651,6 +664,11 @@ impl<L: Launcher> Session<L> {
     }
 
     fn on_result(&mut self, message: &Value) {
+        if std::mem::take(&mut self.aborting) {
+            // The interrupted turn's own result, before the next turn's
+            // `init`: it ends that turn, already closed, not this one.
+            return;
+        }
         let Some(_) = self.turn else {
             // A result after an interrupt or for a turn already closed.
             return;

@@ -255,18 +255,70 @@ pub struct Discovery {
 
 impl Discovery {
     /// A provider whose CLI is `program`, told apart by its `--version`.
+    /// The CLI is run for that only when its file changed (see
+    /// [`CachedVersion`]).
     pub fn cli(
         id: impl Into<String>,
         program: std::path::PathBuf,
         find: impl Fn() -> Option<std::sync::Arc<dyn Provider>> + Send + Sync + 'static,
     ) -> Self {
+        let version = CachedVersion::default();
         Self {
             id: id.into(),
             program: Some(program.clone()),
-            stamp: Box::new(move || version_line(&program)),
+            stamp: Box::new(move || version.of(&program)),
             find: Box::new(find),
         }
     }
+}
+
+/// A CLI's `--version`, read again only when the file the CLI resolves to
+/// changed (its path, through symlinks, its size or its modified time).
+/// The daemon looks every few minutes, and running a CLI is not free: one
+/// built with Bun (OpenCode) unpacks a native library into the temporary
+/// directory at every launch and never removes it.
+#[derive(Default)]
+pub struct CachedVersion {
+    last: std::sync::Mutex<Option<(FileStamp, Option<String>)>>,
+}
+
+type FileStamp = (std::path::PathBuf, u64, Option<std::time::SystemTime>);
+
+impl CachedVersion {
+    /// What `program --version` prints, or `None` when it cannot be run.
+    pub fn of(&self, program: &std::path::Path) -> Option<String> {
+        // A CLI not found as a file (say, a Windows `.cmd` shim) is run
+        // each time, as before.
+        let Some(now) = file_stamp(program) else {
+            return version_line(program);
+        };
+        let mut last = self.last.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some((was, version)) = last.as_ref()
+            && *was == now
+        {
+            return version.clone();
+        }
+        let version = version_line(program);
+        *last = Some((now, version.clone()));
+        version
+    }
+}
+
+/// The file `program` runs, as a path through its symlinks, with its size
+/// and modified time. A bare name is looked up on `PATH`.
+fn file_stamp(program: &std::path::Path) -> Option<FileStamp> {
+    let found = if program.components().count() > 1 {
+        Some(program.to_path_buf())
+    } else {
+        let path = std::env::var_os("PATH")?;
+        std::env::split_paths(&path)
+            .map(|dir| dir.join(program))
+            .find(|candidate| candidate.is_file())
+    }?;
+    let real = std::fs::canonicalize(found).ok()?;
+    let meta = std::fs::metadata(&real).ok()?;
+    meta.is_file()
+        .then(|| (real, meta.len(), meta.modified().ok()))
 }
 
 /// What `program --version` prints, or `None` when it cannot be run.
@@ -294,6 +346,14 @@ pub trait Provider: Send + Sync {
     fn loading(&self) -> bool {
         false
     }
+    /// Why the provider cannot be used, when it found that out (an ACP
+    /// agent whose probe has never succeeded, such as a CLI its vendor no
+    /// longer serves). The providers snapshot then says `error` with this
+    /// reason, clients offer it no more, and creating an agent on it is
+    /// refused with it.
+    fn unavailable(&self) -> Option<String> {
+        None
+    }
     /// The id of the `ordinal`th foreground turn. Paseo's providers name
     /// their own turns: Claude's are `foreground-turn-N`, Codex's
     /// `codex-turn-N`, ACP agents' UUIDs.
@@ -313,5 +373,51 @@ pub trait Provider: Send + Sync {
     /// session, so they come before the first prompt.
     fn opening_items(&self, _spec: &SessionSpec) -> Vec<Value> {
         Vec::new()
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    /// A CLI that counts its launches: the cached version runs it once, and
+    /// again only after the file is replaced.
+    #[test]
+    fn a_cli_is_run_for_its_version_only_when_its_file_changes() {
+        let dir = std::env::temp_dir().join(format!(
+            "burrow-cached-version-{}-{:?}",
+            std::process::id(),
+            std::time::SystemTime::now()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cli = dir.join("cli");
+        let runs = dir.join("runs");
+        let write = |version: &str| {
+            let script = format!(
+                "#!/bin/sh\necho run >> '{}'\necho {version}\n",
+                runs.display()
+            );
+            std::fs::write(&cli, script).unwrap();
+            std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755)).unwrap();
+        };
+        let launches = || {
+            std::fs::read_to_string(&runs)
+                .map(|s| s.lines().count())
+                .unwrap_or(0)
+        };
+        write("1.0.0");
+        let cached = CachedVersion::default();
+        assert_eq!(cached.of(&cli).as_deref(), Some("1.0.0"));
+        assert_eq!(cached.of(&cli).as_deref(), Some("1.0.0"));
+        assert_eq!(launches(), 1, "the second look does not run it");
+
+        write("1.10.0");
+        assert_eq!(cached.of(&cli).as_deref(), Some("1.10.0"));
+        assert_eq!(launches(), 2, "an upgraded CLI is run again");
+
+        let missing = dir.join("gone");
+        assert_eq!(cached.of(&missing), None);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

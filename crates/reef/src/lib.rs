@@ -24,6 +24,7 @@ pub mod fake;
 pub mod legacy;
 pub mod lists;
 pub mod proto;
+pub mod record;
 pub mod reef;
 pub mod server;
 pub mod settings;

@@ -19,6 +19,12 @@ use crate::touch_selection::{
 };
 use crate::{AutoScroll, GlobalState};
 
+// crusteo: keyboard.
+#[path = "selection_keys.rs"]
+mod keys;
+pub use keys::SelectionMotion;
+pub(crate) use keys::selection_color;
+
 /// An opaque selection layer identifier.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct TextSelectionScopeId(u64);
@@ -1149,6 +1155,8 @@ struct WindowSelectionState {
     /// bounces stretch and snap back on every tick.
     auto_scroll_stall: (Option<(Bounds<Pixels>, Point<Pixels>)>, u8),
     touch: TouchSelection,
+    /// crusteo: keyboard. Who the selection has the keyboard of, and its caret.
+    keyboard: keys::Keyboard,
     /// This entity, so that touch changes can notify observers from paths that
     /// only hold an [`App`].
     entity_id: Option<EntityId>,
@@ -1400,6 +1408,7 @@ impl WindowSelectionState {
         self.is_selecting = false;
         self.fence = None;
         self.did_hit_text = false;
+        self.keyboard.release();
         if self.touch.reset() {
             self.touch_changed(cx);
         }
@@ -1521,6 +1530,7 @@ impl WindowSelectionState {
         self.is_selecting = false;
         self.fence = None;
         self.did_hit_text = false;
+        self.keyboard.release();
         if self.touch.reset() {
             self.touch_changed(cx);
         }
@@ -2728,6 +2738,7 @@ impl Element for TextSelectionLayer {
         let state = retain_text_selection_state(global_id, window, cx);
         // The handles and the menu register again as they paint this frame.
         state.update(cx, |state, _| state.touch.begin_frame());
+        keys::defer_caret(&state, window, cx);
         TextSelectionLayerPrepaintState(state)
     }
 

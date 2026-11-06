@@ -1,0 +1,32 @@
+# Elasticsearch and Kibana for trying Reef's recording: one node, security
+# off, on localhost only. For a test box, not for keeping anything.
+name: reef-record
+
+services:
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.15.3
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: "false"
+      ES_JAVA_OPTS: -Xms512m -Xmx512m
+    ports:
+      - 127.0.0.1:9200:9200
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:9200/_cluster/health || exit 1"]
+      interval: 5s
+      retries: 30
+
+  kibana:
+    image: docker.elastic.co/kibana/kibana:8.15.3
+    environment:
+      ELASTICSEARCH_HOSTS: http://elasticsearch:9200
+    ports:
+      - 127.0.0.1:5601:5601
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+
+# Named, so the Vector that Reef starts can join it.
+networks:
+  default:
+    name: reef-record

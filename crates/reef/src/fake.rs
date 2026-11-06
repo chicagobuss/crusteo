@@ -233,6 +233,12 @@ impl FakeDaemon {
         self.lock().agents.get(id).cloned()
     }
 
+    /// Starts the timelines' history again under a new epoch, as a daemon
+    /// does that lost it: cursors from before no longer hold.
+    pub fn new_epoch(&self, epoch: &str) {
+        self.lock().epoch = epoch.to_string();
+    }
+
     /// Refuses the next `count` sends (`accepted: false`).
     pub fn fail_next_sends(&self, count: usize) {
         self.lock().fail_sends = count;
@@ -1060,6 +1066,15 @@ pub fn seed_many(daemon: &FakeDaemon, prefix: &str, count: usize) {
             &at(age + 5),
             json!({"type": "user_message",
             "text": TASKS[(i * 5 + shift) % TASKS.len()], "messageId": format!("{id}-m")}),
+        );
+        // Each agent's own thought, numbered thought_1 in every timeline as
+        // real ones are, so a phone that mixed agents up would show it.
+        daemon.seed_row(
+            &id,
+            "foreground-turn-1",
+            &at(age + 1),
+            json!({"type": "reasoning",
+            "text": format!("Working out {} for {id}.", TASKS[(i * 5 + shift) % TASKS.len()].to_lowercase())}),
         );
         daemon.seed_row(
             &id,

@@ -221,6 +221,8 @@ impl Element for SelectableText {
         let color = self
             .selection_color
             .unwrap_or_else(|| crate::Theme::global(cx).tokens.colors.selection);
+        // crusteo: keyboard.
+        let color = crate::text_selection::selection_color(color, window, cx);
         for range in projection.ranges().iter().flatten().cloned() {
             Self::paint_selection(&layout, range, color, window);
         }

@@ -369,6 +369,9 @@ pub struct InputBaseState<M: InputModeKind> {
     pub(super) searchable: bool,
     pub(super) replaceable: bool,
     pub(super) soft_wrap: bool,
+    /// crusteo: keyboard. The selection stays painted, in grey, while the
+    /// input does not have focus.
+    pub(super) blurred_selection: bool,
     pub(super) wrapping_indent: WrappingIndent,
     pub(super) scroll_beyond_last_line: Option<usize>,
     pub(super) cursor_surrounding_lines: Option<usize>,
@@ -709,6 +712,7 @@ impl<M: InputModeKind> InputBaseState<M> {
             searchable: false,
             replaceable: true,
             soft_wrap: true,
+            blurred_selection: false,
             wrapping_indent: WrappingIndent::default(),
             scroll_beyond_last_line: None,
             cursor_surrounding_lines: None,
@@ -9967,6 +9971,13 @@ impl<M: crate::input::MultiLineMode> InputBaseState<M> {
     #[doc(hidden)]
     pub fn soft_wrap(mut self, wrap: bool) -> Self {
         self.soft_wrap = wrap;
+        self
+    }
+
+    /// crusteo: keyboard. Keeps the selection painted, in grey, while the
+    /// input does not have focus, so that it can be seen to be kept.
+    pub fn blurred_selection(mut self, show: bool) -> Self {
+        self.blurred_selection = show;
         self
     }
 

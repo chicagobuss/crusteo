@@ -95,6 +95,8 @@ async fn run(args: config::Args) -> Result<(), String> {
         hosts_file: args.hosts_file.clone().filter(|_| !args.demo),
         host_names: args.host_names.clone(),
         usage: args.usage.clone(),
+        // The demo records only into a dir it is given.
+        record_dir: args.data_dir.clone().filter(|_| args.demo),
         ..ReefConfig::new(hosts, client_id, devices.clone())
     };
     let names: Vec<String> = reef_config.hosts.iter().map(|h| h.name.clone()).collect();

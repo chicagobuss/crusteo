@@ -1,8 +1,9 @@
 //! Providers found again while the daemon runs.
 //!
 //! Coding agents' CLIs are upgraded all the time, often by themselves, and
-//! new models come with them. Each CLI's `--version` is read every
-//! [`CHECK_EVERY`]; when it changed (or a CLI turned up), the provider is
+//! new models come with them. Each CLI's `--version` is looked at every
+//! [`CHECK_EVERY`] (the CLI is run for it only when its file changed, see
+//! [`burrow_provider::CachedVersion`]); when it changed (or a CLI turned up), the provider is
 //! found again with its models and replaces the old one, and clients get a
 //! `providers_snapshot_update`. Every [`PROBE_EVERY`], and when a client asks
 //! (`refresh_providers_snapshot_request`), providers are probed again even

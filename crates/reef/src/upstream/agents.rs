@@ -144,7 +144,12 @@ pub fn providers_json(providers: &[Provider]) -> Vec<Value> {
                 } else {
                     "disabled"
                 };
-                return json!({ "id": p.id, "label": label, "ready": false, "status": status });
+                let mut entry =
+                    json!({ "id": p.id, "label": label, "ready": false, "status": status });
+                if let Some(error) = &p.error {
+                    entry["error"] = json!(error);
+                }
+                return entry;
             }
             let models: Vec<Value> = (p.models.iter())
                 .map(|m| {
@@ -612,6 +617,7 @@ mod tests {
             id: "claude".into(),
             label: "Claude".into(),
             status: "ready".into(),
+            error: None,
             enabled: true,
             default_mode: Some("default".into()),
             modes: vec![choice("default"), choice("plan")],

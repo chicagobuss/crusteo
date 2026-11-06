@@ -7,8 +7,9 @@ use gpui_kit::component::input::{InputEvent, TextareaState};
 use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_kit::component::{Icon, Sizable};
 use gpui_kit::gpui::{
-    App, AppContext, ClickEvent, Context, Entity, Focusable, Hsla, InteractiveElement, IntoElement,
-    ParentElement, Render, SharedString, StatefulInteractiveElement, Styled, Window, div, px,
+    App, AppContext, ClickEvent, Context, Entity, EntityInputHandler as _, Focusable, Hsla,
+    InteractiveElement, IntoElement, ParentElement, Render, SharedString,
+    StatefulInteractiveElement, Styled, Window, div, px,
 };
 use gpui_kit::prelude::FluentBuilder;
 use serde_json::json;
@@ -87,6 +88,8 @@ impl Composer {
                 .auto_grow(1, 12)
                 .submit_on_enter(true)
                 .placeholder("Message the agent…")
+                // Selecting in the conversation keeps a selection here, grey.
+                .blurred_selection(true)
         });
         cx.subscribe_in(
             &input,
@@ -218,6 +221,22 @@ impl Composer {
 
     pub fn focus(&self, window: &mut Window, cx: &mut App) {
         self.input.update(cx, |input, cx| input.focus(window, cx));
+    }
+
+    /// Takes the keyboard back and types `text`, as if it had been typed
+    /// here: a key pressed while a selection in the conversation had it.
+    pub fn type_text(&self, text: &str, window: &mut Window, cx: &mut App) {
+        self.input.update(cx, |input, cx| {
+            input.focus(window, cx);
+            input.replace_text_in_range(None, text, window, cx);
+        });
+    }
+
+    /// Takes the keyboard back and pastes, as [`Self::type_text`] types.
+    pub fn paste(&self, window: &mut Window, cx: &mut App) {
+        self.focus(window, cx);
+        let focus = self.input.read(cx).focus_handle(cx);
+        focus.dispatch_action(&gpui_kit::component::input::Paste, window, cx);
     }
 
     fn restore_returned_draft(&mut self, window: &mut Window, cx: &mut Context<Self>) {

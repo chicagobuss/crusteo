@@ -1,0 +1,16 @@
+{
+  "follow_all": true,
+  "sinks": [
+    {
+      "name": "elasticsearch",
+      "type": "exec",
+      "mode": "plain",
+      "command": [
+        "docker", "run", "-i", "--rm", "--network", "reef-record",
+        "-v", "/path/to/vector-elasticsearch/vector.yaml:/etc/vector/vector.yaml:ro",
+        "timberio/vector:0.42.0-debian", "--config", "/etc/vector/vector.yaml"
+      ],
+      "kinds": ["prompt", "reply", "tool_call", "error", "turn_finished"]
+    }
+  ]
+}

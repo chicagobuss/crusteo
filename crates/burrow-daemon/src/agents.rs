@@ -593,6 +593,12 @@ pub async fn create(daemon: &Arc<Daemon>, request: CreateAgent) -> Result<AgentS
         .agents
         .provider(&request.provider)
         .ok_or_else(|| format!("Provider '{}' is not available", request.provider))?;
+    if let Some(reason) = provider.unavailable() {
+        return Err(format!(
+            "{} is not available here: {reason}",
+            provider.info().label
+        ));
+    }
     let mut request = request;
     if let Some(caller_id) = request.caller_agent_id.clone() {
         let caller = daemon
@@ -2171,6 +2177,18 @@ pub fn providers_snapshot(daemon: &Daemon, compact: bool) -> Value {
             // Paseo's entry while it probes: no models or modes yet.
             let mut entry = json!({"provider": info.id, "label": info.label, "status": "loading",
                                    "enabled": true, "defaultModeId": info.default_mode_id});
+            if let Some(d) = &info.description {
+                entry["description"] = d.clone().into();
+            }
+            entries.push(entry);
+            continue;
+        }
+        if let Some(reason) = provider.unavailable() {
+            // Paseo's entry for a provider that cannot run: offered no
+            // more, with the reason clients show beside its name.
+            let mut entry = json!({"provider": info.id, "label": info.label, "status": "error",
+                                   "enabled": true, "error": reason,
+                                   "defaultModeId": info.default_mode_id});
             if let Some(d) = &info.description {
                 entry["description"] = d.clone().into();
             }

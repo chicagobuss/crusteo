@@ -544,20 +544,29 @@ pub fn map_view(fleet: &Fleet, spec: &ListSpec, focus: &[String], cx: &Context) 
     struct Lane<'a> {
         label: String,
         order: String,
+        band: Option<(String, String)>,
+        group: Option<String>,
         members: Vec<(&'a Host, &'a Agent)>,
     }
+    let bands = if spec.group == Grouping::Label {
+        &spec.bands[..]
+    } else {
+        &[]
+    };
     let mut lanes: BTreeMap<String, Lane> = BTreeMap::new();
     for &(host, agent) in &agents {
         let groups = match spec.group {
             Grouping::None => vec![("all".to_string(), "All agents".to_string(), String::new())],
             grouping => groups_of(fleet, host, agent, grouping),
         };
-        for (key, label, order) in groups {
+        for slot in banded(groups, bands) {
             lanes
-                .entry(key)
+                .entry(slot.key)
                 .or_insert_with(|| Lane {
-                    label,
-                    order,
+                    label: slot.label,
+                    order: slot.order,
+                    band: slot.band,
+                    group: slot.group,
                     members: Vec::new(),
                 })
                 .members
@@ -568,9 +577,16 @@ pub fn map_view(fleet: &Fleet, spec: &ListSpec, focus: &[String], cx: &Context) 
     ordered.sort_by(|(ka, a), (kb, b)| a.order.cmp(&b.order).then_with(|| ka.cmp(kb)));
     let mut out = MapOut::default();
     for (lane, group) in ordered {
-        out.lanes.push(json!({
+        let mut value = json!({
             "key": lane, "label": group.label, "total": group.members.len(),
-        }));
+        });
+        if let Some((key, label)) = &group.band {
+            value["band"] = json!({"key": key, "label": label});
+        }
+        if let Some(inner) = &group.group {
+            value["group"] = json!(inner);
+        }
+        out.lanes.push(value);
         for (host, agent) in group.members {
             let agent_key = agent_key(host.name(), &agent.id);
             let key = format!("{lane}|{agent_key}");
@@ -597,6 +613,60 @@ pub fn map_view(fleet: &Fleet, spec: &ListSpec, focus: &[String], cx: &Context) 
         }
     }
     out
+}
+
+/// One lane an agent is in on the map.
+struct MapSlot {
+    key: String,
+    label: String,
+    order: String,
+    /// The band it sits under: the raised label's group key and name.
+    band: Option<(String, String)>,
+    /// Under a band, the label group it holds (`None` for "just" the band's).
+    group: Option<String>,
+}
+
+/// An agent's lanes with `bands` raised, as crusteo's Lanes does it: each
+/// raised label it has is a band, holding a lane for each of its other
+/// labels, or one "just <label>" lane when it has none. Its other labels'
+/// own lanes go: its card is under the band. Band lanes sort with their
+/// band's label, the "just" lane first, so a band's lanes come together.
+fn banded(groups: Vec<(String, String, String)>, bands: &[String]) -> Vec<MapSlot> {
+    let plain = |(key, label, order): (String, String, String)| MapSlot {
+        key,
+        label,
+        order,
+        band: None,
+        group: None,
+    };
+    let (raised, rest): (Vec<_>, Vec<_>) = groups
+        .into_iter()
+        .partition(|(key, ..)| bands.contains(key));
+    if raised.is_empty() {
+        return rest.into_iter().map(plain).collect();
+    }
+    let mut slots = Vec::new();
+    for (band, name, order) in raised {
+        if rest.is_empty() {
+            slots.push(MapSlot {
+                key: format!("band:{band}>"),
+                label: format!("just {name}"),
+                order: format!("{order}\u{0}"),
+                band: Some((band.clone(), name.clone())),
+                group: None,
+            });
+        }
+        for (key, label, inner) in &rest {
+            slots.push(MapSlot {
+                key: format!("band:{band}>{key}"),
+                label: label.clone(),
+                order: format!("{order}\u{0}{inner}"),
+                band: Some((band.clone(), name.clone())),
+                group: Some(key.clone()),
+            });
+        }
+    }
+    slots
 }
 
 /// Paseo's label and identity colours by name, as their foreground on a
@@ -1251,6 +1321,54 @@ mod tests {
         let one = map_view(&fleet, &ListSpec::default(), &[], &cx);
         assert_eq!(one.lanes.len(), 1);
         assert!(one.cards.is_empty());
+    }
+
+    #[test]
+    fn a_raised_label_is_a_band_of_its_agents_other_labels() {
+        let group =
+            |key: &str, name: &str| (format!("label:{key}"), name.to_string(), key.to_string());
+        let lanes = |groups, bands: &[&str]| -> Vec<(String, String, Option<String>)> {
+            let bands: Vec<String> = bands.iter().map(|b| format!("label:{b}")).collect();
+            let mut slots = banded(groups, &bands);
+            slots.sort_by(|a, b| a.order.cmp(&b.order));
+            (slots.into_iter())
+                .map(|s| (s.key, s.label, s.band.map(|(key, _)| key)))
+                .collect()
+        };
+        let both = || vec![group("infra", "Infra"), group("web", "Web")];
+        // Nothing raised: a lane per label.
+        assert_eq!(lanes(both(), &[]).len(), 2);
+        // Infra raised: its agent sits under Infra, in Web's lane there.
+        assert_eq!(
+            lanes(both(), &["infra"]),
+            [(
+                "band:label:infra>label:web".into(),
+                "Web".into(),
+                Some("label:infra".into())
+            )]
+        );
+        // With no other label, in "just Infra".
+        assert_eq!(
+            lanes(vec![group("infra", "Infra")], &["infra"]),
+            [(
+                "band:label:infra>".into(),
+                "just Infra".into(),
+                Some("label:infra".into())
+            )]
+        );
+        // Both raised: two bands, "just" each.
+        let keys: Vec<String> = lanes(both(), &["infra", "web"])
+            .into_iter()
+            .map(|(key, ..)| key)
+            .collect();
+        assert_eq!(keys, ["band:label:infra>", "band:label:web>"]);
+        // Unlabelled agents are not touched.
+        let none = vec![(
+            "label:".to_string(),
+            "No label".to_string(),
+            "\u{10FFFF}".to_string(),
+        )];
+        assert_eq!(lanes(none, &["infra"])[0].0, "label:");
     }
 
     #[test]

@@ -626,6 +626,7 @@ async fn session<S>(
                         problem: "frame too big".into(),
                     };
                 }
+                let message = Box::new(message);
                 if reef.send(FromServer::Message { conn, message }).is_err() {
                     break;
                 }

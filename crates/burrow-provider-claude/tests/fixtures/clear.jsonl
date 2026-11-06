@@ -1,0 +1,14 @@
+// A turn, then `/clear`: the CLI resets the conversation, starts a new session and reports nothing used.
+{"dir":"in","frame":{"type":"control_request","request":{"subtype":"initialize"}}}
+{"dir":"out","frame":{"type":"control_response","response":{"subtype":"success","request_id":"$REQ","response":{"commands":[],"models":[]}}}}
+{"cmd":{"prompt":{"turn":"foreground-turn-1","text":"Say hello"}}}
+{"dir":"in","frame":{"type":"user","message":{"role":"user","content":[{"type":"text","text":"Say hello"}]},"parent_tool_use_id":null,"session_id":""}}
+{"dir":"out","frame":{"type":"system","subtype":"init","session_id":"sess-1","model":"claude-haiku-4-5","permissionMode":"default","tools":[],"slash_commands":["clear"],"cwd":"/tmp/x","claude_code_version":"2.1.316"}}
+{"dir":"out","frame":{"type":"stream_event","event":{"type":"message_start","message":{"id":"msg_1","usage":{"input_tokens":12,"cache_creation_input_tokens":0,"cache_read_input_tokens":300,"output_tokens":1}}},"parent_tool_use_id":null,"session_id":"sess-1","uuid":"e1"}}
+{"dir":"out","frame":{"type":"assistant","message":{"id":"msg_1","role":"assistant","content":[{"type":"text","text":"Hello."}]},"parent_tool_use_id":null,"session_id":"sess-1","uuid":"a1"}}
+{"dir":"out","frame":{"type":"result","subtype":"success","is_error":false,"result":"Hello.","session_id":"sess-1","usage":{"input_tokens":12,"cache_read_input_tokens":300,"cache_creation_input_tokens":0,"output_tokens":7},"modelUsage":{"claude-haiku-4-5":{"contextWindow":200000}}}}
+{"cmd":{"prompt":{"turn":"foreground-turn-2","text":"/clear","messageId":"14046388-4723-4890-a6a1-0d7524a7b794"}}}
+{"dir":"in","frame":{"type":"user","message":{"role":"user","content":[{"type":"text","text":"/clear"}]},"session_id":"sess-1"}}
+{"dir":"out","frame":{"type":"conversation_reset","new_conversation_id":"sess-2","uuid":"sess-2","trigger":"clear","user_message_uuid":"14046388-4723-4890-a6a1-0d7524a7b794","timestamp":"2026-11-03T05:22:44.738Z","session_id":"sess-1"}}
+{"dir":"out","frame":{"type":"system","subtype":"init","session_id":"sess-2","model":"claude-haiku-4-5","permissionMode":"default","tools":[],"slash_commands":["clear"],"cwd":"/tmp/x","claude_code_version":"2.1.316"}}
+{"dir":"out","frame":{"type":"result","subtype":"success","is_error":false,"result":"","session_id":"sess-2","usage":{"input_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":0}}}

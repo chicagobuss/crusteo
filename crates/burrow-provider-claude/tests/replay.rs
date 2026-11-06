@@ -242,6 +242,25 @@ async fn a_text_turn_streams_once() {
 }
 
 #[tokio::test]
+async fn clear_starts_a_new_session_with_an_empty_context() {
+    let played = play(include_str!("fixtures/clear.jsonl"), None, None).await;
+    let e = &played.events;
+    assert!(e.iter().any(
+        |x| matches!(x, ProviderEvent::SessionStarted { session_id, .. } if session_id == "sess-2")
+    ));
+    let used: Vec<Value> = e
+        .iter()
+        .filter_map(|x| match x {
+            ProviderEvent::TurnCompleted { usage: Some(u), .. } => {
+                Some(u["contextWindowUsedTokens"].clone())
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(used, [json!(312), json!(0)], "not the cleared context");
+}
+
+#[tokio::test]
 async fn a_tool_runs_after_its_permission() {
     let played = play(
         include_str!("fixtures/tool_permission.jsonl"),
@@ -316,6 +335,30 @@ async fn an_interrupt_cancels_and_drops_the_trailing_result() {
         )),
         "the aborted result after the interrupt opens or closes nothing"
     );
+}
+
+#[tokio::test]
+async fn a_prompt_right_after_an_interrupt_is_not_ended_by_the_aborted_result() {
+    let played = play(
+        include_str!("fixtures/interrupt_then_prompt.jsonl"),
+        None,
+        None,
+    )
+    .await;
+    let e = &played.events;
+    assert!(
+        !e.iter()
+            .any(|x| matches!(x, ProviderEvent::TurnFailed { .. })),
+        "the aborted result belongs to the interrupted turn: {e:?}"
+    );
+    assert!(
+        e.iter().any(|x| matches!(
+            x,
+            ProviderEvent::TurnCompleted { turn: Some(t), .. } if t == "foreground-turn-2"
+        )),
+        "the new turn ends with its own result"
+    );
+    assert_eq!(text(e), "Done.");
 }
 
 #[tokio::test]

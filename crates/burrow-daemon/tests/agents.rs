@@ -1522,3 +1522,61 @@ async fn the_daemon_says_what_it_is_and_what_its_providers_offer() {
 
     h.stop().await;
 }
+
+/// A provider whose CLI its vendor no longer serves.
+struct Refused;
+
+impl burrow_provider::Provider for Refused {
+    fn info(&self) -> burrow_provider::ProviderInfo {
+        burrow_provider::ProviderInfo {
+            id: "refused".into(),
+            label: "Refused".into(),
+            ..Default::default()
+        }
+    }
+
+    fn start(
+        &self,
+        _: burrow_provider::SessionSpec,
+    ) -> Result<burrow_provider::Session, burrow_provider::ProviderError> {
+        panic!("an unavailable provider is never started")
+    }
+
+    fn unavailable(&self) -> Option<String> {
+        Some("This client is no longer supported".into())
+    }
+}
+
+/// A provider that cannot run is listed as `error` with its reason, so
+/// clients offer it no more, and an agent is not made on it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_provider_that_cannot_run_is_not_offered() {
+    let h = harness().await;
+    h.daemon.agents.register(Arc::new(Refused));
+    let snapshot = h
+        .request(json!({"type": "get_providers_snapshot_request"}))
+        .await;
+    let entries = snapshot["compactSnapshot"]["entries"].as_array().unwrap();
+    let refused = entries.iter().find(|e| e["provider"] == "refused").unwrap();
+    assert_eq!(refused["status"], "error", "{refused}");
+    assert_eq!(refused["error"], "This client is no longer supported");
+    assert!(refused.get("models").is_none());
+    let parsed = fleet::providers::parse(&snapshot);
+    let offered = parsed.iter().find(|p| p.id == "refused").unwrap();
+    assert!(!offered.ready());
+    assert_eq!(
+        offered.error.as_deref(),
+        Some("This client is no longer supported")
+    );
+
+    let reply = h
+        .request(json!({"type": "agent.create.request", "labels": {},
+            "config": {"provider": "refused", "cwd": h.cwd.to_string_lossy()}}))
+        .await;
+    let error = reply["error"].as_str().unwrap_or_default().to_string();
+    assert!(
+        error.contains("Refused is not available here: This client is no longer supported"),
+        "{reply}"
+    );
+    assert!(reply["agent"].is_null(), "{reply}");
+}
