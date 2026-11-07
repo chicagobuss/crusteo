@@ -14,9 +14,10 @@ use gpui_kit::component::{TitleBar, WindowExt};
 use gpui_kit::gpui::{
     AbsoluteLength, AnyElement, AnyView, App, AppContext, ClickEvent, Context, Decorations,
     DismissEvent, EdgesRefinement, Entity, FocusHandle, Focusable, Image, ImageFormat,
-    InteractiveElement, IntoElement, KeyBinding, MouseButton, MouseDownEvent, ParentElement,
-    Pixels, Point, Render, SharedString, StatefulInteractiveElement, Styled, Subscription, Window,
-    WindowBounds, WindowOptions, anchored, deferred, div, img, point, px, rgb, size,
+    InteractiveElement, IntoElement, KeyBinding, MouseButton, MouseDownEvent, MouseMoveEvent,
+    ParentElement, Pixels, Point, Render, SharedString, StatefulInteractiveElement, Styled,
+    Subscription, Window, WindowBounds, WindowOptions, anchored, deferred, div, img, point, px,
+    rgb, size,
 };
 use gpui_kit::prelude::FluentBuilder;
 
@@ -141,6 +142,10 @@ pub struct Shell {
     /// The slide-in list behind the title bar's counts and History: see
     /// [`crate::state_list`].
     state_list: Entity<crate::state_list::StateList>,
+    /// History docked at the window's right, and whether its left edge is
+    /// being dragged.
+    history_dock: Entity<crate::state_list::StateList>,
+    history_resizing: bool,
     /// Settings, made the first time it slides in.
     settings: Option<Entity<crate::layouts::paseo::SettingsPane>>,
     focus: FocusHandle,
@@ -197,6 +202,9 @@ fn color_system_border(_: &Window, _: Option<u32>) -> bool {
 /// Spacing at the title bar's left, after the app icon, which drags the
 /// window as the empty bar does; and kept clear at its right, so the window
 /// can be dragged from that end too.
+/// The docked History's narrowest, and its widest as a share of the window.
+const HISTORY_MIN: f32 = 280.;
+const HISTORY_MAX: f32 = 0.7;
 const TITLE_CLEAR_LEFT: f32 = 10.;
 const TITLE_CLEAR_RIGHT: f32 = 20.;
 
@@ -327,6 +335,7 @@ impl Shell {
         });
         cx.observe(&core.toolbars, |_, _, cx| cx.notify()).detach();
         let state_list = cx.new(|cx| crate::state_list::StateList::new(core.clone(), cx));
+        let history_dock = cx.new(|cx| crate::state_list::StateList::docked(core.clone(), cx));
         Self {
             core,
             layouts: crate::layouts::registry(),
@@ -336,6 +345,8 @@ impl Shell {
             palette_index: 0,
             needs,
             state_list,
+            history_dock,
+            history_resizing: false,
             settings: None,
             focus: cx.focus_handle(),
             zoom_badge: None,
@@ -735,6 +746,12 @@ impl Shell {
                     PaletteAction::Screen(screen) => {
                         nav.layout = "paseo".into();
                         nav.show(screen, cx);
+                    }
+                    // History docks, as its button and key do.
+                    PaletteAction::Pane(Pane::History) => {
+                        if !nav.history_docked {
+                            nav.toggle_history_dock(cx);
+                        }
                     }
                     PaletteAction::Pane(pane) => nav.set_pane(Some((pane, Side::Right)), cx),
                     PaletteAction::Layout(id) => nav.layout = id.to_string(),
@@ -1484,6 +1501,15 @@ impl Render for Shell {
         let panel = open_panel
             .as_deref()
             .and_then(|id| self.core.extensions.read(cx).panel(id).cloned());
+        // Docked History, no wider than the window lets it be now.
+        let (history_docked, history_width) = {
+            let nav = self.core.nav.read(cx);
+            let room = f32::from(window.viewport_size().width) * HISTORY_MAX;
+            (
+                nav.history_docked,
+                nav.history_width.min(room).max(HISTORY_MIN),
+            )
+        };
         // A panel closed with focus still inside it, which is no longer
         // drawn: actions and keys sent there go nowhere, so the window takes
         // focus back.
@@ -1622,9 +1648,7 @@ impl Render for Shell {
                 });
             }))
             .on_action(cx.listener(|this, _: &ShowHistory, _, cx| {
-                (this.core.nav).update(cx, |nav, cx| {
-                    nav.toggle_pane(Pane::History, Side::Right, cx)
-                });
+                (this.core.nav).update(cx, |nav, cx| nav.toggle_history_dock(cx));
             }))
             .on_action(
                 cx.listener(|this, action: &crate::extensions::RunCommand, window, cx| {
@@ -1666,6 +1690,31 @@ impl Render for Shell {
                     .min_h(px(0.))
                     .flex()
                     .flex_row()
+                    // Dragging History's left edge: the width is what is left
+                    // of the window right of the pointer.
+                    .when(self.history_resizing, |row| {
+                        row.on_mouse_move(cx.listener(
+                            |this, event: &MouseMoveEvent, window, cx| {
+                                let window_width = f32::from(window.viewport_size().width);
+                                let width = (window_width - f32::from(event.position.x)).clamp(
+                                    HISTORY_MIN,
+                                    (window_width * HISTORY_MAX).max(HISTORY_MIN),
+                                );
+                                this.core.nav.update(cx, |nav, cx| {
+                                    nav.history_width = width;
+                                    cx.notify();
+                                });
+                            },
+                        ))
+                        .on_mouse_up(
+                            MouseButton::Left,
+                            cx.listener(|this, _, _, cx| {
+                                this.history_resizing = false;
+                                this.core.nav.update(cx, |nav, _| nav.save());
+                                cx.notify();
+                            }),
+                        )
+                    })
                     .child(div().flex_1().min_w(px(0.)).h_full().map(|slot| {
                         if layout_cached {
                             slot.child(layout.cached_fill())
@@ -1683,6 +1732,39 @@ impl Render for Shell {
                                 .border_color(p.border)
                                 .overflow_hidden()
                                 .child(panel.view().cached_fill()),
+                        )
+                    })
+                    // History, docked: beside the layout rather than over it,
+                    // so the layout keeps scrolling on its own. Its left edge
+                    // drags its width.
+                    .when(history_docked, |row| {
+                        row.child(
+                            div()
+                                .relative()
+                                .w(px(history_width))
+                                .h_full()
+                                .flex_shrink_0()
+                                .bg(p.surface0)
+                                .border_l_1()
+                                .border_color(p.border)
+                                .child(self.history_dock.clone().cached_fill())
+                                .child(
+                                    div()
+                                        .id("history-resize")
+                                        .absolute()
+                                        .top_0()
+                                        .left(px(-4.))
+                                        .w(px(8.))
+                                        .h_full()
+                                        .cursor_col_resize()
+                                        .on_mouse_down(
+                                            MouseButton::Left,
+                                            cx.listener(|this, _, _, cx| {
+                                                this.history_resizing = true;
+                                                cx.notify();
+                                            }),
+                                        ),
+                                ),
                         )
                     })
                     .relative()

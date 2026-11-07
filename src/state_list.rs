@@ -1,9 +1,10 @@
-//! The slide-in lists behind the title bar's counts and its History
-//! button: a click on "56 ready to review" opens, under the title bar,
-//! every agent in that state, and History every agent in any state, the
-//! latest change first, each with what it is about. A click on one opens
-//! it as a notification's click does. See [`crate::pane`] for the pane
-//! they slide in on.
+//! The lists behind the title bar's counts and its History button: a
+//! click on "56 ready to review" slides in, under the title bar, every
+//! agent in that state, and History docks at the window's right, beside
+//! the layout, every agent in any state, the latest change first, each with
+//! what it is about, until the button is pressed again; its left edge drags
+//! its width. A click on one opens it as a notification's click does. See
+//! [`crate::pane`] for the pane the counts' lists slide in on.
 //!
 //! The list only reads. Building it, scrolling it and reading replies for
 //! the rows in view leave "ready to review" alone; opening an agent from
@@ -94,6 +95,13 @@ fn kept_top(top: f32, old: &[StateRow], new: &[StateRow]) -> Option<f32> {
 
 pub struct StateList {
     core: Core,
+    /// The docked History beside the layouts, rather than the slide-in
+    /// pane's list: it shows while History is docked.
+    docked: bool,
+    /// The agent last picked in it, marked while docked.
+    chosen: Option<Key>,
+    /// Each host's name, as of the last rebuild.
+    host_names: HashMap<HostId, String>,
     /// The state listed, None for every state, and whether background
     /// workspaces are left out.
     shown: Option<(Option<Bucket>, bool)>,
@@ -108,13 +116,28 @@ pub struct StateList {
 }
 
 impl StateList {
+    /// The slide-in pane's list.
     pub fn new(core: Core, cx: &mut Context<Self>) -> Self {
+        Self::with(core, false, cx)
+    }
+
+    /// The docked History.
+    pub fn docked(core: Core, cx: &mut Context<Self>) -> Self {
+        let mut list = Self::with(core, true, cx);
+        list.follow_nav(cx);
+        list
+    }
+
+    fn with(core: Core, docked: bool, cx: &mut Context<Self>) -> Self {
         cx.observe(&core.store, |this, _, cx| this.store_changed(cx))
             .detach();
         cx.observe(&core.nav, |this, _, cx| this.follow_nav(cx))
             .detach();
         Self {
             core,
+            docked,
+            chosen: None,
+            host_names: HashMap::new(),
             shown: None,
             rows: Vec::new(),
             built: None,
@@ -129,8 +152,12 @@ impl StateList {
     /// Opens, switches or closes the list as the nav says.
     fn follow_nav(&mut self, cx: &mut Context<Self>) {
         let nav = self.core.nav.read(cx);
-        let wanted = (nav.pane.and_then(|(pane, _)| pane.listing()))
-            .map(|listing| (listing, !nav.show_background()));
+        let listing = if self.docked {
+            nav.history_docked.then_some(None)
+        } else {
+            nav.pane.and_then(|(pane, _)| pane.listing())
+        };
+        let wanted = listing.map(|listing| (listing, !nav.show_background()));
         if wanted == self.shown {
             return;
         }
@@ -187,6 +214,19 @@ impl StateList {
         let store = self.core.store.read(cx);
         let rows = fleet::state_list::rows(&store.fleet, listing, hide);
         self.built = Some((store.revision, Instant::now()));
+        // Hosts by the names the rest of the app shows, not their ids.
+        let names: HashMap<HostId, String> = (store.fleet.hosts.iter())
+            .map(|host| {
+                (
+                    host.id().clone(),
+                    store.fleet.host_name(host.id()).to_string(),
+                )
+            })
+            .collect();
+        if names != self.host_names {
+            self.host_names = names;
+            cx.notify();
+        }
         if rows == self.rows {
             return;
         }
@@ -285,7 +325,8 @@ impl StateList {
             None => ("No reply yet".to_string(), p.extra_muted),
         };
         let model = row.model_label();
-        let meta = [row.host.as_str(), row.place.as_str(), model.as_str()]
+        let host = (self.host_names.get(&row.host)).map_or(row.host.as_str(), String::as_str);
+        let meta = [host, row.place.as_str(), model.as_str()]
             .into_iter()
             .filter(|part| !part.is_empty())
             .collect::<Vec<_>>()
@@ -294,14 +335,26 @@ impl StateList {
         let open = row.workspace_id.clone().map(|workspace| {
             let (host, agent) = (row.host.clone(), row.agent_id.clone());
             cx.listener(move |this, _: &ClickEvent, _, cx| {
-                // As a notification's click does: its card in Lanes, else
-                // its tab.
+                let docked = this.docked;
                 this.core.nav.update(cx, |nav, cx| {
                     nav.set_pane(None, cx);
-                    nav.open_agent(&host, &workspace, &agent, cx);
+                    if docked {
+                        // Docked, it stays beside the layout up, which shows
+                        // the agent without being left.
+                        nav.pick_agent(&host, &workspace, &agent, cx);
+                    } else {
+                        // As a notification's click does: its card in Lanes,
+                        // else its tab.
+                        nav.open_agent(&host, &workspace, &agent, cx);
+                    }
                 });
+                if docked {
+                    this.chosen = Some((host.clone(), agent.clone()));
+                    cx.notify();
+                }
             })
         });
+        let chosen = self.chosen.as_ref() == Some(&key);
         // Every line is one line, cut with an ellipsis at the panel's edge,
         // whatever its text: the flex children may shrink to nothing.
         let line = |text: String, color| {
@@ -327,6 +380,10 @@ impl StateList {
             .gap(px(2.))
             .border_b_1()
             .border_color(p.border)
+            // The one picked last, in a docked History.
+            .when(chosen, |el| {
+                el.bg(p.surface2).border_l_2().border_color(p.accent)
+            })
             .when_some(open, |el, open| {
                 el.cursor_pointer()
                     .hover(|style| style.bg(p.surface2))
@@ -375,15 +432,30 @@ impl StateList {
     fn header(&self, listing: Option<Bucket>) -> AnyElement {
         let p = palette();
         let nav = self.core.nav.clone();
+        let docked = self.docked;
         let close = move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
-            nav.update(cx, |nav, cx| nav.set_pane(None, cx));
+            nav.update(cx, |nav, cx| {
+                if docked {
+                    nav.toggle_history_dock(cx);
+                } else {
+                    nav.set_pane(None, cx);
+                }
+            });
         };
-        let close = Button::new("state-list-close")
-            .icon(gpui_kit::component::Icon::empty().path("icons/x.svg"))
-            .ghost()
-            .xsmall()
-            .tooltip("Close (Esc)")
-            .on_click(close);
+        let close = Button::new(if docked {
+            "history-dock-close"
+        } else {
+            "state-list-close"
+        })
+        .icon(gpui_kit::component::Icon::empty().path("icons/x.svg"))
+        .ghost()
+        .xsmall()
+        .tooltip(if docked {
+            "Hide History"
+        } else {
+            "Close (Esc)"
+        })
+        .on_click(close);
         let count = div()
             .flex_1()
             .min_w(px(0.))

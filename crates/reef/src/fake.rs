@@ -294,10 +294,12 @@ impl FakeDaemon {
         stream_row(&mut state, agent, &turn, at, item);
         let event = json!({"type": "turn_completed", "provider": "claude", "turnId": turn});
         push_stream(&state, agent, event, at, None);
+        // Ready to review, as a daemon marks a finished turn.
         patch_agent(
             &mut state,
             agent,
-            json!({"status": "idle", "activeTurn": null, "updatedAt": at}),
+            json!({"status": "idle", "activeTurn": null, "updatedAt": at,
+                   "requiresAttention": true, "attentionReason": "finished", "attentionTimestamp": at}),
         );
     }
 
@@ -695,6 +697,18 @@ fn write(state: &mut State, message: &Value) -> Option<(&'static str, Value)> {
                 json!({ "agentId": agent, "archivedAt": now }),
             ))
         }
+        "clear_agent_attention" => {
+            state.agents.get(&agent)?;
+            patch_agent(
+                state,
+                &agent,
+                json!({ "requiresAttention": false, "attentionReason": null, "attentionTimestamp": null }),
+            );
+            Some((
+                "clear_agent_attention_response",
+                json!({ "agentId": agent }),
+            ))
+        }
         "agent.create.request" => {
             let made = create(state, message)?;
             Some((
@@ -879,6 +893,7 @@ fn handle(state: &mut State, socket: u64, message: &Value) -> Value {
         | "cancel_agent_request"
         | "send_agent_message_request"
         | "archive_agent_request"
+        | "clear_agent_attention"
         | "agent.create.request"
         | "delete_agent_request"
         | "update_agent_request"

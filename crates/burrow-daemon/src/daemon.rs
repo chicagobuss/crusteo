@@ -210,25 +210,31 @@ impl Daemon {
         })
     }
 
-    /// Waits until every change so far is on disk.
-    pub fn flush(&self) {
+    /// Waits until every change so far is on disk. The error says what is
+    /// not, or that the daemon has closed.
+    pub fn flush(&self) -> std::io::Result<()> {
         let persist = self.read(|store| store.persist().cloned());
-        if let Some(persist) = persist {
-            persist.flush();
+        match persist {
+            Some(persist) => persist.flush(),
+            None => Ok(()),
         }
     }
 
-    /// Stops every agent session, then flushes and stops the persistence
-    /// writer. Later changes are not saved.
-    pub fn close(&self) {
+    /// Stops every agent session, then saves every change so far and stops
+    /// the persistence writer. Later changes are not saved, so a task still
+    /// running (a worktree's setup, say) cannot overwrite what the next
+    /// daemon on this home saves. The error says what could not be saved.
+    pub fn close(&self) -> std::io::Result<()> {
         self.agents.shutdown();
-        self.flush();
         let writer = self
             .writer
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .take();
-        drop(writer);
+        match writer {
+            Some(writer) => writer.close(),
+            None => Ok(()),
+        }
     }
 
     pub fn server_info(&self) -> ServerInfo {

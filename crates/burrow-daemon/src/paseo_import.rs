@@ -282,13 +282,12 @@ pub fn run(options: &Options) -> io::Result<Report> {
         return Ok(report);
     }
     let (persist, writer, loaded) = Persist::open(&options.home)?;
-    let mut store = Store::open(persist.clone(), loaded);
+    let mut store = Store::open(persist, loaded);
     store.server_id = server_id;
     let imported = import(&mut store, paseo, options, &mut report);
-    persist.flush();
     drop(store);
-    drop(writer);
-    // The writer only logs a failed write; check that the agents landed.
+    writer.close()?;
+    // Check that the agents landed, too.
     let saved: HashSet<String> = persist::read(&options.home)?
         .agents
         .into_iter()

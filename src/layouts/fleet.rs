@@ -9,7 +9,7 @@ use fleet::{Agent, Bucket, Connection, DirChange, HostId};
 use gpui_kit::component::menu::PopupMenu;
 use gpui_kit::gpui::{
     AnyElement, AnyView, App, AppContext, ClickEvent, Context, CursorStyle, DismissEvent, Entity,
-    Focusable, InteractiveElement, IntoElement, ListAlignment, ListState, MouseButton,
+    Focusable, InteractiveElement, IntoElement, ListAlignment, ListOffset, ListState, MouseButton,
     MouseDownEvent, ParentElement, Pixels, Point, Render, ScrollWheelEvent, SharedString,
     StatefulInteractiveElement, StyleRefinement, Styled, Subscription, WeakEntity, Window,
     anchored, deferred, div, list, px,
@@ -47,6 +47,8 @@ pub struct FleetView {
     width: ColumnWidth,
     /// Whether the columns were last read without background workspaces.
     hide_background: bool,
+    /// The docked History's last pick this view scrolled to.
+    revealed: u64,
 }
 
 /// An open card menu. Cards only carry a right-click listener; the view owns
@@ -65,6 +67,8 @@ struct HostColumn {
     header: Header,
     cards: Vec<Card>,
     list: ListState,
+    /// The agent picked in the docked History, if it is this host's.
+    picked: Option<String>,
 }
 
 #[derive(Clone, PartialEq)]
@@ -104,6 +108,12 @@ impl FleetView {
                 this.cursor = None;
                 this.refresh(cx);
             }
+            // An agent picked in the docked History: single out its card.
+            let picked = nav.read(cx).picked.clone();
+            if let Some(pick) = picked.filter(|pick| pick.serial != this.revealed) {
+                this.revealed = pick.serial;
+                this.reveal(&pick.host, &pick.agent, cx);
+            }
             cx.notify();
         })
         .detach();
@@ -121,9 +131,22 @@ impl FleetView {
             side: SideScroll::new(window),
             width,
             hide_background,
+            revealed: 0,
         };
         this.refresh(cx);
         this
+    }
+
+    /// Singles out `agent`'s card in its host's column, scrolled into view,
+    /// and its column; any card singled out before is let go.
+    fn reveal(&mut self, host: &HostId, agent: &str, cx: &mut Context<Self>) {
+        for (ix, (column_host, column)) in self.columns.iter().enumerate() {
+            let ours = column_host == host;
+            if ours {
+                self.side.handle.scroll_to_item(ix);
+            }
+            column.update(cx, |column, cx| column.pick(ours.then_some(agent), cx));
+        }
     }
 
     /// Brings the columns up to date with the fleet. Only the hosts named in
@@ -180,6 +203,7 @@ impl FleetView {
                                 },
                                 cards: Vec::new(),
                                 list: ListState::new(0, ListAlignment::Top, px(120.)),
+                                picked: None,
                             })
                         });
                     (name, column)
@@ -296,6 +320,24 @@ impl Render for FleetView {
 }
 
 impl HostColumn {
+    /// Singles out `agent`'s card, scrolled into view, or none.
+    fn pick(&mut self, agent: Option<&str>, cx: &mut Context<Self>) {
+        let agent = agent.map(str::to_string);
+        if let Some(ix) = (agent.as_ref()).and_then(|a| self.cards.iter().position(|c| &c.id == a))
+        {
+            // At the top: "reveal" works from estimated heights of cards
+            // not drawn yet, and misses in a long column.
+            self.list.scroll_to(ListOffset {
+                item_ix: ix,
+                offset_in_item: px(0.),
+            });
+        }
+        if agent != self.picked {
+            self.picked = agent;
+            cx.notify();
+        }
+    }
+
     /// Re-reads this host's header and cards; redraws if either changed.
     fn refresh(&mut self, cx: &mut Context<Self>) {
         let store = self.core.store.read(cx);
@@ -378,6 +420,10 @@ impl HostColumn {
                         Bucket::NeedsInput => p.dot_warning,
                         Bucket::Failed => p.dot_danger,
                         _ => p.border,
+                    })
+                    // Picked in the docked History.
+                    .when(self.picked.as_deref() == Some(card.id.as_str()), |card| {
+                        card.border_2().border_color(p.accent).bg(p.surface2)
                     })
                     .hover(|s| s.bg(p.surface2))
                     .flex()

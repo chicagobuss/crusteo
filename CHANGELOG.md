@@ -7,6 +7,74 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.0-beta.6] - 2026-11-06
+
+### Added
+
+- Skiff shows which agents finished a turn you haven't looked at: a blue dot on their rows and
+  boxes and a blue ring on their map tiles. "Unseen" is the host's "ready to review", so it is
+  the same everywhere: opening an agent in Skiff marks it seen for crusteo too, and focusing its
+  prompt in crusteo marks it seen for Skiff. A turn that ends while you have it open in Skiff is
+  seen too.
+- Skiff's list: every agent in one flat list over the map, looked at as Unseen (blocked agents
+  first, then the unseen), Most recent or Blocked, through the same filters as the map. It comes
+  in with the Map/List switch, a swipe left on the map, the handle on the map's right edge, a
+  sideways two-finger trackpad swipe or L, and goes with the same the other way, Back or Esc. An
+  agent opened from it comes back to it.
+- Skiff shows subagents (agents another agent made through its agent tools), which it used to
+  leave out: on the map and in the list, each with "↳ <parent>" under its name, a tap on which
+  opens the parent.
+- Skiff's agent details: a tap on the left of a conversation's header (its name and the lines
+  under it) opens what the agent runs on (provider, model, effort, mode, how full its context
+  is), where (host, workspace, project, its directory to copy), whose it is and the subagents it
+  made (each opens with a tap), when it was made, last active, how long it has been working or
+  its last turn took, its last error, its labels and bell, and its id to copy. The header shows
+  the agent's state as a dot before its name instead of a word, and ↳ before its host when it
+  is a subagent.
+- A tap on Skiff's boat opens About: a line on what Skiff is, the Reef it talks to (its version and
+  commit, its address), how many hosts are online and agents on the map, and the keys and
+  gestures.
+
+### Changed
+
+- crusteo's History docks at the window's right instead of sliding in over the layout: the
+  History button (or Ctrl+Shift+H, ⇧⌘H on a Mac) shows it beside whatever layout is up, which
+  keeps scrolling on its own, until the button is pressed again. Its left edge drags its width.
+  Both are kept across restarts. The counts' lists ("56 ready to review") still slide in.
+  A click on an agent in the docked History shows it in the layout already up, which it does
+  not leave: Fleet marks its card and scrolls to its host and to it, Board marks its
+  workspace's card and scrolls to it, Lanes reveals its card and Paseo opens its tab. The row
+  picked stays marked. Its rows name hosts as the rest of crusteo does, not by their ids.
+- Skiff has one bar on top: its new boat icon (also the browser tab's), the host dots, the
+  Map/List switch with the count of agents waiting on you, usage, the view's options, + and
+  Settings. The Needs you and Agents tabs and the History button are gone: the list does what
+  they did. The map's filters, grouping, bands and key are under the options button, and the
+  filters apply to the list too.
+
+### Fixed
+
+- Paseo's desktop app connects to Burrow again. Burrow refused its WebSocket because of the
+  origin it sends, `paseo://app`, which Paseo's own daemon always accepts; the app showed
+  "Transport closed (code 1006)" or kept reconnecting. Burrow now accepts the origins Paseo's
+  daemon does without being told: `paseo://app`, `https://app.paseo.sh`, and
+  `http://localhost:<port>` and `http://127.0.0.1:<port>` on its own port.
+- In Lanes, a band's name and its buttons (move, collapse, stop banding) stay in sight as you
+  scroll along a band wider than the window: the name at the left of the part of the band in
+  view and the buttons at its right, back at the band's own ends once those are in view. They
+  used to sit on the band's first lane, and scrolled away with it.
+- Text in a Skiff conversation can be selected and copied again (a long press on a phone): it
+  opens over the map now, which turns selection off so a drag pans. Thoughts and tool calls can
+  be selected too, their rows and what they unfold to; selecting is not a tap that folds them.
+  While text is selected the conversation waits to redraw (a working agent's updates come once
+  you let go), so the selection stays, and a swipe does not start.
+- On Skiff's map, spreading two fingers (or a trackpad pinch) over an agent's box in a lane opens
+  it again, and a closing conversation shrinks back into its box rather than into a corner.
+- Archiving a workspace is saved before Burrow answers and before it removes the worktree, so
+  a restart no longer brings the workspace back. A Burrow that has shut down saves nothing
+  more, so a worktree setup still finishing cannot overwrite what the next start saved. On
+  Windows a save waits out a file that a virus scanner or indexer holds open. A save that fails
+  is tried again, and shutting down reports what could not be saved instead of only logging it.
+
 ## [0.1.0-beta.5] - 2026-11-06
 
 ### Added
@@ -716,7 +784,8 @@ First alpha, for a few early testers. Early software: expect rough edges.
 - Patched GPUI (`vendor/gpui-pre`) that skips redraws on window moves and lets cached views be
   reused after they move.
 
-[Unreleased]: https://github.com/chicagobuss/crusteo/compare/v0.1.0-beta.5...HEAD
+[Unreleased]: https://github.com/chicagobuss/crusteo/compare/v0.1.0-beta.6...HEAD
+[0.1.0-beta.6]: https://github.com/chicagobuss/crusteo/releases/tag/v0.1.0-beta.6
 [0.1.0-beta.5]: https://github.com/chicagobuss/crusteo/releases/tag/v0.1.0-beta.5
 [0.1.0-beta.4]: https://github.com/chicagobuss/crusteo/releases/tag/v0.1.0-beta.4
 [0.1.0-beta.3]: https://github.com/chicagobuss/crusteo/releases/tag/v0.1.0-beta.3

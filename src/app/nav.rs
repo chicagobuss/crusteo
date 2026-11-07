@@ -106,6 +106,16 @@ impl Pane {
     }
 }
 
+/// An agent picked in the docked History: see [`Nav::pick_agent`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Picked {
+    pub host: HostId,
+    pub workspace: String,
+    pub agent: String,
+    /// Counts picks, so picking the same agent again scrolls to it again.
+    pub serial: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Selection {
     pub host: HostId,
@@ -273,6 +283,11 @@ pub struct Nav {
     pub screen: Screen,
     pub sidebar_open: bool,
     pub sidebar_width: f32,
+    /// History docked at the window's right, beside every layout, rather
+    /// than sliding in over it: see [`crate::state_list`].
+    pub history_docked: bool,
+    /// The docked History's width.
+    pub history_width: f32,
     pub grouping: Grouping,
     pub collapsed: BTreeSet<String>,
     pub collapsed_pinned: bool,
@@ -351,6 +366,9 @@ pub struct Nav {
     /// An agent Lanes should focus and expand, e.g. after a notification
     /// click. Lanes takes it. Not saved.
     pub reveal_agent: Option<(HostId, String)>,
+    /// The agent last picked in the docked History, which Board and Fleet
+    /// single out, scrolled to, without leaving the layout. Not saved.
+    pub picked: Option<Picked>,
     /// Agents popped out of Lanes into windows of their own, by window (see
     /// [`crate::popout`]). Not saved.
     pub popouts: BTreeMap<(HostId, String), gpui_kit::gpui::AnyWindowHandle>,
@@ -400,6 +418,8 @@ impl Nav {
             sidebar_width: ui
                 .sidebar_width
                 .unwrap_or(crate::theme::size::SIDEBAR_WIDTH),
+            history_docked: ui.history_docked,
+            history_width: ui.history_width.unwrap_or(crate::state_list::WIDTH),
             grouping: if ui.group_by_status {
                 Grouping::Status
             } else {
@@ -469,6 +489,7 @@ impl Nav {
                 .map(|_| ui.window_border_color.clone())
                 .unwrap_or_else(|| WINDOW_BORDER_COLOR.to_string()),
             reveal_agent: None,
+            picked: None,
             popouts: BTreeMap::new(),
             workspace_choices: ui.workspace_choices,
             add_project_host: ui.add_project_host,
@@ -521,6 +542,8 @@ impl Nav {
             workspace: self.selection.as_ref().map(|s| s.workspace.clone()),
             sidebar_width: Some(self.sidebar_width),
             sidebar_open: Some(self.sidebar_open),
+            history_docked: self.history_docked,
+            history_width: Some(self.history_width),
             group_by_status: self.grouping == Grouping::Status,
             collapsed: self.collapsed.iter().cloned().collect(),
             collapsed_pinned: self.collapsed_pinned,
@@ -992,6 +1015,33 @@ impl Nav {
         );
     }
 
+    /// An agent picked in the docked History, shown in the layout already
+    /// up, which it does not leave: Lanes reveals its card, Paseo opens its
+    /// tab, and Board and Fleet single out its card (see [`Nav::picked`]).
+    /// A layout with no way of its own opens it as [`Nav::open_agent`] does.
+    pub fn pick_agent(
+        &mut self,
+        host: &HostId,
+        workspace: &str,
+        agent: &str,
+        cx: &mut Context<Self>,
+    ) {
+        match self.layout.as_str() {
+            "lanes" | "paseo" => self.open_agent(host, workspace, agent, cx),
+            "board" | "fleet" => {
+                let serial = self.picked.as_ref().map_or(0, |p| p.serial) + 1;
+                self.picked = Some(Picked {
+                    host: host.clone(),
+                    workspace: workspace.to_string(),
+                    agent: agent.to_string(),
+                    serial,
+                });
+                cx.notify();
+            }
+            _ => self.open_agent(host, workspace, agent, cx),
+        }
+    }
+
     pub fn reveal_in_lanes(&mut self, host: &HostId, agent: &str, cx: &mut Context<Self>) {
         self.reveal_agent = Some((host.clone(), agent.to_string()));
         cx.notify();
@@ -1062,6 +1112,17 @@ impl Nav {
 
     pub fn pane_open(&self, pane: Pane) -> bool {
         self.pane.is_some_and(|(open, _)| open == pane)
+    }
+
+    /// Docks History at the window's right, or takes it away: the History
+    /// button and its key. Kept across restarts.
+    pub fn toggle_history_dock(&mut self, cx: &mut Context<Self>) {
+        self.history_docked = !self.history_docked;
+        if self.pane_open(Pane::History) {
+            self.pane = None;
+        }
+        self.save();
+        cx.notify();
     }
 
     /// Reef mode: what Lanes saved by label name (lane order, collapsed

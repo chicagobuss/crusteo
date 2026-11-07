@@ -96,6 +96,30 @@ pub struct AgentFilter {
     /// Show the agents of Paseo's background workspaces; `None` follows
     /// Reef's `show_background` setting.
     pub background: Option<bool>,
+    /// Only the agents waiting on you, by what they wait for.
+    pub attention: Attention,
+}
+
+/// Which agents a list keeps by what they wait for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Attention {
+    #[default]
+    Any,
+    /// Waiting on a question or a permission, or failed.
+    Blocked,
+    /// Blocked, or finished a turn nobody has looked at since: the
+    /// daemon's "ready to review", which opening the agent clears.
+    Unseen,
+}
+
+impl Attention {
+    pub fn parse(text: &str) -> Self {
+        match text {
+            "blocked" => Attention::Blocked,
+            "unseen" => Attention::Unseen,
+            _ => Attention::Any,
+        }
+    }
 }
 
 /// How the agent list is grouped: into sections on a phone, columns on a
@@ -131,7 +155,8 @@ pub enum Sorting {
     /// The agent that did something last first.
     #[default]
     Recent,
-    /// Needs input, then failed, running, done; newest first in each.
+    /// Needs input, then failed, then unseen, then the rest; newest first
+    /// in each.
     Needs,
     Name,
 }
@@ -220,6 +245,7 @@ pub const ACTIONS: &[&str] = &[
     "delete",
     "relabel",
     "notify",
+    "seen",
 ];
 
 #[derive(Debug, Clone, PartialEq)]
@@ -403,6 +429,7 @@ fn list_spec(value: &Value, limits: &Limits) -> ListSpec {
             query: text(filter, "query").unwrap_or_default(),
             subagents: filter["subagents"] == true,
             background: filter["background"].as_bool(),
+            attention: Attention::parse(filter["attention"].as_str().unwrap_or_default()),
         },
         group: Grouping::parse(value["group"].as_str().unwrap_or_default()),
         sort: Sorting::parse(value["sort"].as_str().unwrap_or_default()),
@@ -512,6 +539,23 @@ mod tests {
         assert_eq!(spec.limit, limits.list_max);
         assert_eq!(spec.filter.states, [Bucket::Running]);
         assert_eq!(spec.filter.background, None, "Reef's setting decides");
+        assert_eq!(spec.filter.attention, Attention::Any);
+        for (text, attention) in [
+            ("unseen", Attention::Unseen),
+            ("blocked", Attention::Blocked),
+        ] {
+            let wanted = format!(
+                r#"{{"type":"subscribe","id":"s","view":"agents","filter":{{"attention":"{text}"}}}}"#
+            );
+            let Ok(ClientMsg::Subscribe {
+                view: ViewSpec::Agents { spec },
+                ..
+            }) = parse(&wanted, &limits)
+            else {
+                panic!("{wanted}")
+            };
+            assert_eq!(spec.filter.attention, attention);
+        }
         let hidden = parse(
             r#"{"type":"subscribe","id":"s","view":"agents","filter":{"background":false}}"#,
             &limits,

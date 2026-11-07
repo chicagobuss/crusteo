@@ -3363,6 +3363,22 @@ impl Render for Lanes {
             scroll_x - self.column_width,
             scroll_x + visible_width + self.column_width,
         );
+        // Where each column sits on the board, and the part of the board in
+        // view: a band's name and buttons stay in the part of it you see.
+        let spans: Vec<(Pixels, Pixels)> = if banded {
+            let mut at = px(COLUMNS_PADDING);
+            (visible.iter())
+                .map(|lane| {
+                    let width = self.lane_width(lane, expanded_width);
+                    let span = (at, width);
+                    at += width + px(COLUMN_GAP);
+                    span
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let in_view = (scroll_x, scroll_x + visible_width);
         let mut x = px(COLUMNS_PADDING);
         // Workspaces in lanes near the view, whose terminals they list.
         let mut watched: Vec<(HostId, String)> = Vec::new();
@@ -3416,7 +3432,7 @@ impl Render for Lanes {
                     .flex_shrink_0()
                     .flex()
                     .flex_col()
-                    .child(self.band_strip(&visible, ix, width, near, cx))
+                    .child(self.band_strip(&visible, ix, width, cx))
                     .child(column)
                     .into_any_element()
             } else {
@@ -3440,6 +3456,10 @@ impl Render for Lanes {
             } else if self.resizing.is_none() {
                 self.hold_board_length = false;
             }
+        }
+        // Bands' names and buttons, over their strips, where they are seen.
+        if banded {
+            columns = columns.children(self.band_bars(&visible, &spans, in_view, cx));
         }
         self.watch_terminals(watched, cx);
         self.lists.retain(|key, _| keys.contains(key.as_str()));
@@ -4322,21 +4342,13 @@ impl Lanes {
     }
 
     /// The strip over a column while any lane is under a band: its band's,
-    /// unbroken across the band's lanes and the gaps between them, named
-    /// over its first lane with the band's controls; blank over a lane under
-    /// none, so every header stays level.
-    fn band_strip(
-        &self,
-        lanes: &LaneSet,
-        ix: usize,
-        width: Pixels,
-        near: bool,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
+    /// unbroken across the band's lanes and the gaps between them; blank
+    /// over a lane under none, so every header stays level. The band's name
+    /// and buttons are not in it but over it ([`Self::band_bars`]).
+    fn band_strip(&self, lanes: &LaneSet, ix: usize, width: Pixels, cx: &App) -> AnyElement {
         let p = palette();
         let strip = div().h(px(BAND_HEIGHT)).flex_shrink_0().pb(px(4.));
-        let lane = &lanes[ix];
-        let Some(band) = lane.band.as_ref() else {
+        let Some(band) = lanes[ix].band.as_ref() else {
             return strip.into_any_element();
         };
         let ours = |other: Option<&Rc<Lane>>| {
@@ -4344,88 +4356,143 @@ impl Lanes {
         };
         let first = !ours(ix.checked_sub(1).and_then(|ix| lanes.get(ix)));
         let last = !ours(lanes.get(ix + 1));
-        let nav = self.core.nav.read(cx);
-        let swatch = colors::index(&band.key, band.color.as_deref(), &nav.lane_color_choices);
-        let base = rgb(theme::LANE_COLORS[swatch].1);
+        let base = self.band_color(band, cx);
         let mut segment = div()
             .h_full()
             // Over the gap to the next lane of the band too.
             .w(if last { width } else { width + px(COLUMN_GAP) })
             .bg(colors::tint(p.surface1, base, 0.32))
             .border_t_2()
-            .border_color(base)
-            .flex()
-            .items_center()
-            .gap(px(4.))
-            .px(px(8.))
-            .overflow_hidden();
+            .border_color(base);
         if first {
             segment = segment.rounded_tl(px(6.)).rounded_bl(px(6.));
         }
         if last {
             segment = segment.rounded_tr(px(6.)).rounded_br(px(6.));
         }
-        if !(first && near) {
-            return strip.child(segment).into_any_element();
-        }
-        // Each agent once, however many of the band's lanes it is in.
-        let agents: HashSet<(&HostId, &str)> = (lanes.iter())
-            .filter(|lane| ours(Some(lane)))
-            .flat_map(|lane| &lane.cards)
-            .map(|card| (&card.host, card.agent_id.as_str()))
-            .collect();
-        let button = |id: &str, icon: &str, tip: &'static str| {
-            Button::new(eid_parts(id, &[&band.key]))
-                .icon(Icon::empty().path(icon))
-                .ghost()
-                .xsmall()
-                .tooltip(tip)
-        };
-        let key = band.key.clone();
-        let left = button("band-left", "icons/chevron-left.svg", "Move band left").on_click(
-            cx.listener({
-                let key = key.clone();
-                move |this, _: &ClickEvent, _, cx| {
-                    cx.stop_propagation();
-                    this.move_band(&key, -1, cx);
-                }
-            }),
-        );
-        let right = button("band-right", "icons/chevron-right.svg", "Move band right").on_click(
-            cx.listener({
-                let key = key.clone();
-                move |this, _: &ClickEvent, _, cx| {
-                    cx.stop_propagation();
-                    this.move_band(&key, 1, cx);
-                }
-            }),
-        );
-        let fold = button(
-            "band-collapse",
-            "icons/fold-horizontal.svg",
-            "Collapse band into the tabs above",
-        )
-        .on_click(cx.listener({
-            let key = key.clone();
-            move |this, _: &ClickEvent, window, cx| {
-                cx.stop_propagation();
-                this.hide_band(&key, window, cx);
+        strip.child(segment).into_any_element()
+    }
+
+    fn band_color(&self, band: &LaneBand, cx: &App) -> Rgba {
+        let nav = self.core.nav.read(cx);
+        let swatch = colors::index(&band.key, band.color.as_deref(), &nav.lane_color_choices);
+        rgb(theme::LANE_COLORS[swatch].1)
+    }
+
+    /// Each band's name and buttons, laid over its strips across the part
+    /// of it in view: the name at the left of that part and the buttons at
+    /// its right, so both stay in sight however far the board is scrolled
+    /// along a band wider than the view, and at the band's own ends once
+    /// those are in view. `spans` is each column's start and width on the
+    /// board, `in_view` the board's part in view.
+    fn band_bars(
+        &self,
+        lanes: &LaneSet,
+        spans: &[(Pixels, Pixels)],
+        in_view: (Pixels, Pixels),
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let p = palette();
+        let mut bars = Vec::new();
+        let mut ix = 0;
+        while ix < lanes.len() {
+            let Some(band) = lanes[ix].band.clone() else {
+                ix += 1;
+                continue;
+            };
+            let from = ix;
+            while ix + 1 < lanes.len()
+                && (lanes[ix + 1].band.as_ref()).is_some_and(|other| other.key == band.key)
+            {
+                ix += 1;
             }
-        }));
-        let labels = band.labels.clone();
-        let remove = button("band-remove", "icons/x.svg", "Stop showing as a band").on_click(
-            cx.listener(move |this, _: &ClickEvent, _, cx| {
-                cx.stop_propagation();
-                this.core.nav.update(cx, |nav, cx| {
-                    for label in &labels {
-                        nav.set_lane_band(label, false, cx);
+            let to = ix;
+            ix += 1;
+            // The part in view, a little in from the view's edges.
+            let edge = px(10.);
+            let (band_left, band_right) = (spans[from].0, spans[to].0 + spans[to].1);
+            let seen_left = band_left.max(in_view.0 + edge);
+            let seen_right = band_right.min(in_view.1 - edge);
+            if seen_right - seen_left < px(40.) {
+                continue;
+            }
+            let base = self.band_color(&band, cx);
+            // Each agent once, however many of the band's lanes it is in.
+            let agents: HashSet<(&HostId, &str)> = (lanes[from..=to].iter())
+                .flat_map(|lane| &lane.cards)
+                .map(|card| (&card.host, card.agent_id.as_str()))
+                .collect();
+            let button = |id: &str, icon: &str, tip: &'static str| {
+                Button::new(eid_parts(id, &[&band.key]))
+                    .icon(Icon::empty().path(icon))
+                    .ghost()
+                    .xsmall()
+                    .tooltip(tip)
+            };
+            let key = band.key.clone();
+            let left = button("band-left", "icons/chevron-left.svg", "Move band left").on_click(
+                cx.listener({
+                    let key = key.clone();
+                    move |this, _: &ClickEvent, _, cx| {
+                        cx.stop_propagation();
+                        this.move_band(&key, -1, cx);
                     }
-                });
-            }),
-        );
-        strip
-            .child(
-                segment
+                }),
+            );
+            let right = button("band-right", "icons/chevron-right.svg", "Move band right")
+                .on_click(cx.listener({
+                    let key = key.clone();
+                    move |this, _: &ClickEvent, _, cx| {
+                        cx.stop_propagation();
+                        this.move_band(&key, 1, cx);
+                    }
+                }));
+            let fold = button(
+                "band-collapse",
+                "icons/fold-horizontal.svg",
+                "Collapse band into the tabs above",
+            )
+            .on_click(cx.listener({
+                let key = key.clone();
+                move |this, _: &ClickEvent, window, cx| {
+                    cx.stop_propagation();
+                    this.hide_band(&key, window, cx);
+                }
+            }));
+            let labels = band.labels.clone();
+            let remove = button("band-remove", "icons/x.svg", "Stop showing as a band").on_click(
+                cx.listener(move |this, _: &ClickEvent, _, cx| {
+                    cx.stop_propagation();
+                    this.core.nav.update(cx, |nav, cx| {
+                        for label in &labels {
+                            nav.set_lane_band(label, false, cx);
+                        }
+                    });
+                }),
+            );
+            bars.push(
+                div()
+                    .absolute()
+                    // Under the strip's top border, over the strip.
+                    .top(px(2.))
+                    .h(px(BAND_HEIGHT - 6.))
+                    .left(seen_left)
+                    .w(seen_right - seen_left)
+                    .flex()
+                    .items_center()
+                    .gap(px(4.))
+                    // The strip's own padding at the band's ends; at the
+                    // view's edges the edge's inset is enough.
+                    .pl(if seen_left == band_left {
+                        px(8.)
+                    } else {
+                        px(2.)
+                    })
+                    .pr(if seen_right == band_right {
+                        px(4.)
+                    } else {
+                        px(0.)
+                    })
                     .child(div().size(px(8.)).flex_shrink_0().rounded_full().bg(base))
                     .child(
                         div()
@@ -4452,9 +4519,11 @@ impl Lanes {
                             .child(right)
                             .child(fold)
                             .child(remove),
-                    ),
-            )
-            .into_any_element()
+                    )
+                    .into_any_element(),
+            );
+        }
+        bars
     }
 
     /// Moves a band's lanes together one place left or right.

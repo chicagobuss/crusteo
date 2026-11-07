@@ -376,6 +376,31 @@ impl Upstream {
         });
     }
 
+    /// Marks the agent seen: clears its "ready to review" on the host, as
+    /// crusteo does when its prompt is focused, so every client sees it
+    /// seen. Not a permission's, which only answering it settles. Shown at
+    /// once; the host's update confirms it.
+    pub fn seen(&mut self, host: &str, agent: &str, reply: Reply) {
+        let needs = (self.fleet.agent(&host_id(host), agent)).is_some_and(|a| {
+            a.requires_attention && a.attention_reason.as_deref() != Some("permission")
+        });
+        if !needs {
+            self.answer(&reply, Ok(json!({})));
+            return;
+        }
+        if let Some(found) =
+            (self.fleet.host_mut(&host_id(host))).and_then(|h| h.directory.agents.get_mut(agent))
+        {
+            found.requires_attention = false;
+            found.attention_reason = None;
+            self.dirty_fleet = true;
+        }
+        let message = json!({ "type": "clear_agent_attention", "agentId": agent });
+        self.write(host, message, WRITE_TIMEOUT, move |up, result| {
+            up.answer(&reply, result.map(|_| json!({})));
+        });
+    }
+
     // ---- notifications --------------------------------------------------
 
     /// Makes the notification for a turn that ended: the agent's title and

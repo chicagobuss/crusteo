@@ -60,13 +60,16 @@ does not depend on `gpui` or on the `crusteo` crate.
   file a conversation names) and `WRITE_REQUESTS`, which holds
   exactly what the phone's actions send: `agent_permission_response`, `cancel_agent_request`,
   `send_agent_message_request`, `archive_agent_request`, `agent.create.request`,
-  `delete_agent_request` and `workspace.label.assignment.set.request`. Reef cannot open a
-  terminal, rename or archive a workspace, rename or recolour a label, change an agent's
-  key/value labels (`update_agent_request`), use the older `create_agent_request`, or send
-  `clear_agent_attention`; opening a conversation on the phone never clears "ready to review" for
-  the people at their desks. Reef logs every write it sends.
-- **"Ready to review" is ignored.** Reef shows Paseo's state buckets except that one: a finished
-  agent is simply done, and needs-you holds only questions, permissions and failures.
+  `delete_agent_request`, `workspace.label.assignment.set.request` and `clear_agent_attention`.
+  Reef cannot open a terminal, rename or archive a workspace, rename or recolour a label, change
+  an agent's key/value labels (`update_agent_request`), or use the older `create_agent_request`.
+  Reef logs every write it sends.
+- **"Ready to review" is unseen.** Reef shows Paseo's state buckets except that one, which is a
+  flag of its own: a finished agent is done, and `unseen` while nobody has looked at it since.
+  The flag is the host's, so every client shares it: opening an agent in Skiff clears it (the
+  `seen` action, 3.9) as focusing its prompt in crusteo does, and either clears it for both. Not a
+  permission's, which only answering it settles. Needs-you holds only questions, permissions and
+  failures.
 
 ### 2.2 The core: one task
 
@@ -241,7 +244,10 @@ Both list views send rows of this shape. Empty fields are left out.
 ```
 
 - `state` is Paseo's bucket, without "ready to review" (2.1): `needs_input`, `failed`, `running` or
-  `done`.
+  `done`. `unseen` is there, `true`, while the agent is ready to review; map tiles carry it too.
+- A list's `filter.attention` keeps only the agents waiting on you: `blocked` (a question, a
+  permission, or failed) or `unseen` (blocked, or unseen). Sorting `needs` puts questions and
+  permissions first, then failures, then unseen, then the rest, newest first in each.
 - `notify` says whether a finished turn of this agent raises a notification (3.10).
 - `thinking` is the agent's effort: the one chosen, else the one its provider resolved its
   default to. The conversation's header shows provider, model and effort before the labels, by
@@ -520,8 +526,10 @@ with the view's `id` when they concern one.
 - A queued message whose send fails stays at the front of the queue with its `error`, and is not
   tried again by itself; the messages behind it still go.
 - Queued messages live in Reef's memory: a Reef restart loses them.
-- Not in v0, on purpose: terminals, renaming, mode and model switches on a running agent, new
-  workspaces from a project (Paseo's `workspace.create.request`), and `clear_agent_attention`.
+- `seen` (`host`, `agent`) marks the agent seen: Reef sends `clear_agent_attention` only when it
+  is ready to review for something other than a permission, and shows it seen at once.
+- Not in v0, on purpose: terminals, renaming, mode and model switches on a running agent, and new
+  workspaces from a project (Paseo's `workspace.create.request`).
 
 #### 3.9.1 Creating an agent
 
@@ -715,36 +723,56 @@ daemon itself.
   inline, no build step, no framework. Nothing to install, the same origin as the WebSocket, and
   once served over HTTPS (section 6) it can be added to the home screen and receive push
   notifications.
-- **Layout changes at breakpoints** rather than stretching:
-  - under 900px, one column: the list, or the conversation with Back;
-  - from 900px, two panes: the list (380px) and the open conversation;
-  - from 1400px, with a grouping chosen on the Agents tab, the list becomes a board of 300px
-    columns, one per group, and the conversation a side panel.
-
-  Conversation text stays within 80ch; extra width goes to the list or the board.
-- **The list:** Needs you and Agents tabs. Agents has search, grouping, sort and host, label and
-  state filters (behind a Filters button on a phone). Each row shows the title, the time, the
-  latest reply's first line (or the pending question), host, workspace and state, its labels as
-  coloured chips, and a notify bell. Grouping, sorting, filters and folded groups are kept per
-  device in local storage. The grouping defaults to label, as crusteo's Lanes does, for the list,
-  the board and the map, until the device picks another (a stored marker keeps an explicit "No
-  groups"). An agent with several labels shows in each label's group; "No label" comes last but
-  for "Background", which holds background workspaces' agents and nothing else. The label filter
+- **One top bar, then the map.** The bar holds Skiff's boat (`assets/icon/skiff.svg`, also the
+  tab's icon), the host dots, a Map/List switch whose List side counts the agents waiting on you
+  (blocked and unseen), the usage dial, the view's options (a sliders button, with a count of the
+  filters in use), + and Settings. The switch is two icons, a map and a list. The map fills the
+  rest at every width; the list comes in over it. Conversation text stays within 80ch.
+- **The view's options** open a row under the bar: search, the host, label, state and background
+  filters, which the map and the list share, and, on the map, its grouping, Bands and the key.
+  Filters and the grouping are kept per device in local storage. The grouping defaults to label,
+  as crusteo's Lanes does, until the device picks another (a stored marker keeps an explicit "No
+  groups"). An agent with several labels shows in each label's lane; "No label" comes last but for
+  "Background", which holds background workspaces' agents and nothing else. The label filter
   offers Background after the labels while background is shown; hiding it drops that choice.
+- **The list:** every agent, flat, over the map, looked at one of three ways, chosen by chips
+  along its top and kept per device: *Unseen* (the default: blocked agents first, then the unseen,
+  the `agents` view with `attention: unseen` sorted `needs`), *Most recent* (every agent, newest
+  first) and *Blocked*. The chips count theirs, from the map's tiles. It comes in from the right:
+  the switch, a swipe left on the whole map (where one finger has nothing to pan) or from an open
+  conversation, the handle on the map's right edge (a click, or a drag to the left), a firm
+  sideways two-finger trackpad swipe, or L; a swipe right, the other trackpad swipe, Back, Esc or
+  L again take it away. Each row shows the title, the time, the latest reply's first line (or the
+  pending question), host, workspace and state, its labels as coloured chips, a notify bell, and a
+  blue dot and border while unseen. The map and the list include subagents (`filter.subagents`);
+  a subagent's row and box say "↳ <parent>" (the row's `parent_title`), and a tap on it opens
+  the parent. A tap opens the agent over the list, growing from its row; Back
+  or a swipe either way comes back to the list. The order holds still: rows change in place, and
+  move, sliding, only once a line under the heading has filled, five seconds after the order first
+  differs. The line shows only while a re-sort is coming; agents new to the list wait for it, and
+  ones that left it (seen, say) stay, dimmed, until then. Touching or scrolling the list stops the
+  line (and its redraws) until a second after you let go; tapping the line sorts now. 50 rows at a
+  time.
+- **Seen:** opening an agent marks it seen on its host, and so does a turn that ends while its
+  conversation is open and the page is in front (or when the page comes back to the front).
 - **The conversation:** permission buttons, the question form, the notify bell, the agent's labels
-  as chips under its title, and Labels, Archive and Delete. Labels opens an editor: the chips to
+  as chips under its title, and Labels, Archive and Delete. The title starts with the state's dot;
+  the line under it is the host and workspace, after ↳ for a subagent. A tap on that left side
+  opens the agent's *details* (the conversation's `details` field: id, `created_at`, `cwd`,
+  `mode`, `last_error` and its live `children`): what it runs on, where, its parent and
+  subagents (each a link), its timeline, labels, bell and id. Labels opens an editor: the chips to
   take off, the fleet's other labels to put on, and a new one by name. Archive and Delete ask
   first, in the page's own confirmation sheet rather than the browser's dialog. The composer is one auto-growing line with the send arrow inside it: at a desk Enter
   sends and Shift+Enter is a new line; on a phone (a coarse pointer) Enter is a new line and the
   arrow sends. While the agent works the arrow queues and a small Steer sends now; queued
   messages show one line each with Steer and drop. Stop sits beside the working timer.
-- **The Map tab**, a board of every agent you move around like a map, drawn differently at each
+- **The map**, a board of every agent you move around like a map, drawn differently at each
   distance:
   - *Far:* each lane of the current grouping is a block of small tiles, each split on the
     diagonal: the state colour above, and below how fresh it is, from white just now to black at
-    two weeks on a log scale (an hour is 40% of the way, a day 73%, a week 93%). The key is a
-    strip above the map, not over any tile; × hides it for good on that device, and the help
-    button (?) beside Settings brings it back, on the map. A tile pulses while working and carries a mark when it waits on someone; the
+    two weeks on a log scale (an hour is 40% of the way, a day 73%, a week 93%); an unseen agent's
+    tile has a blue ring. The key is a strip above the map, not over any tile; × hides it on that
+    device, and Key in the view's options brings it back. A tile pulses while working and carries a mark when it waits on someone; the
     block is named and carries a count of those waiting. Blocks are packed into the map's own shape
     by an ordered squarified treemap, sized by agent count, so a portrait phone stacks them and a
     desk lays them out wide; tiles wrap inside each block. A new shape (rotation, resize) re-packs
@@ -758,12 +786,12 @@ daemon itself.
     120px; within a section a lane that would pack thinner than 76px is given more room and the
     section packed again, so a lane of one agent beside big ones keeps its name and a tile.
   - *Middle:* tapping a block, or zooming in past one, shows its agents as cards as wide as the
-    screen: title, host, state, time and the latest reply. Only cards in view are drawn, and only
-    they are the map's `focus`.
+    screen: title, host, state, time and the latest reply, and a blue dot by an unseen agent's
+    name. Only cards in view are drawn, and only they are the map's `focus`.
   - *Near:* a card opens into the live conversation where it is and grows to fill the map: the
     same pane, composer, permission buttons and question forms as elsewhere. Back, Esc or pinching
     out closes it into its card; a swipe right goes all the way out to the whole map, where the
-    agent's tile pulses.
+    agent's tile pulses. Opened from the list, all of these go back to the list.
 
   One finger pans and two pinch (the map has `touch-action: none`, so the page never zooms);
   on a desk the wheel pans and a trackpad pinch (a wheel with Ctrl) zooms. Fit all returns to the
@@ -775,20 +803,10 @@ daemon itself.
 - **Usage:** the top bar shows the tightest account's pace dial and slack, coloured by severity as
   crusteo's meters are, and hidden when nothing reports usage; a tap slides in a drawer with every
   account, its plan, the use-before-reset hint and each window's use and reset.
-- **Going back:** Back, Esc, or a swipe to the right, which drags what it leaves (the conversation,
-  the open card, a lane, Recent, a picture, the usage drawer) with the finger; past a third of the
-  screen, or flicked, it goes, otherwise it springs back.
-- **History** (the Recent pane): the History button at the right of the tabs, after Filters,
-  opens it over any tab, and a swipe left from a conversation (on a phone, or the map's open
-  card) brings it in: every agent in one list, the latest activity first, the agent just left
-  highlighted. On a narrow phone (under 400px) the tabs shrink a little so the row stays one
-  line. A tap opens one
-  where conversations open; a swipe right goes back to the conversation left. The order holds
-  still: rows change in place, and move, sliding, only once a line under the heading has filled,
-  five seconds after the order first differs. The line shows only while a re-sort is coming;
-  agents new to the list wait for it, and ones that left stay, dimmed, until then. Touching or
-  scrolling the list stops the line (and its redraws) until a second after you let go; tapping
-  the line sorts now. It is the `agents` view, ungrouped and newest first, 50 rows at a time.
+- **Going back:** Back, Esc, or a swipe to the right, which drags what it leaves (the open card, a
+  lane, the list, a picture, the usage drawer) with the finger; past a third of the screen, or
+  flicked, it goes, otherwise it springs back. A swipe left drags the map or the open card the
+  other way, bringing the list in under it.
 - **New agent:** the + in the top bar opens a form: the host, then its ready providers, model,
   mode and thinking (when the model has thinking options), a directory (the host's workspaces, or
   another typed in), labels, and the first message. It remembers the last choices on each host,

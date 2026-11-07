@@ -137,7 +137,7 @@ impl Harness {
     async fn stop(self) {
         drop(self.client);
         self.running.shutdown().await;
-        self.daemon.close();
+        self.daemon.close().unwrap();
         let _ = std::fs::remove_dir_all(&self.cwd);
     }
 }
@@ -865,7 +865,7 @@ async fn deleting_a_running_agent_stops_it_and_forgets_it_for_good() {
     // Mid-turn: the slow reply waits 30 s before its last chunk.
     h.send(&agent, "slow two", "m-2", None).await;
     assert!(h.daemon.agents.is_live(&agent));
-    h.daemon.flush();
+    h.daemon.flush().unwrap();
     let record = home.join(format!("agents/{agent}.json"));
     let timeline = home.join(format!("timelines/{agent}.jsonl"));
     assert!(record.is_file() && timeline.is_file());
@@ -897,7 +897,7 @@ async fn deleting_a_running_agent_stops_it_and_forgets_it_for_good() {
         "done"
     );
 
-    h.daemon.flush();
+    h.daemon.flush().unwrap();
     assert!(!record.exists(), "its record is gone");
     assert!(!timeline.exists(), "its timeline is gone");
     let found = h
@@ -949,7 +949,7 @@ async fn deleting_an_archived_or_unknown_agent_answers_the_same() {
         .request(json!({"type": "fetch_agent_request", "agentId": agent}))
         .await;
     assert!(found["agent"].is_null(), "an archived agent goes too");
-    h.daemon.flush();
+    h.daemon.flush().unwrap();
     assert!(!home.join(format!("agents/{agent}.json")).exists());
 
     // Paseo answers an id it does not know as it answers any other.

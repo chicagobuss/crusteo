@@ -115,6 +115,9 @@ pub struct UiState {
     pub workspace: Option<String>,
     pub sidebar_width: Option<f32>,
     pub sidebar_open: Option<bool>,
+    /// History docked at the window's right.
+    pub history_docked: bool,
+    pub history_width: Option<f32>,
     pub group_by_status: bool,
     pub collapsed: Vec<String>,
     pub collapsed_pinned: bool,

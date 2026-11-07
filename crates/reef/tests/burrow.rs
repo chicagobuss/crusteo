@@ -159,6 +159,6 @@ async fn create_relabel_and_delete_work_on_burrow() {
     assert!(phone.errors.is_empty(), "{:?}", phone.errors);
 
     running.shutdown().await;
-    daemon.close();
+    daemon.close().unwrap();
     std::fs::remove_dir_all(&cwd).unwrap();
 }

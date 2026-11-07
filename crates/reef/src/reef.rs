@@ -418,7 +418,7 @@ impl State {
                 let welcome = json!({
                     "type": "welcome",
                     "v": proto::VERSION,
-                    "hub": { "version": env!("CARGO_PKG_VERSION") },
+                    "hub": { "version": env!("CARGO_PKG_VERSION"), "commit": env!("CRUSTEO_COMMIT") },
                     "device": device,
                     "hosts": views::hosts(&self.up.fleet, &self.up.host_since()),
                     "labels": lists::label_colors(&self.up.fleet),
@@ -819,6 +819,7 @@ impl State {
                 self.up.unqueue(&host, &agent, &id, reply);
             }
             "archive" => self.up.archive(&host, &agent, reply),
+            "seen" => self.up.seen(&host, &agent, reply),
             "delete" => self.up.delete(&host, &agent, reply),
             "relabel" => {
                 if !body["labels"].is_array() {
@@ -1372,12 +1373,14 @@ fn conversation_messages(
     let Some(session) = up.sessions.get(&(host.clone(), agent.clone())) else {
         return Vec::new();
     };
-    let row = up.fleet.host(&host_id(host)).and_then(|h| {
-        h.directory
-            .agents
-            .get(agent)
-            .map(|a| views::agent_row(h, a, cx))
-    });
+    let (row, details) = up
+        .fleet
+        .host(&host_id(host))
+        .and_then(|h| {
+            let a = h.directory.agents.get(agent)?;
+            Some((views::agent_row(h, a, cx), views::agent_details(h, a)))
+        })
+        .unzip();
     let cwd = up
         .fleet
         .agent(&host_id(host), agent)
@@ -1442,6 +1445,8 @@ fn conversation_messages(
 
     let mut fields = Map::new();
     fields.insert("agent".into(), row.unwrap_or(Value::Null));
+    // For the agent's details: its subagents, where it runs, its mode.
+    fields.insert("details".into(), details.unwrap_or(Value::Null));
     fields.insert("loading".into(), json!(session.loading));
     fields.insert("error".into(), json!(session.error));
     fields.insert("has_older".into(), json!(view.has_older));

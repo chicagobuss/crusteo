@@ -96,7 +96,7 @@ impl Harness {
     async fn stop(self) {
         drop(self.client);
         self.running.shutdown().await;
-        self.daemon.close();
+        self.daemon.close().unwrap();
     }
 }
 

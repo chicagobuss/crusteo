@@ -174,7 +174,7 @@ impl Harness {
     async fn stop(self) {
         drop(self.client);
         self.running.shutdown().await;
-        self.daemon.close();
+        self.daemon.close().unwrap();
     }
 }
 
@@ -863,6 +863,7 @@ async fn workspaces_survive_a_restart_and_archive_their_worktrees() {
         )
         .await;
     assert!(agent["error"].is_null(), "{agent}");
+    let first = h.daemon.clone();
     h.stop().await;
 
     let h = harness(&home, &server_id).await;
@@ -917,7 +918,28 @@ async fn workspaces_survive_a_restart_and_archive_their_worktrees() {
         unknown["error"],
         "Workspace not found: wks_0000000000000000"
     );
+    // The archive is on disk once the reply says so.
+    let saved_archive = || {
+        let saved: Value =
+            serde_json::from_str(&std::fs::read_to_string(home.join("workspaces.json")).unwrap())
+                .unwrap();
+        (saved.as_array().unwrap().iter())
+            .find(|w| w["workspaceId"] == gone_id.as_str())
+            .map(|w| w["archivedAt"].clone())
+    };
+    assert_eq!(saved_archive(), Some(archived["archivedAt"].clone()));
+    // The first daemon closed, but a task it started (a worktree's setup
+    // reporting late) can still change its store, which still lists the
+    // workspace. None of that may be saved over the archive.
+    first.apply(|store| {
+        let mut record = store.workspaces.get(&gone_id).unwrap().clone();
+        record.setup_status = Some("completed".into());
+        ((), store.upsert_workspace(record))
+    });
+    assert!(first.flush().is_err(), "a closed daemon saves nothing");
+    drop(first);
     h.stop().await;
+    assert_eq!(saved_archive(), Some(archived["archivedAt"].clone()));
 
     // Archived stays archived.
     let h = harness(&home, &server_id).await;
@@ -984,7 +1006,7 @@ async fn empty_and_unknown_projects_are_removed() {
     assert_eq!(h.project_ids().await, [kept["projectId"].as_str().unwrap()]);
     let workspaces = h.request(json!({"type": "fetch_workspaces_request"})).await;
     assert_eq!(workspaces["emptyProjects"].as_array().unwrap().len(), 1);
-    h.daemon.flush();
+    h.daemon.flush().unwrap();
     assert!(!saved_projects(&home).contains(id));
     // The folder is untouched, and adding it again makes a new project.
     assert!(plain.is_dir());

@@ -206,12 +206,31 @@ fn host_allowed(config: &Config, host: &str) -> bool {
             .any(|allowed| allowed.eq_ignore_ascii_case(&name))
 }
 
+/// The origins Paseo's daemon always accepts (`bootstrap.ts`): its packaged
+/// desktop app's renderer, `paseo://app`; its hosted web app, the default
+/// of `daemon.cors.allowedOrigins`; and the localhost forms of the port
+/// it listens on. Without the first, Paseo's desktop app cannot connect:
+/// the refused upgrade shows there as "Transport closed (1006)".
+const PASEO_ORIGINS: &[&str] = &["paseo://app", "https://app.paseo.sh"];
+
 fn origin_allowed(config: &Config, origin: &str, host: &str) -> bool {
     if origin == "*"
+        || PASEO_ORIGINS.contains(&origin)
         || config
             .allowed_origins
             .iter()
             .any(|allowed| allowed == origin)
+    {
+        return true;
+    }
+    // http://localhost:<port> and http://127.0.0.1:<port>, on this port.
+    let port = host
+        .rsplit_once(':')
+        .map(|(_, port)| port)
+        .filter(|p| p.chars().all(|c| c.is_ascii_digit()));
+    if let Some(port) = port
+        && (origin == format!("http://localhost:{port}")
+            || origin == format!("http://127.0.0.1:{port}"))
     {
         return true;
     }
@@ -250,6 +269,33 @@ mod tests {
             &config,
             "https://elsewhere.example",
             "127.0.0.1:6797"
+        ));
+        // Paseo's desktop app, over a VPN address, as Paseo's daemon allows.
+        assert!(origin_allowed(&config, "paseo://app", "10.0.0.5:6767"));
+        assert!(origin_allowed(
+            &config,
+            "https://app.paseo.sh",
+            "10.0.0.5:6767"
+        ));
+        assert!(origin_allowed(
+            &config,
+            "http://localhost:6767",
+            "10.0.0.5:6767"
+        ));
+        assert!(origin_allowed(
+            &config,
+            "http://127.0.0.1:6767",
+            "10.0.0.5:6767"
+        ));
+        assert!(!origin_allowed(
+            &config,
+            "http://localhost:6768",
+            "10.0.0.5:6767"
+        ));
+        assert!(!origin_allowed(
+            &config,
+            "paseo://elsewhere",
+            "10.0.0.5:6767"
         ));
     }
 }

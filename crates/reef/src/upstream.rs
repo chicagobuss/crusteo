@@ -6,10 +6,11 @@
 //! Every request goes through [`guarded`], which refuses any type not in
 //! [`READ_REQUESTS`] or [`WRITE_REQUESTS`]. The writes are the phone's
 //! actions (`actions.rs`, and `agents.rs` for creating, deleting and
-//! relabelling), each added on purpose. Never on the list:
-//! `clear_agent_attention`, which would clear "ready to review" for the
-//! people at their desks, anything about terminals, and workspace changes
-//! other than assigning a label.
+//! relabelling), each added on purpose. `clear_agent_attention` is one:
+//! opening an agent in Skiff marks it seen, on its host, so a desktop sees
+//! it seen too, as one opened there clears it for Skiff. Never on the
+//! list: anything about terminals, and workspace changes other than
+//! assigning a label.
 
 mod actions;
 mod agents;
@@ -76,6 +77,8 @@ pub const WRITE_REQUESTS: &[&str] = &[
     "agent.create.request",
     // Delete an agent for good; the page asks first.
     "delete_agent_request",
+    // Mark an agent seen: its "ready to review" goes, everywhere.
+    "clear_agent_attention",
     // Put a label on an agent's workspace, or take it off: the labels a
     // row shows are its workspace's, as in crusteo.
     "workspace.label.assignment.set.request",
@@ -1315,7 +1318,7 @@ mod tests {
         // once, without being queued for the socket.
         let client = Client::connect(Config::new("127.0.0.1:9", "cid_test"));
         for write in [
-            json!({"type": "clear_agent_attention", "agentId": "a"}),
+            json!({"type": "workspace.clear_attention.request", "workspaceId": "w"}),
             json!({"type": "update_agent_request", "agentId": "a", "name": "x"}),
             json!({"type": "create_terminal_request", "cwd": "/"}),
             json!({"type": "create_agent_request", "config": {}}),

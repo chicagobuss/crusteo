@@ -409,7 +409,7 @@ async fn imports_every_shared_providers_agents_once() {
         .expect("recolour");
     drop(client);
     running.shutdown().await;
-    daemon.close();
+    daemon.close().unwrap();
     drop(daemon);
 
     let saved = fs::read(home.join(format!("agents/{ACTIVE}.json"))).unwrap();

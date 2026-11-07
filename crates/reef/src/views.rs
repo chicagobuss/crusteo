@@ -15,7 +15,7 @@ use serde_json::{Map, Value, json};
 
 use crate::proto::{Limits, clip};
 
-pub use crate::lists::{agent_key, agent_row, hosts, needs_you, state};
+pub use crate::lists::{agent_details, agent_key, agent_row, hosts, needs_you, state};
 
 /// The part of a keyed list a window shows.
 pub fn window(rows: &[(String, Value)], offset: usize, limit: usize) -> Vec<(String, Value)> {

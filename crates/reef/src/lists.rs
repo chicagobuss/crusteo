@@ -8,7 +8,7 @@ use fleet::{Agent, Bucket, Fleet, Host};
 use serde_json::{Map, Value, json};
 
 use crate::config::host_id;
-use crate::proto::{AgentFilter, Grouping, ListSpec, Sorting};
+use crate::proto::{AgentFilter, Attention, Grouping, ListSpec, Sorting};
 use crate::settings::Settings;
 
 /// The first line of an agent's latest reply, and when it came.
@@ -38,12 +38,34 @@ fn activity_at(agent: &Agent) -> &str {
 }
 
 /// The agent's state as Reef shows it: Paseo's bucket, except that
-/// "ready to review" is not a state here. Nobody clears it from the
-/// Reef, so a finished agent is simply done.
+/// "ready to review" is not a state here: a finished agent is done, and
+/// [`unseen`] says whether anyone has looked at it since.
 pub fn state(agent: &Agent) -> Bucket {
     match agent.bucket() {
         Bucket::Attention => Bucket::Done,
         bucket => bucket,
+    }
+}
+
+/// Whether the agent finished a turn nobody has looked at yet: the
+/// daemon's "ready to review", which every client opening it clears.
+pub fn unseen(agent: &Agent) -> bool {
+    agent.bucket() == Bucket::Attention
+}
+
+/// Whether the agent waits on a question or a permission, or failed.
+fn blocked(agent: &Agent) -> bool {
+    matches!(state(agent), Bucket::NeedsInput | Bucket::Failed)
+}
+
+/// "Needs you first": questions and permissions, failures, unseen, then
+/// everything else together.
+fn needs_rank(agent: &Agent) -> usize {
+    match agent.bucket() {
+        Bucket::NeedsInput => 0,
+        Bucket::Failed => 1,
+        Bucket::Attention => 2,
+        _ => 3,
     }
 }
 
@@ -117,6 +139,9 @@ pub fn agent_row(host: &Host, agent: &Agent, cx: &Context) -> Value {
     put("id", json!(agent.id));
     put("title", json!(agent.display_title()));
     put("state", json!(state(agent).as_str()));
+    if unseen(agent) {
+        put("unseen", json!(true));
+    }
     put("notify", json!(cx.settings.notify_for(&key)));
     put("provider", json!(agent.provider_id()));
     put("model", json!(agent.model_label()));
@@ -160,10 +185,48 @@ pub fn agent_row(host: &Host, agent: &Agent, cx: &Context) -> Value {
         put("reply_at", json!(reply.at));
     }
     put("parent", json!(agent.parent_agent_id));
+    // The agent that made it, by name, for "↳ <parent>" on its row.
+    let parent = (agent.parent_agent_id.as_deref()).and_then(|id| directory.agents.get(id));
+    put("parent_title", json!(parent.map(|p| p.display_title())));
     if let Some(ask) = ask_summary(agent) {
         put("ask", ask);
     }
     Value::Object(row)
+}
+
+/// What an open agent's details show besides its row: its id, when it was
+/// made, where it runs, its mode, its last error, and the subagents it
+/// made, newest activity first.
+pub fn agent_details(host: &Host, agent: &Agent) -> Value {
+    let mut children: Vec<&Agent> = (host.directory.agents.values())
+        .filter(|a| {
+            a.parent_agent_id.as_deref() == Some(agent.id.as_str()) && a.archived_at.is_none()
+        })
+        .collect();
+    children.sort_by(|a, b| {
+        activity_at(b)
+            .cmp(activity_at(a))
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    let children: Vec<Value> = (children.iter())
+        .map(|c| {
+            let mut child = json!({
+                "id": c.id, "title": c.display_title(), "state": state(c).as_str(), "at": activity_at(c),
+            });
+            if unseen(c) {
+                child["unseen"] = json!(true);
+            }
+            child
+        })
+        .collect();
+    json!({
+        "id": agent.id,
+        "created_at": agent.created_at,
+        "cwd": agent.cwd,
+        "mode": agent.raw["currentModeId"].as_str(),
+        "last_error": agent.raw["lastError"].as_str(),
+        "children": children,
+    })
 }
 
 /// Agents waiting on a person on online hosts: questions and permissions
@@ -172,9 +235,7 @@ pub fn needs_you(fleet: &Fleet, cx: &Context) -> Vec<(String, Value)> {
     let mut agents: Vec<(&Host, &Agent)> = fleet
         .agents()
         .filter(|(host, agent)| {
-            host.connection.is_online()
-                && agent.archived_at.is_none()
-                && matches!(state(agent), Bucket::NeedsInput | Bucket::Failed)
+            host.connection.is_online() && agent.archived_at.is_none() && blocked(agent)
         })
         .collect();
     sort(&mut agents, Sorting::Needs);
@@ -235,6 +296,14 @@ fn passes(
     if !filter.states.is_empty() && !filter.states.contains(&state(agent)) {
         return false;
     }
+    let waits = match filter.attention {
+        Attention::Any => true,
+        Attention::Blocked => blocked(agent),
+        Attention::Unseen => blocked(agent) || unseen(agent),
+    };
+    if !waits {
+        return false;
+    }
     let workspace = workspace_of(host, agent);
     if !labels.is_empty() {
         // A background workspace's agent matches Background, not its labels,
@@ -276,8 +345,8 @@ fn sort(agents: &mut [(&Host, &Agent)], sorting: Sorting) {
             // The agent that did something last comes first, as Paseo's
             // history view has it.
             Sorting::Recent => activity_at(b).cmp(activity_at(a)),
-            Sorting::Needs => state_rank(a)
-                .cmp(&state_rank(b))
+            Sorting::Needs => needs_rank(a)
+                .cmp(&needs_rank(b))
                 .then_with(|| activity_at(b).cmp(activity_at(a))),
             Sorting::Name => a
                 .display_title()
@@ -510,8 +579,9 @@ pub struct MapOut {
 /// grouping's own order (workspaces by name, not by activity), and tiles
 /// in each lane by when the agent was created, so nothing moves when an
 /// agent is busy: a phone remembers where things are. A tile carries
-/// only its state, whether it waits on a question or permission, and the
-/// minute it last changed, which is what a far view draws.
+/// only its state, whether it waits on a question or permission, whether
+/// it is unseen, and the minute it last changed, which is what a far view
+/// draws.
 pub fn map_view(fleet: &Fleet, spec: &ListSpec, focus: &[String], cx: &Context) -> MapOut {
     let filter = &spec.filter;
     let words: Vec<String> = filter
@@ -598,6 +668,9 @@ pub fn map_view(fleet: &Fleet, spec: &ListSpec, focus: &[String], cx: &Context) 
             });
             if !agent.pending_permissions.is_empty() {
                 tile["ask"] = json!(true);
+            }
+            if unseen(agent) {
+                tile["unseen"] = json!(true);
             }
             out.tiles.push((key, tile));
         }
@@ -1254,6 +1327,141 @@ mod tests {
         });
         // "agent new", "agent old", "agent zed", then "Alpha": case aside.
         assert_eq!(keys(&by_name)[3], "example-b/mid");
+    }
+
+    #[test]
+    fn a_subagent_shows_when_asked_for_and_names_its_parent() {
+        let fleet = one_host(vec![
+            agent(
+                "boss",
+                "w1",
+                "2026-10-17T09:00:00Z",
+                json!({"title": "orchestrator"}),
+            ),
+            agent(
+                "worker",
+                "w1",
+                "2026-10-17T10:00:00Z",
+                json!({"labels": {"paseo.parent-agent-id": "boss"}}),
+            ),
+        ]);
+        assert_eq!(
+            rows_of(&fleet, AgentFilter::default()),
+            ["example-host/boss"]
+        );
+        let settings = Settings::default();
+        let replies = HashMap::new();
+        let cx = Context {
+            settings: &settings,
+            replies: &replies,
+            labels: None,
+        };
+        let spec = ListSpec {
+            filter: AgentFilter {
+                subagents: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let rows = agent_list(&fleet, &spec, &cx).rows;
+        assert_eq!(rows[0].0, "example-host/worker");
+        assert_eq!(rows[0].1["parent"], "boss");
+        assert_eq!(rows[0].1["parent_title"], "orchestrator");
+        assert!(rows[1].1.get("parent_title").is_none());
+        // The parent's details list it; the worker's list none.
+        let host = &fleet.hosts[0];
+        let boss = agent_details(host, &host.directory.agents["boss"]);
+        assert_eq!(boss["children"][0]["id"], "worker");
+        assert_eq!(boss["children"][0]["state"], "done");
+        let worker = agent_details(host, &host.directory.agents["worker"]);
+        assert_eq!(worker["children"], json!([]));
+    }
+
+    #[test]
+    fn unseen_agents_are_marked_kept_by_the_unseen_filter_and_sorted_after_blocked_ones() {
+        let fleet = one_host(vec![
+            agent("plain", "w1", "2026-10-17T12:00:00Z", json!({})),
+            agent(
+                "finished",
+                "w1",
+                "2026-10-17T11:00:00Z",
+                json!({"requiresAttention": true, "attentionReason": "finished"}),
+            ),
+            agent(
+                "asking",
+                "w1",
+                "2026-10-17T09:00:00Z",
+                json!({"requiresAttention": true, "attentionReason": "permission",
+                       "pendingPermissions": [{"id": "p", "kind": "tool"}]}),
+            ),
+            agent(
+                "broken",
+                "w2",
+                "2026-10-17T10:00:00Z",
+                json!({"status": "error"}),
+            ),
+        ]);
+        let settings = Settings::default();
+        let replies = HashMap::new();
+        let cx = Context {
+            settings: &settings,
+            replies: &replies,
+            labels: None,
+        };
+        let keys_for = |attention: Attention, sort: Sorting| -> Vec<String> {
+            let spec = ListSpec {
+                filter: AgentFilter {
+                    attention,
+                    ..Default::default()
+                },
+                sort,
+                ..Default::default()
+            };
+            let out = agent_list(&fleet, &spec, &cx);
+            out.rows.into_iter().map(|(k, _)| k).collect()
+        };
+        // Blocked first (a question before a failure), then unseen, then
+        // the rest; the plain agent's newer activity does not lift it.
+        assert_eq!(
+            keys_for(Attention::Any, Sorting::Needs),
+            [
+                "example-host/asking",
+                "example-host/broken",
+                "example-host/finished",
+                "example-host/plain"
+            ]
+        );
+        assert_eq!(
+            keys_for(Attention::Unseen, Sorting::Needs),
+            [
+                "example-host/asking",
+                "example-host/broken",
+                "example-host/finished"
+            ]
+        );
+        assert_eq!(
+            keys_for(Attention::Blocked, Sorting::Recent),
+            ["example-host/broken", "example-host/asking"]
+        );
+        // Rows and tiles say so; "ready to review" is not a state of its own.
+        let spec = ListSpec::default();
+        let rows = agent_list(&fleet, &spec, &cx).rows;
+        let row = |id: &str| {
+            rows.iter()
+                .find(|(k, _)| k.ends_with(id))
+                .map(|(_, r)| r.clone())
+                .unwrap()
+        };
+        assert_eq!(row("finished")["unseen"], true);
+        assert_eq!(row("finished")["state"], "done");
+        assert!(row("plain").get("unseen").is_none());
+        assert!(row("asking").get("unseen").is_none());
+        let map = map_view(&fleet, &spec, &[], &cx);
+        let unseen: Vec<&str> = (map.tiles.iter())
+            .filter(|(_, t)| t["unseen"] == true)
+            .map(|(_, t)| t["agent"].as_str().unwrap())
+            .collect();
+        assert_eq!(unseen, ["example-host/finished"]);
     }
 
     #[test]

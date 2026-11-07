@@ -51,7 +51,7 @@ async fn tail(home: &Path, server_id: &str, agent_id: &str) -> (Value, Value) {
         .expect("agents");
     drop(client);
     running.shutdown().await;
-    daemon.close();
+    daemon.close().unwrap();
     (page, agents)
 }
 
@@ -77,7 +77,7 @@ async fn timelines_and_records_survive_a_restart() {
         ));
         ((), events)
     });
-    daemon.close();
+    daemon.close().unwrap();
     drop(daemon);
 
     let (first, agents) = tail(&home, &server_id, &agent_id).await;

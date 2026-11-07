@@ -1588,6 +1588,13 @@ pub(crate) async fn archive_workspace(
     }
     let archived_at = crate::clock::now_iso();
     daemon.apply(|store| ((), store.archive_workspace(workspace_id, &archived_at)));
+    // On disk before the reply, and before its worktree goes: a restart
+    // must not bring back a workspace whose folder is gone.
+    let saving = daemon.clone();
+    if let Err(error) = blocking(move || saving.flush()).await {
+        warn!(workspace_id, %error, "an archived workspace was not saved");
+        return Err(format!("Workspace archived but not saved: {error}"));
+    }
     remove_worktree_if_unused(daemon, &workspace).await;
     Ok(archived_at)
 }

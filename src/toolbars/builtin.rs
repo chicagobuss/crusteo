@@ -80,8 +80,9 @@ impl ToolbarItem for Help {
     }
 }
 
-/// Every agent in one list, the latest change first, sliding in from the
-/// edge nearest the button: see [`crate::state_list`].
+/// Every agent in one list, the latest change first, docked at the
+/// window's right until the button is pressed again: see
+/// [`crate::state_list`].
 struct History {
     core: Core,
 }
@@ -102,7 +103,7 @@ impl ToolbarItem for History {
     }
     fn render(&self, _: &mut Window, cx: &mut App) -> Option<AnyElement> {
         let p = palette();
-        let open = self.core.nav.read(cx).pane_open(Pane::History);
+        let open = self.core.nav.read(cx).history_docked;
         let nav = self.core.nav.clone();
         Some(
             div()
@@ -121,7 +122,7 @@ impl ToolbarItem for History {
                         "Ctrl+Shift+H"
                     };
                     gpui_kit::component::tooltip::Tooltip::new(format!(
-                        "Every agent, latest first ({keys})"
+                        "Every agent, latest first, docked at the right ({keys})"
                     ))
                     .build(window, cx)
                 })
@@ -131,18 +132,14 @@ impl ToolbarItem for History {
                     if open { p.foreground } else { p.extra_muted },
                 ))
                 // On mouse down, as the window's "any click closes it" is,
-                // so a second click closes it rather than opening it again.
-                .on_mouse_down(
-                    gpui_kit::gpui::MouseButton::Left,
-                    move |event, window, cx| {
-                        cx.stop_propagation();
-                        let side = crate::pane::side_at(event.position.x, window);
-                        nav.update(cx, |nav, cx| {
-                            nav.set_state_highlight(None, cx);
-                            nav.toggle_pane(Pane::History, side, cx);
-                        });
-                    },
-                )
+                // so a slide-in pane open over it closes as History docks.
+                .on_mouse_down(gpui_kit::gpui::MouseButton::Left, move |_, _, cx| {
+                    cx.stop_propagation();
+                    nav.update(cx, |nav, cx| {
+                        nav.set_state_highlight(None, cx);
+                        nav.toggle_history_dock(cx);
+                    });
+                })
                 .into_any_element(),
         )
     }

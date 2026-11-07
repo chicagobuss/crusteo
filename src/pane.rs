@@ -1,5 +1,5 @@
-//! The slide-in pane: the lists behind the title bar's counts and its
-//! History button, and Settings. It slides in under the title bar from the
+//! The slide-in pane: the lists behind the title bar's counts, and
+//! Settings. (History docks instead: see [`crate::state_list`].) It slides in under the title bar from the
 //! edge nearest what opened it, the right for a key, and lies over the
 //! layout, which stays as it was underneath: closing it changes nothing
 //! else. A click outside it, or Escape, closes it.

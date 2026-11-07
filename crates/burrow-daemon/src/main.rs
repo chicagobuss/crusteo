@@ -304,7 +304,7 @@ async fn main() -> anyhow::Result<()> {
     running.shutdown().await;
     daemon.agents.stop_all(STOP_AGENTS_WITHIN).await;
     drop(paseo_lock);
-    daemon.close();
+    daemon.close().context("saving state")?;
     Ok(())
 }
 

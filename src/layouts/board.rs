@@ -31,6 +31,8 @@ pub struct Board {
     width: ColumnWidth,
     /// Each column's own scroll, in [`Bucket::GROUP_ORDER`], for its fades.
     lists: Vec<ScrollHandle>,
+    /// The docked History's last pick this board scrolled to.
+    revealed: u64,
 }
 
 impl Board {
@@ -57,6 +59,7 @@ impl Board {
                 .iter()
                 .map(|_| ScrollHandle::new())
                 .collect(),
+            revealed: 0,
         }
     }
 }
@@ -70,6 +73,16 @@ impl Render for Board {
         };
         let view = SidebarView::build(&self.core.store.read(cx).fleet, Grouping::Status, &filters);
         let pinned = view.pinned.clone();
+        // The agent picked in the docked History: its workspace's card is
+        // singled out, and scrolled to once per pick.
+        let picked = self.core.nav.read(cx).picked.clone();
+        let reveal = picked
+            .as_ref()
+            .filter(|p| p.serial != self.revealed)
+            .cloned();
+        if let Some(pick) = &reveal {
+            self.revealed = pick.serial;
+        }
         let count = Bucket::GROUP_ORDER.len();
         let width = columns::fit_width(
             self.width.chosen(cx),
@@ -88,7 +101,11 @@ impl Render for Board {
             .overflow_x_scroll()
             .restrict_scroll_to_axis()
             .track_scroll(&self.side.handle);
-        for (bucket, scroll) in Bucket::GROUP_ORDER.into_iter().zip(self.lists.clone()) {
+        for (column, (bucket, scroll)) in Bucket::GROUP_ORDER
+            .into_iter()
+            .zip(self.lists.clone())
+            .enumerate()
+        {
             let mut rows: Vec<_> = view
                 .groups
                 .iter()
@@ -97,9 +114,28 @@ impl Render for Board {
                 .unwrap_or_default();
             rows.extend(pinned.iter().filter(|r| r.bucket == bucket).cloned());
             let color = ui::bucket_color(bucket).unwrap_or(p.extra_muted);
+            let is_picked = |row: &fleet::sidebar::SidebarRow| {
+                picked
+                    .as_ref()
+                    .is_some_and(|p| p.host == row.host && p.workspace == row.workspace_id)
+            };
+            if reveal.is_some()
+                && let Some(ix) = rows.iter().position(is_picked)
+            {
+                self.side.handle.scroll_to_item(column);
+                scroll.scroll_to_item(ix);
+            }
             // Cards take the wheel before the column does, so Cmd/Ctrl+wheel
             // over them resizes the columns instead of scrolling this one.
+            // The cards are the scrolled element's own children, so a pick
+            // can scroll to one.
             let mut list = div()
+                .id(SharedString::from(format!("board-{}", bucket.label())))
+                .flex_1()
+                .min_h(px(0.))
+                .overflow_y_scroll()
+                .track_scroll(&scroll)
+                .p(px(8.))
                 .flex()
                 .flex_col()
                 .gap(px(6.))
@@ -109,6 +145,7 @@ impl Render for Board {
                     }
                 }));
             for row in &rows {
+                let singled = is_picked(row);
                 let core = self.core.clone();
                 let host = row.host.clone();
                 let host_name = self.core.store.read(cx).fleet.host_name(&host).to_string();
@@ -124,6 +161,10 @@ impl Render for Board {
                         .bg(p.surface0)
                         .border_1()
                         .border_color(p.border)
+                        // Picked in the docked History.
+                        .when(singled, |card| {
+                            card.border_2().border_color(p.accent).bg(p.surface2)
+                        })
                         .hover(|s| s.bg(p.surface2))
                         .flex()
                         .flex_col()
@@ -190,16 +231,7 @@ impl Render for Board {
                 .min_h(px(0.))
                 .flex()
                 .flex_col()
-                .child(
-                    div()
-                        .id(SharedString::from(format!("board-{}", bucket.label())))
-                        .flex_1()
-                        .min_h(px(0.))
-                        .overflow_y_scroll()
-                        .track_scroll(&scroll)
-                        .p(px(8.))
-                        .child(list),
-                )
+                .child(list)
                 // Fades where the column has more cards to scroll to.
                 .child(edges::scroll_fades(&scroll));
             strip = strip.child(
