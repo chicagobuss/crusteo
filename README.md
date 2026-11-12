@@ -126,15 +126,17 @@ Paseo's apps and Paseo's CLI all connect to it.
 - **Providers:** Claude Code, Codex, Cursor, OpenCode, Gemini CLI, pi and Antigravity, with your
   own installs and sign-ins of each. Ones that can't run on a host say why instead of being offered.
 - **What Paseo's daemon does:** workspaces and git worktrees, labels, images both ways,
-  notifications and push, schedules, and the agent tools that let one agent start, watch and
-  message others (for every provider, not only Claude).
+  notifications and push, schedules, workspace terminals, importing Claude Code and Codex
+  sessions, and the agent tools that let one agent start, watch and message others (for every
+  provider, not only Claude).
 - **Beside Paseo or instead of it.** By default it uses its own port (`127.0.0.1:6797`; Paseo uses
   6767) and its own state (`~/.burrow`). To replace Paseo on a host, keeping the host's identity,
   `burrow import-paseo` brings over its projects, workspaces, labels and agents, which carry on their
   sessions; it only ever reads `~/.paseo`. The [install guide](docs/burrow/install.md) covers
   both, upgrades, and going back.
-- **Not yet:** terminals for Paseo's apps, diffs, file editing, voice, Paseo's connected hosts and
-  relay pairing, and passwords, so keep Burrow on loopback or a locked-down network such as a VPN.
+- **Not yet:** diffs, file editing, voice, Paseo's connected hosts and relay pairing, terminals
+  that outlive a restart of Burrow, and passwords, so keep Burrow on loopback or a locked-down
+  network such as a VPN.
 
 Try it with a placeholder project and agent:
 
@@ -400,7 +402,6 @@ cargo fmt --check
 
 ## Not done yet
 
-- A light theme for the desktop app (coming next; Skiff already follows your system's).
 - In the desktop app: the file explorer, diffs, split panes, the browser panel, a screen for
   schedules, drag-to-reorder in the sidebar, project icons.
 - In Burrow: what's listed [above](#burrow).
