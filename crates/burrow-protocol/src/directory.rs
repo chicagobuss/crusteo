@@ -8,7 +8,7 @@
 
 use std::collections::BTreeMap;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
 /// `AgentSnapshotPayloadSchema`. Always sent whole; there is no patch form.
@@ -57,6 +57,26 @@ pub struct AgentSnapshot {
     pub attention_timestamp: Option<String>,
     #[serde(default)]
     pub archived_at: Option<String>,
+    /// Burrow's, not Paseo's: the agent's latest reply as a notification
+    /// previews it (markdown stripped, at most 220 characters), so lists and
+    /// searches have it with the agent instead of reading each timeline.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_reply_preview: Option<String>,
+    /// Burrow's, not Paseo's: the CLI the agent's process runs while it has
+    /// one. Paseo's clients drop it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cli: Option<AgentCli>,
+}
+
+/// The CLI an agent's process runs, and whether the host has a newer one
+/// that the agent switches to at its next prompt.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentCli {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    #[serde(default)]
+    pub newer_installed: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -179,7 +199,10 @@ pub enum WorkspaceKind {
 }
 
 /// The sidebar status bucket (`deriveAgentStateBucket`, aggregated per workspace).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// Declared highest priority first, so the derived order is Paseo's priority
+/// order. Clients import it as `Bucket`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StateBucket {
     NeedsInput,
@@ -187,6 +210,50 @@ pub enum StateBucket {
     Running,
     Attention,
     Done,
+}
+
+impl StateBucket {
+    /// Reads a status name leniently: anything unknown is `Done`, so a
+    /// daemon that grows a bucket does not break an older client.
+    pub fn parse(status: &str) -> Self {
+        match status {
+            "needs_input" => StateBucket::NeedsInput,
+            "failed" => StateBucket::Failed,
+            "running" => StateBucket::Running,
+            "attention" => StateBucket::Attention,
+            _ => StateBucket::Done,
+        }
+    }
+
+    /// The wire name [`StateBucket::parse`] reads back.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            StateBucket::NeedsInput => "needs_input",
+            StateBucket::Failed => "failed",
+            StateBucket::Running => "running",
+            StateBucket::Attention => "attention",
+            StateBucket::Done => "done",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            StateBucket::NeedsInput => "Needs input",
+            StateBucket::Failed => "Failed",
+            StateBucket::Running => "Working",
+            StateBucket::Attention => "Ready to review",
+            StateBucket::Done => "Done",
+        }
+    }
+
+    /// Sidebar status-group order.
+    pub const GROUP_ORDER: [StateBucket; 5] = [
+        StateBucket::NeedsInput,
+        StateBucket::Failed,
+        StateBucket::Attention,
+        StateBucket::Running,
+        StateBucket::Done,
+    ];
 }
 
 /// `WorkspaceProjectDescriptorPayloadSchema`: a project row, used by
@@ -266,8 +333,10 @@ pub struct AgentEntry {
     pub sync_seq: Option<u64>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
+/// Both directions read it: the daemon writes every field, and a client
+/// tolerates any it is missing.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
 pub struct PageInfo {
     pub next_cursor: Option<String>,
     pub prev_cursor: Option<String>,
@@ -275,25 +344,41 @@ pub struct PageInfo {
 }
 
 /// `DirectorySyncMetadataSchema`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
+///
+/// The daemon writes every field. A client reads it leniently, because the
+/// fleet runs several daemon versions: a missing field takes its default, an
+/// unknown `mode` is a snapshot and an unknown `reason` is absent.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
 pub struct SyncMeta {
     pub generation: String,
     pub head_seq: u64,
+    #[serde(deserialize_with = "lenient_mode")]
     pub mode: SyncMode,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "lenient_reason"
+    )]
     pub reason: Option<SyncReason>,
     pub removals: Vec<SyncRemoval>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+impl SyncMeta {
+    /// Whether the read replaces the client's state rather than amending it.
+    pub fn is_snapshot(&self) -> bool {
+        self.mode != SyncMode::Changes
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SyncMode {
+    #[default]
     Snapshot,
     Changes,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SyncReason {
     NoCursor,
@@ -302,9 +387,29 @@ pub enum SyncReason {
     ChangesTooLarge,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+/// Anything but `changes` is a snapshot, the safe reading of a mode this
+/// build does not know.
+fn lenient_mode<'de, D: Deserializer<'de>>(deserializer: D) -> Result<SyncMode, D::Error> {
+    Ok(match String::deserialize(deserializer)?.as_str() {
+        "changes" => SyncMode::Changes,
+        _ => SyncMode::Snapshot,
+    })
+}
+
+fn lenient_reason<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<SyncReason>, D::Error> {
+    let reason = Option::<String>::deserialize(deserializer)?;
+    Ok(reason.and_then(|name| serde_json::from_value(Value::String(name)).ok()))
+}
+
+/// An entity the directory dropped. `name` is how Paseo 0.10 spelled `id`
+/// in label removals.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SyncRemoval {
+    #[serde(alias = "name")]
     pub id: String,
+    #[serde(default)]
     pub seq: u64,
 }
 
@@ -316,6 +421,16 @@ pub struct SyncCursor {
     pub generation: Option<String>,
     #[serde(default)]
     pub after_seq: Option<u64>,
+}
+
+/// The cursor a client keeps from a directory read and presents on the next:
+/// `{generation, afterSeq}`. [`SyncCursor`] is the daemon's lenient reading of
+/// the same object, where either half may be missing.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Cursor {
+    pub generation: String,
+    pub after_seq: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -486,5 +601,112 @@ mod tests {
         assert_eq!(value["isGit"], false);
         assert!(value["worktreeRoot"].is_null());
         assert!(value.as_object().unwrap().contains_key("mainRepoRoot"));
+    }
+
+    #[test]
+    fn sync_meta_round_trips_what_the_daemon_writes() {
+        let meta = SyncMeta {
+            generation: "g1".into(),
+            head_seq: 7,
+            mode: SyncMode::Changes,
+            reason: Some(SyncReason::CursorExpired),
+            removals: vec![SyncRemoval {
+                id: "a".into(),
+                seq: 6,
+            }],
+        };
+        let wire = serde_json::to_value(&meta).unwrap();
+        assert_eq!(
+            wire,
+            json!({
+                "generation": "g1", "headSeq": 7, "mode": "changes",
+                "reason": "cursor_expired", "removals": [{"id": "a", "seq": 6}],
+            })
+        );
+        assert_eq!(serde_json::from_value::<SyncMeta>(wire).unwrap(), meta);
+        assert!(!meta.is_snapshot());
+        let bare = SyncMeta::default();
+        assert_eq!(
+            serde_json::to_value(bare).unwrap(),
+            json!({"generation": "", "headSeq": 0, "mode": "snapshot", "removals": []}),
+            "an absent reason is left out"
+        );
+    }
+
+    #[test]
+    fn sync_meta_reads_older_and_newer_daemons() {
+        let meta: SyncMeta = serde_json::from_value(json!({})).unwrap();
+        assert!(meta.is_snapshot(), "no mode is a snapshot");
+        let meta: SyncMeta = serde_json::from_value(json!({
+            "generation": "g", "headSeq": 3, "mode": "delta", "reason": "from_the_future",
+            "removals": [{"name": "label-a"}, {"id": "b", "seq": 2}], "novel": true,
+        }))
+        .unwrap();
+        assert!(meta.is_snapshot(), "an unknown mode is a snapshot");
+        assert_eq!(meta.reason, None);
+        assert_eq!(
+            meta.removals,
+            vec![
+                SyncRemoval {
+                    id: "label-a".into(),
+                    seq: 0
+                },
+                SyncRemoval {
+                    id: "b".into(),
+                    seq: 2
+                },
+            ]
+        );
+        let meta: SyncMeta =
+            serde_json::from_value(json!({"mode": "changes", "reason": null})).unwrap();
+        assert!(!meta.is_snapshot());
+    }
+
+    #[test]
+    fn page_info_reads_what_it_writes_and_tolerates_less() {
+        let page = PageInfo {
+            next_cursor: Some("n".into()),
+            prev_cursor: None,
+            has_more: true,
+        };
+        let wire = serde_json::to_value(&page).unwrap();
+        assert_eq!(
+            wire,
+            json!({"nextCursor": "n", "prevCursor": null, "hasMore": true})
+        );
+        assert_eq!(serde_json::from_value::<PageInfo>(wire).unwrap(), page);
+        let thin: PageInfo = serde_json::from_value(json!({"hasMore": true})).unwrap();
+        assert!(thin.has_more && thin.next_cursor.is_none());
+    }
+
+    #[test]
+    fn cursor_is_the_object_the_daemon_reads_as_a_sync_cursor() {
+        let cursor = Cursor {
+            generation: "g".into(),
+            after_seq: 9,
+        };
+        let wire = serde_json::to_value(&cursor).unwrap();
+        assert_eq!(wire, json!({"generation": "g", "afterSeq": 9}));
+        assert_eq!(
+            serde_json::from_value::<SyncCursor>(wire).unwrap(),
+            SyncCursor {
+                generation: Some("g".into()),
+                after_seq: Some(9)
+            }
+        );
+    }
+
+    #[test]
+    fn state_bucket_names_and_order_agree() {
+        for bucket in StateBucket::GROUP_ORDER {
+            assert_eq!(StateBucket::parse(bucket.as_str()), bucket);
+            assert_eq!(
+                serde_json::to_value(bucket).unwrap(),
+                json!(bucket.as_str())
+            );
+        }
+        assert_eq!(StateBucket::parse("something_new"), StateBucket::Done);
+        assert!(StateBucket::NeedsInput < StateBucket::Failed);
+        assert!(StateBucket::Attention < StateBucket::Done);
     }
 }

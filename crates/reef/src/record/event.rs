@@ -157,6 +157,20 @@ pub fn base(context: &Context, at: &str, kind: &str, turn: &Option<String>) -> V
     })
 }
 
+/// The record that says an agent was deleted: the sink is to forget
+/// everything it holds for it. Only who, no content.
+pub fn forget(host: &str, agent: &str) -> Value {
+    json!({
+        "v": VERSION,
+        "id": format!("{host}/{agent}/forget"),
+        "source": source(),
+        "kind": "forget",
+        "time": fleet::clock::now_iso(),
+        "host": host,
+        "agent": { "id": agent },
+    })
+}
+
 fn without(value: &Value, field: &str) -> Value {
     let mut value = value.clone();
     if let Some(fields) = value.as_object_mut() {

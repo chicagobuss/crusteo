@@ -18,15 +18,18 @@ use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::time::{Duration, Instant};
 
-use fleet::state_list::StateRow;
+use fleet::state_list::{Sort, StateRow};
 use fleet::{Bucket, HostId};
+use gpui_kit::AppContext as _;
 use gpui_kit::component::Sizable as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::scroll::Scrollbar;
 use gpui_kit::gpui::{
-    AnyElement, App, ClickEvent, Context, InteractiveElement, IntoElement, ParentElement, Render,
-    StatefulInteractiveElement, Styled, UniformListScrollHandle, Window, div, point, px,
-    uniform_list,
+    AnyElement, App, ClickEvent, Context, Entity, InteractiveElement, IntoElement, KeyDownEvent,
+    ParentElement, Render, StatefulInteractiveElement, Styled, Subscription,
+    UniformListScrollHandle, Window, div, point, px, uniform_list,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 
@@ -113,6 +116,14 @@ pub struct StateList {
     replies: HashMap<Key, Reply>,
     reading: HashSet<Key>,
     tick_queued: bool,
+    /// The docked History's Grep box: only rows holding every word typed
+    /// show. None in the slide-in pane's lists.
+    grep: Option<Entity<InputState>>,
+    _grep_events: Option<Subscription>,
+    /// How the rows were last ordered (the docked History's Sort).
+    sorted_by: Sort,
+    /// Rows before the grep, for "12 of 136".
+    total: usize,
 }
 
 impl StateList {
@@ -121,11 +132,59 @@ impl StateList {
         Self::with(core, false, cx)
     }
 
-    /// The docked History.
-    pub fn docked(core: Core, cx: &mut Context<Self>) -> Self {
+    /// The docked History, with its Grep box and Sort.
+    pub fn docked(core: Core, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let mut list = Self::with(core, true, cx);
+        let grep =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Grep names, labels, replies…"));
+        list._grep_events =
+            Some(
+                cx.subscribe_in(&grep, window, |this, _, event: &InputEvent, _, cx| {
+                    if let InputEvent::Change = event {
+                        this.rebuild(cx);
+                    }
+                }),
+            );
+        list.grep = Some(grep);
         list.follow_nav(cx);
         list
+    }
+
+    /// Puts the cursor in the Grep box (Ctrl+G), its text selected.
+    pub fn focus_grep(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(grep) = &self.grep {
+            grep.update(cx, |input, cx| {
+                input.focus(window, cx);
+                input.select_all(window, cx);
+            });
+        }
+    }
+
+    /// The words typed in the Grep box, if any.
+    fn grep_terms(&self, cx: &App) -> Vec<String> {
+        (self.grep.as_ref())
+            .map(|grep| fleet::state_list::grep_terms(&grep.read(cx).value()))
+            .unwrap_or_default()
+    }
+
+    /// Whether a row holds every word: its own fields, its host's name, and
+    /// a reply read for it (from a daemon that sends no preview).
+    fn matches(&self, row: &StateRow, terms: &[String]) -> bool {
+        let mut text = row.grep_text();
+        if let Some(name) = self.host_names.get(&row.host) {
+            text.push('\n');
+            text.push_str(name);
+        }
+        let key = (row.host.clone(), row.agent_id.clone());
+        if let Some(line) = self
+            .replies
+            .get(&key)
+            .and_then(|reply| reply.line.as_deref())
+        {
+            text.push('\n');
+            text.push_str(line);
+        }
+        fleet::state_list::grep_matches(&text, terms)
     }
 
     fn with(core: Core, docked: bool, cx: &mut Context<Self>) -> Self {
@@ -146,6 +205,10 @@ impl StateList {
             replies: HashMap::new(),
             reading: HashSet::new(),
             tick_queued: false,
+            grep: None,
+            _grep_events: None,
+            sorted_by: Sort::default(),
+            total: 0,
         }
     }
 
@@ -158,7 +221,15 @@ impl StateList {
             nav.pane.and_then(|(pane, _)| pane.listing())
         };
         let wanted = listing.map(|listing| (listing, !nav.show_background()));
+        let sort = if self.docked {
+            nav.history_sort
+        } else {
+            Sort::Recent
+        };
         if wanted == self.shown {
+            if sort != self.sorted_by {
+                self.rebuild(cx);
+            }
             return;
         }
         let switched = wanted.map(|(state, _)| state) != self.shown.map(|(state, _)| state);
@@ -212,7 +283,7 @@ impl StateList {
             return;
         };
         let store = self.core.store.read(cx);
-        let rows = fleet::state_list::rows(&store.fleet, listing, hide);
+        let mut rows = fleet::state_list::rows(&store.fleet, listing, hide);
         self.built = Some((store.revision, Instant::now()));
         // Hosts by the names the rest of the app shows, not their ids.
         let names: HashMap<HostId, String> = (store.fleet.hosts.iter())
@@ -225,6 +296,23 @@ impl StateList {
             .collect();
         if names != self.host_names {
             self.host_names = names;
+            cx.notify();
+        }
+        // The docked History's Grep and Sort. The rows come newest change
+        // first, which is Sort's Recent.
+        let total = rows.len();
+        if self.docked {
+            let terms = self.grep_terms(cx);
+            if !terms.is_empty() {
+                rows.retain(|row| self.matches(row, &terms));
+            }
+            self.sorted_by = self.core.nav.read(cx).history_sort;
+            if self.sorted_by != Sort::Recent {
+                fleet::state_list::sort(&mut rows, self.sorted_by);
+            }
+        }
+        if total != self.total {
+            self.total = total;
             cx.notify();
         }
         if rows == self.rows {
@@ -250,8 +338,9 @@ impl StateList {
             let Some(row) = self.rows.get(ix) else {
                 return;
             };
-            // What it waits on or failed with is its line already.
-            if row.detail.is_some() {
+            // What it waits on or failed with is its line already, and a
+            // daemon that sends the reply with the agent needs no read.
+            if row.detail.is_some() || row.reply.is_some() {
                 continue;
             }
             let key = (row.host.clone(), row.agent_id.clone());
@@ -284,6 +373,10 @@ impl StateList {
                             read_at: Instant::now(),
                         },
                     );
+                    // A reply read may be what a grep was looking for.
+                    if !this.grep_terms(cx).is_empty() {
+                        this.rebuild(cx);
+                    }
                     cx.notify();
                 });
             })
@@ -292,10 +385,13 @@ impl StateList {
     }
 
     /// What a row is about: what it waits on or failed with, else its
-    /// latest reply as last read.
+    /// latest reply, as its daemon sent it or as last read.
     fn about(&self, row: &StateRow) -> Option<String> {
         if let Some(detail) = &row.detail {
             return Some(detail.clone());
+        }
+        if let Some(reply) = &row.reply {
+            return Some(fleet::preview::first_line(reply)).filter(|line| !line.is_empty());
         }
         let key = (row.host.clone(), row.agent_id.clone());
         self.replies.get(&key).and_then(|reply| reply.line.clone())
@@ -310,7 +406,8 @@ impl StateList {
         let about = self.about(row);
         // Not read yet, or being read: its line is on its way.
         let key = (row.host.clone(), row.agent_id.clone());
-        let reading = self.reading.contains(&key) || !self.replies.contains_key(&key);
+        let reading = row.reply.is_none()
+            && (self.reading.contains(&key) || !self.replies.contains_key(&key));
         let (about, about_color) = match about {
             Some(line) => (
                 line,
@@ -429,7 +526,83 @@ impl StateList {
             .into_any_element()
     }
 
-    fn header(&self, listing: Option<Bucket>) -> AnyElement {
+    /// The docked History's tools, in its header after the count: Grep
+    /// and Sort.
+    fn tools(&self, cx: &mut Context<Self>) -> Option<[AnyElement; 2]> {
+        let grep = self.grep.clone()?;
+        let p = palette();
+        let nav = self.core.nav.clone();
+        let current = self.sorted_by;
+        let sort = Button::new("history-sort")
+            .ghost()
+            .xsmall()
+            .tooltip("Sort History")
+            .child(current.label())
+            .child(ui::icon("chevron-down", 12., p.muted))
+            .dropdown_menu(move |mut menu, _, _| {
+                for sort in Sort::ALL {
+                    let nav = nav.clone();
+                    let label = if sort == current {
+                        format!("✓ {}", sort.label())
+                    } else {
+                        sort.label().to_string()
+                    };
+                    menu = menu.item(PopupMenuItem::new(label).on_click(move |_, _, cx| {
+                        nav.update(cx, |nav, cx| nav.set_history_sort(sort, cx));
+                    }));
+                }
+                menu
+            });
+        let typed = !grep.read(cx).value().is_empty();
+        let field = div()
+            .id("history-grep")
+            .flex_1()
+            .min_w(px(0.))
+            .h(px(26.))
+            .px(px(8.))
+            .flex()
+            .items_center()
+            .gap(px(6.))
+            .rounded(px(6.))
+            .border_1()
+            .border_color(p.border)
+            .bg(p.surface1)
+            // Escape empties the box; a key press marked handled never
+            // becomes typed text on Windows, so only Escape is taken.
+            .capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                if event.keystroke.key != "escape" {
+                    return;
+                }
+                if let Some(grep) = &this.grep {
+                    grep.update(cx, |input, cx| input.set_value("", window, cx));
+                }
+                cx.stop_propagation();
+            }))
+            .child(ui::icon("search", 13., p.muted))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .child(Input::new(&grep).appearance(false)),
+            )
+            .when(typed, |field| {
+                field.child(
+                    Button::new("history-grep-clear")
+                        .icon(gpui_kit::component::Icon::empty().path("icons/x.svg"))
+                        .ghost()
+                        .xsmall()
+                        .tooltip("Clear (Esc)")
+                        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                            if let Some(grep) = &this.grep {
+                                grep.update(cx, |input, cx| input.set_value("", window, cx));
+                            }
+                        })),
+                )
+            });
+        Some([field.into_any_element(), sort.into_any_element()])
+    }
+
+    fn header(&self, listing: Option<Bucket>, tools: Option<[AnyElement; 2]>) -> AnyElement {
         let p = palette();
         let nav = self.core.nav.clone();
         let docked = self.docked;
@@ -456,12 +629,20 @@ impl StateList {
             "Close (Esc)"
         })
         .on_click(close);
+        // "12 of 136" while a grep leaves some out.
+        let count = if self.rows.len() == self.total {
+            self.rows.len().to_string()
+        } else {
+            format!("{} of {}", self.rows.len(), self.total)
+        };
+        // The count takes the spare room, unless the Grep box is there to.
         let count = div()
-            .flex_1()
+            .when(tools.is_none(), |el| el.flex_1())
+            .flex_shrink_0()
             .min_w(px(0.))
             .text_size(sz::sm())
             .text_color(p.extra_muted)
-            .child(self.rows.len().to_string());
+            .child(count);
         let header = div()
             .h(px(40.))
             .flex_shrink_0()
@@ -481,6 +662,7 @@ impl StateList {
                         .child("History"),
                 )
                 .child(count)
+                .children(tools.into_iter().flatten())
                 .child(close)
                 .into_any_element();
         };
@@ -545,7 +727,12 @@ impl Render for StateList {
             return div().into_any_element();
         };
         self.keep_ticking(cx);
-        let header = self.header(listing);
+        let tools = if listing.is_none() {
+            self.tools(cx)
+        } else {
+            None
+        };
+        let header = self.header(listing, tools);
         let body = if self.rows.is_empty() {
             div()
                 .flex_1()
@@ -554,6 +741,8 @@ impl Render for StateList {
                 .text_color(p.extra_muted)
                 .child(if listing.is_some() {
                     "None right now."
+                } else if self.total > 0 {
+                    "No agents match."
                 } else {
                     "No agents yet."
                 })
@@ -609,6 +798,10 @@ mod tests {
             changed_at: None,
             background: false,
             detail: None,
+            reply: None,
+            labels: Vec::new(),
+            created_at: None,
+            prompted_at: None,
         }
     }
 

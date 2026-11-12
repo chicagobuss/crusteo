@@ -31,6 +31,8 @@ pub type Late = mpsc::UnboundedSender<Value>;
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ClientShape {
     pub compact_provider_snapshots: bool,
+    /// Terminal restores go as replay chunks (`terminal_chunked_replay`).
+    pub chunked_terminal_replay: bool,
 }
 
 /// The kinds this module answers.
@@ -301,6 +303,42 @@ struct WaitRequest {
     agent_id: String,
     #[serde(default)]
     timeout_ms: Option<u64>,
+    /// Burrow's: the turn to wait for (a send's `turnId`), not whichever
+    /// runs when this one ends.
+    #[serde(default)]
+    turn_id: Option<String>,
+    /// Burrow's: a queued prompt, whose own turn is the one to wait for.
+    #[serde(default)]
+    message_id: Option<String>,
+}
+
+/// `wait_for_finish_request`; with a `turnId`, the finish of that turn;
+/// with a queued prompt's `messageId`, of that prompt's turn, not of the
+/// one it waited behind.
+async fn wait_for(daemon: &Arc<Daemon>, request: &WaitRequest) -> Value {
+    let Some(message_id) = request.message_id.as_deref() else {
+        let turn = request.turn_id.as_deref();
+        return agents::wait_for_turn(daemon, &request.agent_id, turn, request.timeout_ms).await;
+    };
+    let agent_id = daemon
+        .read(|store| store.find_agent(&request.agent_id).map(|a| a.id.clone()))
+        .unwrap_or_else(|| request.agent_id.clone());
+    let (waited, left) =
+        agents::wait_started_within(daemon, &agent_id, message_id, request.timeout_ms).await;
+    match waited {
+        agents::Waited::Started { turn } => {
+            agents::wait_for_turn(daemon, &agent_id, turn.as_deref(), left).await
+        }
+        agents::Waited::TimedOut => {
+            let agent = daemon.read(|store| store.agent(&agent_id).cloned());
+            json!({"status": "timeout", "final": agent, "error": null, "lastMessage": null})
+        }
+        agents::Waited::Dropped => {
+            let agent = daemon.read(|store| store.agent(&agent_id).cloned());
+            json!({"status": "error", "final": agent, "lastMessage": null,
+                   "error": "The queued prompt was dropped: the agent was stopped before it got to it"})
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -423,6 +461,7 @@ pub fn handle(
             spawn(Box::pin(async move {
                 // As Paseo: the mode changes first, and a mode the agent
                 // cannot take fails the send.
+                agents::until_provider_of(&daemon, &request.agent_id).await;
                 let switched = match request.session_mode.as_deref().filter(|m| !m.is_empty()) {
                     Some(mode) => {
                         agents::configure(&daemon, &request.agent_id, Setting::Mode(mode.into()))
@@ -447,23 +486,32 @@ pub fn handle(
                     request.source_agent_id.as_deref(),
                 )
                 .await;
-                let (agent_id, error) = match result {
-                    Ok(id) => (id, Value::Null),
-                    Err(error) => (request.agent_id, error.into()),
+                // Beyond Paseo's fields: what became of it, and the message
+                // id to wait on when it was queued.
+                let payload = match result {
+                    Ok(sent) => {
+                        let mut payload = json!({"requestId": request.request_id,
+                            "agentId": sent.agent_id, "accepted": true, "error": null,
+                            "disposition": sent.delivery.name(), "messageId": sent.message_id});
+                        if let agents::Delivery::Queued { position } = sent.delivery {
+                            payload["queuePosition"] = position.into();
+                        }
+                        if let Some(turn) = sent.turn_id {
+                            payload["turnId"] = turn.into();
+                        }
+                        payload
+                    }
+                    Err(error) => json!({"requestId": request.request_id,
+                        "agentId": request.agent_id, "accepted": false, "error": error}),
                 };
-                vec![session(
-                    "send_agent_message_response",
-                    json!({"requestId": request.request_id, "agentId": agent_id,
-                           "accepted": error.is_null(), "error": error}),
-                )]
+                vec![session("send_agent_message_response", payload)]
             }))
         }
         // `paseo send`, `paseo run` and `paseo wait` wait with it.
         "wait_for_finish_request" => {
             let request: WaitRequest = parse(message)?;
             spawn(Box::pin(async move {
-                let mut payload =
-                    agents::wait_for_finish(&daemon, &request.agent_id, request.timeout_ms).await;
+                let mut payload = wait_for(&daemon, &request).await;
                 payload["requestId"] = request.request_id.into();
                 vec![session("wait_for_finish_response", payload)]
             }))
@@ -607,42 +655,36 @@ pub fn handle(
         }
         "set_agent_mode_request" => {
             let request: SetMode = parse(message)?;
-            let result =
-                agents::configure(&daemon, &request.agent_id, Setting::Mode(request.mode_id));
-            Some(vec![accepted_reply(
-                "set_agent_mode_response",
-                &request.request_id,
-                &request.agent_id,
-                result,
-                true,
-            )])
+            let change = Change {
+                reply: "set_agent_mode_response",
+                request_id: request.request_id,
+                agent_id: request.agent_id,
+                setting: Setting::Mode(request.mode_id),
+                with_notice: true,
+            };
+            change.answer(daemon, spawn)
         }
         "set_agent_model_request" => {
             let request: SetModel = parse(message)?;
-            let result =
-                agents::configure(&daemon, &request.agent_id, Setting::Model(request.model_id));
-            Some(vec![accepted_reply(
-                "set_agent_model_response",
-                &request.request_id,
-                &request.agent_id,
-                result,
-                false,
-            )])
+            let change = Change {
+                reply: "set_agent_model_response",
+                request_id: request.request_id,
+                agent_id: request.agent_id,
+                setting: Setting::Model(request.model_id),
+                with_notice: false,
+            };
+            change.answer(daemon, spawn)
         }
         "set_agent_thinking_request" => {
             let request: SetThinking = parse(message)?;
-            let result = agents::configure(
-                &daemon,
-                &request.agent_id,
-                Setting::Thinking(request.thinking_option_id),
-            );
-            Some(vec![accepted_reply(
-                "set_agent_thinking_response",
-                &request.request_id,
-                &request.agent_id,
-                result,
-                true,
-            )])
+            let change = Change {
+                reply: "set_agent_thinking_response",
+                request_id: request.request_id,
+                agent_id: request.agent_id,
+                setting: Setting::Thinking(request.thinking_option_id),
+                with_notice: true,
+            };
+            change.answer(daemon, spawn)
         }
         "get_providers_snapshot_request" => {
             let request: Plain = parse(message)?;
@@ -672,6 +714,47 @@ pub fn handle(
             )])
         }
         _ => None,
+    }
+}
+
+/// A mode, model or thinking change and how it is answered.
+struct Change {
+    reply: &'static str,
+    request_id: String,
+    agent_id: String,
+    setting: Setting,
+    with_notice: bool,
+}
+
+impl Change {
+    /// Answered at once, or, while the providers are still being looked for
+    /// at startup, once the agent's provider is offered.
+    fn answer(
+        self,
+        daemon: Arc<Daemon>,
+        spawn: impl FnOnce(
+            std::pin::Pin<Box<dyn std::future::Future<Output = Vec<Value>> + Send>>,
+        ) -> Option<Vec<Value>>,
+    ) -> Option<Vec<Value>> {
+        if daemon.agents.discovering() {
+            return spawn(Box::pin(async move {
+                agents::until_provider_of(&daemon, &self.agent_id).await;
+                self.apply(&daemon)
+            }));
+        }
+        Some(self.apply(&daemon))
+    }
+
+    fn apply(self, daemon: &Arc<Daemon>) -> Vec<Value> {
+        let result = agents::configure(daemon, &self.agent_id, self.setting);
+        let reply = accepted_reply(
+            self.reply,
+            &self.request_id,
+            &self.agent_id,
+            result,
+            self.with_notice,
+        );
+        vec![reply]
     }
 }
 

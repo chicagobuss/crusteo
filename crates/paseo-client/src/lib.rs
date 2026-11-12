@@ -12,7 +12,7 @@
 mod connection;
 mod events;
 pub mod proto;
-pub mod terminal;
+pub mod ssh;
 
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
@@ -20,6 +20,7 @@ use std::time::Duration;
 use serde_json::Value;
 use tokio::sync::{mpsc, oneshot};
 
+pub use burrow_protocol::{PROTOCOL_VERSION, routing, terminal};
 pub use connection::ConnState;
 pub use events::EventReceiver;
 pub use proto::ServerInfo;
@@ -70,16 +71,16 @@ impl std::fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
-/// The version of the daemon protocol this client speaks, sent in `hello`.
-pub const PROTOCOL_VERSION: u32 = 1;
-
 #[derive(Debug, Clone)]
 pub struct Config {
-    /// `host:port`, `ws://…` or `wss://…`.
+    /// `host:port`, `ws://host:port`, or `ssh://[user@]host[:port][?daemonPort=N]`
+    /// to go through SSH ([`ssh`]).
     pub endpoint: String,
     pub client_id: String,
     pub app_version: String,
     pub password: Option<String>,
+    /// The ssh program for an `ssh://` endpoint. `ssh` on PATH when unset.
+    pub ssh_program: Option<std::path::PathBuf>,
 }
 
 impl Config {
@@ -89,10 +90,16 @@ impl Config {
             client_id: client_id.into(),
             app_version: env!("CARGO_PKG_VERSION").into(),
             password: None,
+            ssh_program: None,
         }
     }
 
+    /// The WebSocket URL the handshake asks for. For an `ssh://` endpoint,
+    /// the daemon on the far host's loopback.
     pub fn url(&self) -> String {
+        if let Some(Ok(target)) = ssh::Target::parse(&self.endpoint) {
+            return target.url();
+        }
         let endpoint = self.endpoint.trim().trim_end_matches('/');
         if endpoint.starts_with("ws://") || endpoint.starts_with("wss://") {
             if endpoint.ends_with("/ws") {

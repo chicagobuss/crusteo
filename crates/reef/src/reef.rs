@@ -49,6 +49,11 @@ pub(crate) enum FromServer {
         edit: Option<Value>,
         reply: tokio::sync::oneshot::Sender<Value>,
     },
+    /// Reef's settings, for `/api/settings`, after an edit if one came.
+    Settings {
+        edit: Option<Value>,
+        reply: tokio::sync::oneshot::Sender<Value>,
+    },
 }
 
 /// A running Reef.
@@ -101,6 +106,7 @@ pub async fn start(config: ReefConfig) -> std::io::Result<ReefHandle> {
         let mut upstream =
             Upstream::new(config.hosts, config.client_id, events_tx, apply_tx.clone());
         upstream.usage_every = limits.usage_ask;
+        upstream.cli.debounce = limits.updates;
         // Recording, from record.json in the data dir.
         let record_dir = config.record_dir.as_deref().or(config.data_dir.as_deref());
         upstream.record = crate::record::Recorder::new(record_dir, apply_tx);
@@ -112,13 +118,16 @@ pub async fn start(config: ReefConfig) -> std::io::Result<ReefHandle> {
                 .map(catalog::load)
                 .unwrap_or_default(),
         );
-        upstream.connect_all();
         let hosts_file = config.hosts_file;
-        let settings_path = config.data_dir.map(|dir| dir.join(settings::FILE));
+        let settings_path = config.data_dir.as_ref().map(|dir| dir.join(settings::FILE));
         let settings = settings_path
             .as_deref()
             .map(Settings::load)
             .unwrap_or_default();
+        // Before any host connects, so each is told whether Reef routes.
+        upstream.set_routing(settings.agent_routing);
+        upstream.open_routes(config.data_dir.as_deref());
+        upstream.connect_all();
         let mut reef = State {
             up: upstream,
             phones: HashMap::new(),
@@ -243,7 +252,13 @@ fn new_host(name: &str, body: &Value) -> Result<HostConfig, &'static str> {
     let endpoint = body["endpoint"].as_str().unwrap_or_default().trim();
     config::check_host_name(name)?;
     if endpoint.is_empty() || endpoint.len() > 256 || endpoint.contains(char::is_whitespace) {
-        return Err("A host needs an address, like 192.0.2.20 or myhost:6767");
+        return Err("A host needs an address, like 192.0.2.20, myhost:6767 or ssh://user@myhost");
+    }
+    // Through ssh, from Reef's machine, with its keys and ~/.ssh/config.
+    if let Some(target) = paseo_client::ssh::Target::parse(endpoint) {
+        target.map_err(|_| {
+            "That ssh:// address is not one Reef can use: ssh://[user@]host[:port][?daemonPort=N]"
+        })?;
     }
     let endpoint = if endpoint.contains(':') {
         endpoint.to_string()
@@ -365,6 +380,12 @@ impl State {
         usage.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut record = tokio::time::interval(self.limits.record);
         record.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        // CLI upgrades and new models are told once they have gathered.
+        let mut updates = tokio::time::interval(self.limits.updates.clamp(
+            std::time::Duration::from_millis(50),
+            std::time::Duration::from_secs(5),
+        ));
+        updates.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             tokio::select! {
                 Some((host, generation, event)) = events.recv() => {
@@ -379,6 +400,7 @@ impl State {
                     self.up.dirty_usage |= !self.up.usage.is_empty();
                 }
                 _ = record.tick() => self.up.record_tick(),
+                _ = updates.tick() => self.tell_updates(),
                 else => break,
             }
             self.deliver();
@@ -405,6 +427,37 @@ impl State {
         }
     }
 
+    /// Tells phones of the CLI upgrades and models that have gathered
+    /// long enough ([fleet::cli_watch]): one notice per version, sent
+    /// again under the same id as more hosts catch up.
+    fn tell_updates(&mut self) {
+        let notices = self.up.cli.flush(std::time::Instant::now());
+        if notices.is_empty() {
+            return;
+        }
+        self.up.dirty_fleet = true;
+        if !self.settings.notify_updates {
+            return;
+        }
+        for notice in notices {
+            self.broadcast(&json!({
+                "type": "notification",
+                "id": notice.id,
+                "kind": notice.kind.as_str(),
+                "state": "info",
+                "provider": notice.provider,
+                "title": notice.title,
+                "body": notice.body,
+                "version": notice.version,
+                "hosts_on": notice.hosts_on,
+                "hosts_total": notice.hosts_total,
+                "new_models": notice.new_models,
+                "gone_models": notice.gone_models,
+                "at": fleet::clock::now_iso(),
+            }));
+        }
+    }
+
     fn broadcast(&mut self, message: &Value) {
         let conns: Vec<u64> = self.phones.keys().copied().collect();
         for conn in conns {
@@ -420,7 +473,7 @@ impl State {
                     "v": proto::VERSION,
                     "hub": { "version": env!("CARGO_PKG_VERSION"), "commit": env!("CRUSTEO_COMMIT") },
                     "device": device,
-                    "hosts": views::hosts(&self.up.fleet, &self.up.host_since()),
+                    "hosts": views::hosts(&self.up.fleet, &self.up.host_since(), &self.up.cli),
                     "labels": lists::label_colors(&self.up.fleet),
                     "settings": self.settings.public(),
                     "limits": {
@@ -463,7 +516,31 @@ impl State {
             FromServer::Labels { edit, reply } => {
                 let _ = reply.send(self.labels_request(edit));
             }
+            FromServer::Settings { edit, reply } => {
+                if let Some(edit) = edit {
+                    self.edit_settings(&edit);
+                }
+                let _ = reply.send(self.settings.public());
+            }
         }
+    }
+
+    /// Takes the settings a phone or desktop changed; others stay.
+    fn edit_settings(&mut self, body: &Value) {
+        if let Some(on) = body["notify_default"].as_bool() {
+            self.settings.notify_default = on;
+        }
+        if let Some(on) = body["show_background"].as_bool() {
+            self.settings.show_background = on;
+        }
+        if let Some(on) = body["notify_updates"].as_bool() {
+            self.settings.notify_updates = on;
+        }
+        if let Some(on) = body["agent_routing"].as_bool() {
+            self.settings.agent_routing = on;
+            self.up.set_routing(on);
+        }
+        self.settings_changed();
     }
 
     /// An image in a conversation Reef holds. Phones only learn keys
@@ -710,13 +787,7 @@ impl State {
         let text = |key: &str| body[key].as_str().map(str::to_string);
         let bad = |what: &str| (code::BAD_REQUEST, what.to_string());
         if action == "settings" {
-            if let Some(on) = body["notify_default"].as_bool() {
-                self.settings.notify_default = on;
-            }
-            if let Some(on) = body["show_background"].as_bool() {
-                self.settings.show_background = on;
-            }
-            self.settings_changed();
+            self.edit_settings(body);
             self.reply(conn, proto::result_ok(req.as_deref(), json!({})));
             return Ok(());
         }
@@ -819,6 +890,16 @@ impl State {
                 self.up.unqueue(&host, &agent, &id, reply);
             }
             "archive" => self.up.archive(&host, &agent, reply),
+            "rename" => {
+                let name = body["name"].as_str().unwrap_or_default().trim().to_string();
+                if name.is_empty() {
+                    return Err(bad("name is the agent's new name"));
+                }
+                if name.chars().count() > crate::upstream::NAME_MAX {
+                    return Err(bad("that name is too long"));
+                }
+                self.up.rename(&host, &agent, name, reply);
+            }
             "seen" => self.up.seen(&host, &agent, reply),
             "delete" => self.up.delete(&host, &agent, reply),
             "relabel" => {
@@ -1042,7 +1123,7 @@ impl State {
             // Hosts and the label colours travel together.
             let hosts = json!({
                 "type": "hosts",
-                "hosts": views::hosts(&self.up.fleet, &self.up.host_since()),
+                "hosts": views::hosts(&self.up.fleet, &self.up.host_since(), &self.up.cli),
                 "labels": lists::label_colors(&self.up.fleet),
             });
             if hosts != self.hosts_sent {

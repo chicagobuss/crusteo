@@ -15,7 +15,7 @@ and grew into three parts that work together, or each on its own alongside Paseo
 - **Crusteo**, a fast native desktop app, written in Rust with [GPUI](https://www.gpui.rs/), that
   connects to every daemon at once.
 
-> **Status: 0.1.0-beta.6. Early, and moving fast; expect rough edges.** Crusteo is not affiliated
+> **Status: 0.2.0. Early, and moving fast; expect rough edges.** Crusteo is not affiliated
 > with or endorsed by the Paseo project. Everything speaks Paseo's daemon protocol (version 1), so
 > Paseo's own apps and CLI work with Burrow, and Crusteo and Reef work with Paseo's daemons. See
 > [docs/burrow/compatibility.md](docs/burrow/compatibility.md) for exactly which versions were
@@ -57,6 +57,7 @@ itself; carrying its conversations through Reef too is planned.
 | ![Paseo layout](docs/screenshots/paseo.png) | The **Paseo** layout: sidebar, workspace tabs, live conversation and composer. |
 | ![Fleet layout](docs/screenshots/fleet.png) | **Fleet**: one column per host, most urgent agents first. |
 | ![Lanes with a window border](docs/screenshots/border.png) | An optional **window border** (Settings → Window), any width from 1 to 8 px and any colour. |
+| ![Lanes in the light theme](docs/screenshots/light.png) | A **light theme** (Settings → Window → Theme): Light, Dark, or Match system, which follows the system when it switches. |
 
 ## Skiff, on your phone
 
@@ -274,12 +275,15 @@ Crusteo can be extended in two ways:
   An extension implements `crusteo::extensions::Extension`, and every part is optional: toolbar
   items; commands with default keys (in the command palette, the help panel and the macOS menu
   bar); a panel beside the layout; results for find on the Lanes board; buttons in a workspace's
-  header; items for the Needs-you strip; and numbers for the usage gauges. The module docs in
-  `src/extensions/mod.rs` describe each.
+  header; items for the Needs-you strip; numbers for the usage gauges; and settings of its own.
+  A toolbar item can add entries to its right-click menu, such as one that opens its settings.
+  The module docs in `src/extensions/mod.rs` describe each.
 
 Extensions read their settings from `integrations.json` in the data directory, a flat object of
 strings (`crusteo::app::config::integration("key")`), or from environment variables. An
-extension with no settings stays off and makes no requests.
+extension with no settings stays off and makes no requests. Settings an extension offers (such
+as a service's address) show in Settings under Extensions, where they can be changed or cleared;
+crusteo saves them in `integrations.json` and tells the extension.
 
 ## Keyboard
 

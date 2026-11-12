@@ -304,7 +304,10 @@ impl Launcher for CliLauncher {
 /// Runs `binary args` to the end, within [`PROBE_TIMEOUT`]. Returns stdout,
 /// or why it failed.
 fn probe(binary: &Path, args: &[&str]) -> Result<String, String> {
-    let mut child = std::process::Command::new(binary)
+    let mut command = std::process::Command::new(binary);
+    // Its login is in the desktop keyring, as for a session.
+    burrow_provider::session_bus::apply(&mut command);
+    let mut child = command
         .args(args)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())

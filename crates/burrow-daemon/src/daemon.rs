@@ -50,6 +50,11 @@ pub struct Config {
     /// Where push notifications to Paseo's apps go (Expo's push service,
     /// [`crate::push::EXPO_PUSH_URL`]); `None` sends none.
     pub push_url: Option<String>,
+    /// Serve the agent tools to a client with no token, as a Burrow before
+    /// 0.2.0 did. Off: such a client is refused, and the one that may call
+    /// them as itself, rather than as an agent, sends the token Burrow keeps
+    /// in `<home>/mcp-token` ([`crate::mcp::TOKEN_FILE`]).
+    pub mcp_tokenless: bool,
 }
 
 /// Protocol timers. Paseo's values by default; tests shorten them.
@@ -97,6 +102,7 @@ impl Config {
             timing: Timing::default(),
             worktrees_root: None,
             push_url: None,
+            mcp_tokenless: false,
         }
     }
 
@@ -131,8 +137,19 @@ pub fn local_endpoint(bound: SocketAddr, also: &[SocketAddr]) -> String {
     bound.to_string()
 }
 
+/// What Burrow tells clients it is: `0.2.0-burrow` for a release, and
+/// `0.2.0-internal-<commit>-burrow` for a build of `next` between releases,
+/// whose commit is the only thing that tells two such builds apart.
 pub fn default_version() -> String {
-    format!("{}-burrow", env!("CARGO_PKG_VERSION"))
+    advertised(env!("CARGO_PKG_VERSION"), env!("CRUSTEO_COMMIT"))
+}
+
+fn advertised(version: &str, commit: &str) -> String {
+    if version.ends_with("-internal") {
+        format!("{version}-{commit}-burrow")
+    } else {
+        format!("{version}-burrow")
+    }
 }
 
 pub struct Daemon {
@@ -165,6 +182,13 @@ pub struct Daemon {
     pub mcp: crate::mcp::Mcp,
     /// Agents waiting to be told another finished.
     pub finish: crate::mcp::finish::Finish,
+    /// The Reef that routes to other hosts, when one does.
+    pub router: crate::router::Router,
+    /// Workspace terminals: their PTYs and who watches them.
+    pub terminals: crate::terminals::Terminals,
+    /// Set by `restart_server_request`: the program stops as on SIGTERM,
+    /// then starts itself again.
+    pub restart: tokio::sync::Notify,
 }
 
 impl Daemon {
@@ -207,6 +231,9 @@ impl Daemon {
             schedules,
             mcp: crate::mcp::Mcp::default(),
             finish,
+            router: crate::router::Router::default(),
+            terminals: crate::terminals::Terminals::default(),
+            restart: tokio::sync::Notify::new(),
         })
     }
 
@@ -226,6 +253,10 @@ impl Daemon {
     /// daemon on this home saves. The error says what could not be saved.
     pub fn close(&self) -> std::io::Result<()> {
         self.agents.shutdown();
+        // Terminals do not outlive Burrow (`terminalsSurviveRestart` is not
+        // advertised); a restart in place would otherwise leave their
+        // shells running with no one to read them.
+        self.terminals.kill_all();
         let writer = self
             .writer
             .lock()
@@ -272,5 +303,19 @@ impl Daemon {
     /// The change feed. Subscribe before reading a snapshot.
     pub fn changes(&self) -> broadcast::Receiver<Arc<StoreEvent>> {
         self.events.subscribe()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::advertised;
+
+    #[test]
+    fn an_internal_build_advertises_its_commit() {
+        assert_eq!(
+            advertised("0.2.0-internal", "3f6d979"),
+            "0.2.0-internal-3f6d979-burrow"
+        );
+        assert_eq!(advertised("0.2.0", "3f6d979"), "0.2.0-burrow");
     }
 }

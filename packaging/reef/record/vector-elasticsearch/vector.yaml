@@ -12,7 +12,9 @@ sources:
 
 transforms:
   # Each tool's input and output has its own shape; as JSON text they never
-  # clash in the index's mapping, and they stay searchable as text.
+  # clash in the index's mapping, and they stay searchable as text. `body`,
+  # the record's words in one string, is searched as it is (index-template.json
+  # maps it as text), so it needs no change.
   flatten:
     type: remap
     inputs: [reef]

@@ -177,6 +177,31 @@ impl FakeDaemon {
         patch_agent(&mut self.lock(), id, fields);
     }
 
+    /// Archives an agent as the daemon does: it leaves the active list, with a
+    /// `remove` to those watching it, and is still there to read by id.
+    pub fn archive_agent(&self, id: &str) {
+        let mut state = self.lock();
+        let Some(agent) = state.agents.get_mut(id) else {
+            return;
+        };
+        agent["archivedAt"] = json!(fleet::clock::now_iso());
+        push_removal(&state, id);
+    }
+
+    /// Deletes an agent as the daemon does: gone, with its timeline, and a
+    /// `remove` to those watching it. An archived agent deleted says nothing
+    /// to anyone, as Burrow's does.
+    pub fn delete_agent(&self, id: &str) {
+        let mut state = self.lock();
+        let Some(agent) = state.agents.remove(id) else {
+            return;
+        };
+        state.timelines.remove(id);
+        if agent["archivedAt"].is_null() {
+            push_removal(&state, id);
+        }
+    }
+
     /// Every write Reef sent, whole, in order.
     pub fn writes(&self) -> Vec<Value> {
         self.lock().writes.clone()
@@ -889,6 +914,17 @@ fn handle(state: &mut State, socket: u64, message: &Value) -> Value {
                 timeline_page(state, agent, message),
             )
         }
+        // One agent by id, an archived one too; as Paseo answers an agent
+        // that is not there: nulls, and no error.
+        "fetch_agent_request" => {
+            let asked = message["agentId"].as_str().unwrap_or_default();
+            let found = state.agents.get(asked).cloned();
+            let project = found.as_ref().map(|agent| project_of(state, agent));
+            reply(
+                "fetch_agent_response",
+                json!({ "agent": found, "project": project, "error": null }),
+            )
+        }
         "agent_permission_response"
         | "cancel_agent_request"
         | "send_agent_message_request"
@@ -1208,6 +1244,7 @@ pub fn providers() -> Vec<Value> {
     vec![
         json!({
             "provider": "claude", "label": "Claude", "status": "ready", "enabled": true,
+            "version": "2.1.317", "installKind": "native",
             "defaultModeId": "default",
             "modes": [{"id": "default", "label": "Always ask"}, {"id": "acceptEdits", "label": "Accept edits"},
                       {"id": "plan", "label": "Plan"}, {"id": "bypassPermissions", "label": "Bypass"}],
@@ -1221,6 +1258,7 @@ pub fn providers() -> Vec<Value> {
         }),
         json!({
             "provider": "codex", "label": "Codex", "status": "ready", "enabled": true,
+            "version": "0.60.0", "installKind": "package",
             "defaultModeId": "auto",
             "modes": [{"id": "read-only", "label": "Read only"}, {"id": "auto", "label": "Auto"},
                       {"id": "full-access", "label": "Full access"}],
@@ -1230,6 +1268,24 @@ pub fn providers() -> Vec<Value> {
         json!({"provider": "opencode", "label": "OpenCode", "status": "unavailable", "enabled": true,
                "modes": [], "models": []}),
     ]
+}
+
+/// The providers after Claude Code upgraded itself on the host to the given
+/// version, with a new model alongside when asked.
+pub fn providers_upgraded(version: &str, new_model: bool) -> Vec<Value> {
+    let mut entries = providers();
+    if let Some(claude) = entries.first_mut() {
+        claude["version"] = json!(version);
+        if new_model && let Some(models) = claude["models"].as_array_mut() {
+            models.insert(
+                1,
+                json!({"id": "claude-fable-5-2", "label": "Fable 5.2",
+                       "thinkingOptions": [{"id": "low", "label": "Low"}, {"id": "high", "label": "High"}],
+                       "defaultThinkingOptionId": "high"}),
+            );
+        }
+    }
+    entries
 }
 
 /// A permission request for a shell command.

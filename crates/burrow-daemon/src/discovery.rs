@@ -34,23 +34,64 @@ const LOADING_POLL: Duration = Duration::from_millis(250);
 pub struct Watched {
     discovery: Arc<Discovery>,
     stamp: Option<String>,
+    /// Whether it has been looked for yet (at startup, not until its turn).
+    looked: bool,
 }
 
-/// Finds each provider now and offers those there, then keeps looking at
-/// them for as long as the daemon runs.
+/// One provider looked for, as [`watched`] reports it.
+pub struct Looked {
+    pub id: String,
+    /// Its CLI as given.
+    pub program: Option<std::path::PathBuf>,
+    /// What the CLI's `--version` said last (`None`: it would not run).
+    pub stamp: Option<String>,
+    /// False until it has been looked for at startup.
+    pub looked: bool,
+}
+
+/// Starts finding each provider, one after another, and returns at once:
+/// Burrow listens meanwhile, since some providers take many seconds to say
+/// what they offer. Each provider is offered, and pushed to subscribers of
+/// `providers_snapshot_update`, as soon as it is found; what needs a
+/// provider not found yet waits for it ([`crate::agents::Agents::until_found`]).
+/// Then keeps looking at them for as long as the daemon runs.
+/// [`Agents::until_discovered`](crate::agents::Agents::until_discovered)
+/// waits for the first look.
 pub async fn start(daemon: &Arc<Daemon>, discoveries: Vec<Discovery>) {
-    let mut watched = Vec::new();
-    for discovery in discoveries {
-        let discovery = Arc::new(discovery);
-        let (stamp, found) = blocking(&discovery, true).await;
-        if let Some(provider) = found {
-            daemon.agents.register(provider);
-        }
-        watched.push(Watched { discovery, stamp });
-    }
-    *daemon.agents.watched.lock().await = watched;
-    let daemon = Arc::downgrade(daemon);
+    let discoveries: Vec<Arc<Discovery>> = discoveries.into_iter().map(Arc::new).collect();
+    *daemon.agents.watched.lock().await = (discoveries.iter())
+        .map(|discovery| Watched {
+            discovery: discovery.clone(),
+            stamp: None,
+            looked: false,
+        })
+        .collect();
+    daemon.agents.set_discovering(true);
+    let daemon = daemon.clone();
     tokio::spawn(async move {
+        for (index, discovery) in discoveries.iter().enumerate() {
+            let (stamp, found) = blocking(discovery, true).await;
+            if let Some(provider) = found {
+                daemon.agents.register(provider);
+                publish_providers(&daemon);
+            }
+            if let Some(entry) = daemon.agents.watched.lock().await.get_mut(index) {
+                entry.stamp = stamp;
+                entry.looked = true;
+            }
+        }
+        // A provider pushed while it was still loading its models is pushed
+        // again once they are in.
+        while daemon.agents.any_loading() {
+            tokio::time::sleep(LOADING_POLL).await;
+        }
+        publish_providers(&daemon);
+        daemon.agents.set_discovering(false);
+        info!(
+            providers = ?daemon.agents.infos().iter().map(|i| i.id.clone()).collect::<Vec<_>>(),
+            "providers found"
+        );
+        let daemon = Arc::downgrade(&daemon);
         let probe_every = (PROBE_EVERY.as_secs() / CHECK_EVERY.as_secs()).max(1);
         let mut ticks = 0u64;
         loop {
@@ -64,16 +105,14 @@ pub async fn start(daemon: &Arc<Daemon>, discoveries: Vec<Discovery>) {
     });
 }
 
-/// Each provider looked for: its id, its CLI as given, and what the CLI's
-/// `--version` said last (`None`: it would not run).
-pub async fn watched(daemon: &Daemon) -> Vec<(String, Option<std::path::PathBuf>, Option<String>)> {
+/// Each provider looked for, or to be looked for at startup.
+pub async fn watched(daemon: &Daemon) -> Vec<Looked> {
     (daemon.agents.watched.lock().await.iter())
-        .map(|w| {
-            (
-                w.discovery.id.clone(),
-                w.discovery.program.clone(),
-                w.stamp.clone(),
-            )
+        .map(|w| Looked {
+            id: w.discovery.id.clone(),
+            program: w.discovery.program.clone(),
+            stamp: w.stamp.clone(),
+            looked: w.looked,
         })
         .collect()
 }
@@ -97,9 +136,11 @@ async fn recheck_announcing(
     probe: bool,
     announce: bool,
 ) {
+    // After the first look, which does not hold the lock.
+    daemon.agents.until_discovered().await;
     // Held throughout, so two rechecks never find the same CLI at once.
     let mut watched = daemon.agents.watched.lock().await;
-    let before = daemon.agents.infos();
+    let before = (daemon.agents.infos(), daemon.agents.clis());
     for entry in watched
         .iter_mut()
         .filter(|w| only.is_none_or(|ids| ids.contains(&w.discovery.id)))
@@ -135,9 +176,10 @@ async fn recheck_announcing(
     while daemon.agents.any_loading() {
         tokio::time::sleep(LOADING_POLL).await;
     }
-    if announce || daemon.agents.infos() != before {
+    if announce || (daemon.agents.infos(), daemon.agents.clis()) != before {
         publish_providers(daemon);
     }
+    crate::agents::refresh_cli_versions(daemon);
 }
 
 /// The discovery's stamp and, when `find`, the provider, off the runtime's

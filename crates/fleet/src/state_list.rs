@@ -32,9 +32,116 @@ pub struct StateRow {
     /// What it waits on or failed with, in a line: the pending question or
     /// permission, or the error. None leaves the line to its last reply.
     pub detail: Option<String>,
+    /// Its latest reply as its daemon previews it with the agent (Burrow's
+    /// `lastReplyPreview`, about 220 characters, whole, for grep; a list
+    /// shows its first line); None from a daemon that sends none, which
+    /// leaves the reply to be read.
+    pub reply: Option<String>,
+    /// Its labels, `key=value` (or the key alone), Paseo's own left out.
+    pub labels: Vec<String>,
+    pub created_at: Option<String>,
+    /// When it was last given a prompt.
+    pub prompted_at: Option<String>,
+}
+
+/// How a list is ordered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Sort {
+    /// The latest change first.
+    #[default]
+    Recent,
+    /// Needs input, failed, ready to review, working, done; recent within each.
+    NeedsYou,
+    /// The latest prompt first.
+    LastPrompt,
+    /// The newest agent first.
+    Newest,
+    /// The oldest agent first.
+    Oldest,
+    /// By name, A to Z.
+    Name,
+}
+
+impl Sort {
+    pub const ALL: [Sort; 6] = [
+        Sort::Recent,
+        Sort::NeedsYou,
+        Sort::LastPrompt,
+        Sort::Newest,
+        Sort::Oldest,
+        Sort::Name,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Sort::Recent => "Recent",
+            Sort::NeedsYou => "Needs you first",
+            Sort::LastPrompt => "Last prompt",
+            Sort::Newest => "Newest agent",
+            Sort::Oldest => "Oldest agent",
+            Sort::Name => "Name A–Z",
+        }
+    }
+}
+
+/// Orders `rows` by `sort`, ties by the latest change, then host and id, so
+/// the order never depends on how the directory stores them. Rows with no
+/// time sort as the oldest.
+pub fn sort(rows: &mut [StateRow], sort: Sort) {
+    let time = |t: &Option<String>| t.clone().unwrap_or_default();
+    let rank = |state: Bucket| {
+        Bucket::GROUP_ORDER
+            .iter()
+            .position(|b| *b == state)
+            .unwrap_or(Bucket::GROUP_ORDER.len())
+    };
+    rows.sort_by(|a, b| {
+        let first = match sort {
+            Sort::Recent => std::cmp::Ordering::Equal,
+            Sort::NeedsYou => rank(a.state).cmp(&rank(b.state)),
+            Sort::LastPrompt => time(&b.prompted_at).cmp(&time(&a.prompted_at)),
+            Sort::Newest => time(&b.created_at).cmp(&time(&a.created_at)),
+            Sort::Oldest => (a.created_at.is_none(), time(&a.created_at))
+                .cmp(&(b.created_at.is_none(), time(&b.created_at))),
+            Sort::Name => a.title.to_lowercase().cmp(&b.title.to_lowercase()),
+        };
+        first
+            .then_with(|| b.changed_at.cmp(&a.changed_at))
+            .then_with(|| a.host.cmp(&b.host))
+            .then_with(|| a.agent_id.cmp(&b.agent_id))
+    });
+}
+
+/// A grep's words, lowercased; every one must be found.
+pub fn grep_terms(query: &str) -> Vec<String> {
+    query.split_whitespace().map(str::to_lowercase).collect()
+}
+
+/// Whether `text` holds every term, in any case.
+pub fn grep_matches(text: &str, terms: &[String]) -> bool {
+    let text = text.to_lowercase();
+    terms.iter().all(|term| text.contains(term.as_str()))
 }
 
 impl StateRow {
+    /// What a grep looks through, beside the host's name and a reply read
+    /// later: its name, place, tool and model, state, labels, what it waits
+    /// on or failed with, and its latest reply.
+    pub fn grep_text(&self) -> String {
+        let mut parts: Vec<&str> = vec![
+            &self.title,
+            &self.place,
+            &self.provider,
+            self.model.as_deref().unwrap_or_default(),
+            self.state.label(),
+        ];
+        parts.extend(self.labels.iter().map(String::as_str));
+        parts.extend(self.detail.as_deref());
+        parts.extend(self.reply.as_deref());
+        parts.join("\n")
+    }
+
     /// `provider/model`, or whichever of them is known.
     pub fn model_label(&self) -> String {
         match &self.model {
@@ -86,6 +193,12 @@ pub fn rows(fleet: &Fleet, bucket: Option<Bucket>, hide_background: bool) -> Vec
                     Bucket::Failed => error(agent),
                     _ => None,
                 },
+                reply: agent
+                    .last_reply_preview()
+                    .map(|text| text.trim().to_string()),
+                labels: agent_labels(agent),
+                created_at: agent.created_at.clone(),
+                prompted_at: agent.last_user_message_at.clone(),
             }
         })
         .collect();
@@ -96,6 +209,20 @@ pub fn rows(fleet: &Fleet, bucket: Option<Bucket>, hide_background: bool) -> Vec
             .then_with(|| a.agent_id.cmp(&b.agent_id))
     });
     rows
+}
+
+/// An agent's labels as a grep finds them: `key=value`, or the key alone
+/// when it has no value; Paseo's own (`paseo.*`) left out.
+fn agent_labels(agent: &Agent) -> Vec<String> {
+    agent
+        .labels
+        .iter()
+        .filter(|(key, _)| !key.starts_with("paseo."))
+        .map(|(key, value)| match value.as_str().map(str::trim) {
+            Some(value) if !value.is_empty() => format!("{key}={value}"),
+            _ => key.clone(),
+        })
+        .collect()
 }
 
 /// What an agent that needs input waits on, as the "Needs you" strip and
@@ -332,6 +459,118 @@ mod tests {
         assert_eq!(request["direction"], "tail");
         assert!(request.get("subscribe").is_none());
         assert!(!request.to_string().contains("attention"));
+    }
+
+    fn sorted(fleet: &Fleet, by: Sort) -> Vec<String> {
+        let mut all = rows(fleet, None, false);
+        sort(&mut all, by);
+        all.into_iter().map(|row| row.agent_id).collect()
+    }
+
+    #[test]
+    fn each_sort_orders_history_its_own_way() {
+        let fleet = fleet(&[
+            agent(
+                "Beta",
+                "2026-10-05T00:00:00Z",
+                json!({"createdAt": "2026-10-01T00:00:00Z", "lastUserMessageAt": "2026-10-02T00:00:00Z"}),
+            ),
+            agent(
+                "alpha",
+                "2026-10-03T00:00:00Z",
+                json!({"status": "error", "createdAt": "2026-10-03T00:00:00Z",
+                       "lastUserMessageAt": "2026-10-04T00:00:00Z"}),
+            ),
+            agent(
+                "gamma",
+                "2026-10-04T00:00:00Z",
+                json!({"status": "running", "createdAt": "2026-09-01T00:00:00Z"}),
+            ),
+            agent(
+                "delta",
+                "2026-10-01T00:00:00Z",
+                json!({"pendingPermissions": [{"id": "p", "name": "Bash"}]}),
+            ),
+        ]);
+        assert_eq!(
+            sorted(&fleet, Sort::Recent),
+            ["Beta", "gamma", "alpha", "delta"]
+        );
+        // Needs input, failed, then working before done.
+        assert_eq!(
+            sorted(&fleet, Sort::NeedsYou),
+            ["delta", "alpha", "gamma", "Beta"]
+        );
+        // Never prompted: last.
+        assert_eq!(sorted(&fleet, Sort::LastPrompt)[..2], ["alpha", "Beta"]);
+        assert_eq!(
+            sorted(&fleet, Sort::Newest)[..3],
+            ["alpha", "Beta", "gamma"]
+        );
+        // Undated last, oldest first otherwise.
+        assert_eq!(
+            sorted(&fleet, Sort::Oldest),
+            ["gamma", "Beta", "alpha", "delta"]
+        );
+        // Any case.
+        assert_eq!(
+            sorted(&fleet, Sort::Name),
+            ["alpha", "Beta", "delta", "gamma"]
+        );
+        assert_eq!(Sort::ALL.len(), 6);
+        assert_eq!(
+            serde_json::to_value(Sort::NeedsYou).unwrap(),
+            json!("needs_you")
+        );
+    }
+
+    #[test]
+    fn grep_finds_every_word_in_any_field_and_any_case() {
+        let fleet = fleet(&[
+            agent(
+                "deploy-bot",
+                "2026-10-02T00:00:00Z",
+                json!({"labels": {"team": "core", "urgent": "", "paseo.parent-agent-id": "x"},
+                       "lastReplyPreview": "Rolled out **v2** to staging\nsecond line"}),
+            ),
+            agent(
+                "reviewer",
+                "2026-10-01T00:00:00Z",
+                json!({"provider": "codex", "model": "gpt-6.1"}),
+            ),
+        ]);
+        let all = rows(&fleet, None, false);
+        let found = |query: &str| -> Vec<&str> {
+            let terms = grep_terms(query);
+            (all.iter())
+                .filter(|row| grep_matches(&row.grep_text(), &terms))
+                .map(|row| row.agent_id.as_str())
+                .collect()
+        };
+        let bot = all.iter().find(|row| row.agent_id == "deploy-bot").unwrap();
+        assert_eq!(bot.labels, ["team=core", "urgent"]);
+        assert_eq!(
+            bot.reply.as_deref(),
+            Some("Rolled out **v2** to staging\nsecond line")
+        );
+        assert_eq!(found("second line"), ["deploy-bot"], "the whole preview");
+        assert_eq!(found("STAGING"), ["deploy-bot"]);
+        assert_eq!(found("team=core"), ["deploy-bot"]);
+        assert_eq!(found("urgent v2"), ["deploy-bot"]);
+        assert_eq!(found("codex gpt-6"), ["reviewer"]);
+        assert_eq!(found("w1-name"), ["deploy-bot", "reviewer"]);
+        assert_eq!(
+            found("done"),
+            ["deploy-bot", "reviewer"],
+            "the state, in words"
+        );
+        assert!(found("staging codex").is_empty(), "every word must match");
+        assert!(
+            found("parent-agent-id").is_empty(),
+            "Paseo's labels are left out"
+        );
+        let quiet = all.iter().find(|row| row.agent_id == "reviewer").unwrap();
+        assert_eq!(quiet.reply, None, "a daemon that sends no preview");
     }
 
     #[test]

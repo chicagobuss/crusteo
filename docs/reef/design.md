@@ -60,9 +60,11 @@ does not depend on `gpui` or on the `crusteo` crate.
   file a conversation names) and `WRITE_REQUESTS`, which holds
   exactly what the phone's actions send: `agent_permission_response`, `cancel_agent_request`,
   `send_agent_message_request`, `archive_agent_request`, `agent.create.request`,
-  `delete_agent_request`, `workspace.label.assignment.set.request` and `clear_agent_attention`.
-  Reef cannot open a terminal, rename or archive a workspace, rename or recolour a label, change
-  an agent's key/value labels (`update_agent_request`), or use the older `create_agent_request`.
+  `delete_agent_request`, `workspace.label.assignment.set.request` and `clear_agent_attention`,
+  and two `update_agent_request`s, each checked field by field: an agent's `crusteo.labels` alone
+  (3.9.2), and an agent's new `name` alone (rename). Reef cannot open a terminal, rename or archive
+  a workspace, rename or recolour a label, change an agent's other key/value labels, or use the
+  older `create_agent_request`.
   Reef logs every write it sends.
 - **"Ready to review" is unseen.** Reef shows Paseo's state buckets except that one, which is a
   flag of its own: a finished agent is done, and `unseen` while nobody has looked at it since.
@@ -507,6 +509,7 @@ with the view's `id` when they concern one.
 | `archive` | | `archive_agent_request`, with a 60 s timeout; the page asks first |
 | `delete` | | `delete_agent_request`: the agent is removed from the host with its history, which archiving keeps. The page asks first. The agent leaves the lists when the daemon answers. |
 | `relabel` | `labels` (every label the agent should have, by name) | One `update_agent_request` carrying only the agent's `crusteo.labels` (3.9.2) |
+| `rename` | `name` (trimmed; not empty, at most 200 characters) | One `update_agent_request` carrying only the new `name`, as crusteo's rename; shown at once, the host's update confirms it |
 | `create` | `host`, `provider`, `model`, `mode`, `thinking`, `workspace` or `cwd`, `labels` (optional), `text`, `message_id`; no `agent` | `agent.create.request`, carrying the new agent's labels (3.9.1) |
 | `notify` | `on` (`true`, `false`, or `null` to follow the default) | Sets whether this agent's finished turns notify (3.10) |
 | `settings` | `notify_default`, `show_background` (either or both) | Sets the default for agents with no choice of their own, and whether lists show background workspaces' agents on phones that did not choose; no `host` or `agent` |
@@ -651,6 +654,34 @@ When an agent's turn ends, Reef tells every phone:
 - `kind` leaves room for more notifications later. Web Push (section 5) will deliver this same
   event to phones whose page is closed.
 
+**CLI upgrades and new models.** Reef reads each host's providers snapshot when it connects and
+whenever the host pushes `providers_snapshot_update`, and compares it with the last one it saw
+(`fleet::cli_watch`, which the desktop shares). A host's first snapshot is a baseline, so nothing
+is announced for hosts as Reef starts. A Burrow's entries carry the CLI's `version` and
+`installKind` (Burrow's, see `docs/burrow/compatibility.md`); Paseo's daemon sends neither, and
+its hosts are then watched for models only.
+
+```json
+{"type": "notification", "id": "cli-claude-2.1.320", "kind": "cli_update", "state": "info",
+ "provider": "claude", "title": "Claude Code 2.1.320",
+ "body": "on 7 of 10 hosts · new: Fable 5.2", "version": "2.1.320", "hosts_on": 7,
+ "hosts_total": 10, "new_models": ["Fable 5.2"], "gone_models": [], "at": "2026-11-09T10:00:00.000Z"}
+```
+
+- Changes gather for two minutes (`Limits::updates`), so ten hosts upgrading together are one
+  notice. It is for the newest version any host runs; a host moving to an older one says nothing.
+- The same `id` is sent again as more hosts catch up, with new counts, at most once per gathering
+  window; Skiff replaces its card. A model already announced is not listed again.
+- A model that appears on a host with no version change (or a Paseo host) is a `models`
+  notification of its own (`title` "New Claude Code model", `body` "new: Fable 5.2 on 3 hosts"),
+  and a model that went from every host is announced once as gone.
+- `notify_updates` (on unless set off) is a Reef-wide setting beside `notify_default`; it comes
+  in `settings`, and `{"action": "settings", "notify_updates": false}` changes it.
+- The `hosts` message's entries carry `providers`: each CLI the host runs as `{id, label, version,
+  install, models, behind}`, `behind` meaning a newer version than the host's runs elsewhere in the
+  fleet. Skiff's Hosts sheet lists them under each host and marks those behind; tapping the card
+  opens it.
+
 Skiff shows a notification as a banner (stacking, gone after a few seconds, a tap opens
 the conversation), buzzes with `navigator.vibrate` where the phone can, and, when the page is in
 the background and the browser allows it, raises a system notification. Browsers allow that only
@@ -704,8 +735,12 @@ row about 330 bytes, so a full list of 20 is under 7 KB.
 ### 3.15 Desktops in reef mode
 
 A crusteo desktop with `reef.json` in its data dir takes its hosts and labels from Reef over
-plain HTTP, gated as images are (`--open`, or `?t=<device token>`), and still connects to every
-daemon itself.
+plain HTTP, gated by the device token (none with `--open`), and still connects to every daemon
+itself. The token goes in an `Authorization: Bearer <token>` header, which a proxy's or Reef's own
+access log does not keep, as a URL is. `?t=<token>` is still read on `/api/*` for a desktop from
+before 0.2.0, and on `/image/`, where an `<img>` cannot send a header; a request with either, or
+both, is authorized if the token in either is right. A desktop whose header is answered with a 401
+(a Reef from before 0.2.0) asks again with `?t=`, so upgrading the desktop first does not break it.
 
 - `GET /api/hosts`: `{"reef": <version>, "hosts": [{"id", "name", "endpoint", "password":
   bool}]}`. A password is never sent, only whether one is needed.
@@ -716,6 +751,63 @@ daemon itself.
   `{"op": "rename", "id", "name"}`, `{"op": "recolor", "id", "color"}` or `{"op": "delete",
   "id"}`. The answer has the new `revision`, `id` for a label made, and the catalog after it, or
   `{"ok": false, "error"}`.
+- `GET /api/settings`: Reef's settings, as the welcome's `settings` carries them. `POST
+  /api/settings` (JSON; a browser's request only from Reef's own origin) changes any of
+  `notify_default`, `show_background`, `notify_updates` and `agent_routing`, and answers the
+  settings after it. crusteo's Settings screen shows and changes `agent_routing` this way.
+
+### 3.16 Agents messaging agents on other hosts
+
+An agent's `send_agent_prompt` names an agent by id, prefix or name; its Burrow looks for it among
+its own agents and, failing that, asks the Reef that routes for it. That happens only when
+`agent_routing` is on ("Agents can message agents on other hosts" in Skiff's and crusteo's
+settings), which it is not until the owner turns it on: many fleets keep messaging between hosts
+by hand, through a tracker or not at all. It is one switch for the fleet; there is no per-host
+override and no approve-each-message mode.
+
+The messages are Burrow's own (`burrow_protocol::routing`), sent only to a daemon whose
+`server_info.features` has `burrowFleetRouting`:
+
+1. Reef tells each Burrow whether it routes, `{"type": "burrow.fleet.router", "reefId", "routing":
+   "on" | "off"}`, when it connects and whenever the setting changes. A Burrow asks the latest Reef
+   that says `on`; with none it answers the agent itself: no Reef connected, or routing off in the
+   fleet's Reef, each with what to do instead (`burrow send --host`, the setting).
+2. The Burrow sends `burrow.fleet.request` `{requestId, op: "route_prompt", targetAgentId,
+   prompt, sourceAgentId, sourceServerId, activeTurnBehavior, notifyOnFinish}`. Reef refuses it
+   while routing is off (`routing_off`), finds the agent on any host (an exact id, else a prefix of
+   seven or more characters, else a name; several matches are `ambiguous` with up to ten
+   candidates), holds each pair of agents to 20 prompts in ten minutes (`rate_limited`), and sends
+   the target's daemon an ordinary `send_agent_message_request` with a fresh `messageId` and the
+   sender as `sourceAgentId`, so the target steers, queues or interrupts as it would for a local
+   sender. A host still loading its agents is waited on for up to five seconds before an agent is
+   `not_found`. `burrow.fleet.response` `{requestId, ok, result | code, error, detail}` answers:
+   the target's id, name and host, the disposition, and its queue position. An `interrupt` is
+   answered at once and delivered after.
+3. When the sender wants to hear, Reef keeps a route (in `routes.json` in the data dir) and waits
+   on the target's daemon with `wait_for_finish_request {messageId | turnId}`, for that prompt's
+   own turn. Its end, error or permission request goes to the sender's Burrow as
+   `burrow.fleet.route_finished.request`, which delivers it to the sender in a local finish
+   notice's words, with a `Host:` line, once per `noticeId`. Reef retries until that Burrow answers
+   that the sender has it or is gone, across restarts of either Burrow and of Reef; a host removed
+   from the fleet ends the route. Turning routing off stops new routes, not those under way.
+4. The rest of the agent tools work across hosts through the same request, with other `op`s.
+   `list_hosts` asks for the fleet's other hosts in Paseo's host directory shape, with each
+   one's agent count and whether it takes these (`reachable`). `list_agents` with `fleet: true`
+   (Burrow's own argument) and `burrow ls --fleet` ask `op: "list_agents"`: Reef runs
+   `list_agents` on every connected Burrow at once and merges the answers in Paseo's order,
+   tagging each agent with its host and server id and noting the hosts that did not answer.
+   `get_agent_status`, `get_agent_activity`, `cancel_agent` and `respond_to_permission` for an
+   agent the Burrow does not have, or any host tool given another host's `serverId`, ask
+   `op: "tool"`. Reef finds the host by the agent (as in 2) or by the server id and sends it
+   `burrow.fleet.tool.request {tool, args}`, which that Burrow runs as if no agent called it and
+   answers with `burrow.fleet.tool.response`. Reef's allowlist lets only those five tools through
+   this way; nothing that creates, archives or reconfigures an agent. A Burrow runs them only for
+   a Reef that says routing is on. Reef asks the hosts when an agent calls rather than pushing a
+   copy of the fleet to every Burrow: the answer is always current, and a busy fleet's status
+   changes cost nothing.
+
+It is not a lock. Burrow has no passwords, so anything that reaches a host can prompt its agents
+with routing on or off; routing adds no reach beyond Reef's own (section 7).
 
 ## 4. The phone viewer
 
@@ -878,13 +970,18 @@ Reef is meant for locked-down private networks; that is the decision for now.
 - Anyone with a device token sees the fleet and can act on any agent: there are no scopes. Tokens
   are per device, random, compared in constant time, and revocable by editing the tokens file.
 - A token holder can also add hosts (`host_add`), which makes Reef connect to any address it can
-  reach, with any password, using Reef's own client id. Treat a token as access to Reef's
-  network position, not only to the fleet.
+  reach, with any password, using Reef's own client id. With an `ssh://` address, Reef logs in
+  with its user's SSH keys to any host that accepts them, and reaches whatever listens on that
+  host's loopback port. Treat a token as access to Reef's network position and its SSH keys, not
+  only to the fleet.
 - With `--open` there are no tokens: anyone who can reach Reef can act on any agent and add
   hosts.
 - Plain HTTP on any bind address is allowed.
 - Image URLs carry the device token in their query (`/image/<key>?t=`), so it can show up in a
-  proxy's logs or the browser's history; Reef's answers say `Referrer-Policy: no-referrer`.
+  proxy's logs or the browser's history; Reef's answers say `Referrer-Policy: no-referrer`. An
+  `<img>` cannot send a header, so this stays. The `/api/*` routes, which desktops call from code,
+  take the token in `Authorization: Bearer` and no longer need it in the address; `?t=` still works
+  there for a desktop from before 0.2.0 and is to go once those are gone.
 - Cross-site WebSockets are refused by the `Origin` check, and a page elsewhere cannot read the
   token, which lives in Skiff's own storage.
 - DNS rebinding is refused by a `Host` allowlist on every request (page, `/ws`, `/image/`,
@@ -912,7 +1009,8 @@ records each one whole.
 - `actions.rs`: each action sends exactly its one request, in crusteo's format: permission allow
   and deny; a question answered by header, refused while unanswered, and dismissed; stop (and no
   notification for it); send to an idle agent; send to a busy one queued and sent on the idle edge;
-  steer, steering a queued message, and dropping one; archive; and asks or agents no longer there
+  steer, steering a queued message, and dropping one; archive; rename (the name alone, trimmed,
+  and shown at once; a blank or overlong name refused); and asks or agents no longer there
   refused before anything is sent.
 - `agents.rs`: the new-agent form's providers and workspaces, the providers read once and kept;
   creating an agent in a workspace or a typed directory, with the provider's defaults, its

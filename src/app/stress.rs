@@ -511,6 +511,14 @@ static MADE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1)
 /// follow it.
 pub type Answer = (Result<Value, String>, Vec<(HostId, Value)>);
 
+/// How many of the synthetic hosts, first first, run the upgraded Claude Code.
+static UPGRADED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Makes the first `count` synthetic hosts report the upgraded Claude Code.
+pub fn upgrade_hosts(count: usize) {
+    UPGRADED.store(count, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// A synthetic daemon's answer to the requests of the new-workspace flow,
 /// as Paseo 0.12 answers them, with the pushes that follow; None for any
 /// other request. Prompts or branches with "fail" fail, for the error paths.
@@ -521,15 +529,28 @@ pub fn answer(host: &HostId, message: &Value, fleet: &Fleet) -> Option<Answer> {
     let push = |message: Value| (host.clone(), message);
     let next = || MADE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let reply = match kind {
-        "get_providers_snapshot_request" => json!({"entries": [
-            {"provider": "claude", "label": "Claude", "status": "ready", "enabled": true,
-             "defaultModeId": "default", "modes": [{"id": "default", "label": "Default"}],
-             "models": [
-                {"id": "claude-haiku-5", "label": "Haiku", "isDefault": true},
-                {"id": "claude-opus-5-5", "label": "Opus"}]},
-            {"provider": "codex", "label": "Codex", "status": "ready", "enabled": true,
-             "models": [{"id": "gpt-6.1-sol", "label": "GPT-6.1", "isDefault": true}]},
-        ]}),
+        "get_providers_snapshot_request" => {
+            // A few hosts' Claude Code upgrades itself a while after start
+            // ([`upgrade_hosts`]), with a model.
+            let index = fleet.hosts.iter().position(|h| h.id() == host).unwrap_or(0);
+            let upgraded = index < UPGRADED.load(std::sync::atomic::Ordering::Relaxed);
+            let mut models = vec![
+                json!({"id": "claude-haiku-5", "label": "Haiku", "isDefault": true}),
+                json!({"id": "claude-opus-5-5", "label": "Opus"}),
+            ];
+            if upgraded {
+                models.push(json!({"id": "claude-fable-5-2", "label": "Fable 5.2"}));
+            }
+            json!({"entries": [
+                {"provider": "claude", "label": "Claude", "status": "ready", "enabled": true,
+                 "version": if upgraded { "2.1.320" } else { "2.1.317" }, "installKind": "native",
+                 "defaultModeId": "default", "modes": [{"id": "default", "label": "Default"}],
+                 "models": models},
+                {"provider": "codex", "label": "Codex", "status": "ready", "enabled": true,
+                 "version": "0.60.0", "installKind": "package",
+                 "models": [{"id": "gpt-6.1-sol", "label": "GPT-6.1", "isDefault": true}]},
+            ]})
+        }
         "directory_suggestions_request" if full => {
             let query = message["query"].as_str().unwrap_or_default().trim();
             let expanded = query.replacen('~', "/home/dev", 1);
@@ -1000,7 +1021,10 @@ pub fn exchange(agent_id: &str) -> Value {
                 "type": "tool_call",
                 "callId": "stress-call-1",
                 "name": "Bash",
-                "detail": { "type": "shell", "command": "cargo bench -p parser" },
+                // Long enough that its detail box scrolls inside the
+                // conversation, for trying nested scrolling.
+                "detail": { "type": "shell", "command": "cargo bench -p parser",
+                            "output": bench_output() },
                 "status": "completed",
                 "error": null,
             })),
@@ -1051,6 +1075,21 @@ pages.iter().filter_map(|id| self.page(*id)).flat_map(|page| page.rows())\n}\n``
 Its tests cover the happy path and a corrupt page, but not a missing index; that is the \
 first thing I would add. Everything else in it is small and reads the way it runs, so it \
 should be safe to change once that test is there.";
+
+/// What the stress benchmark printed: sixty lines, more than a tool's
+/// detail box shows at once.
+fn bench_output() -> String {
+    let mut out = String::from("   Compiling parser v0.4.2\n    Finished bench in 41.3s\n");
+    for case in 1..=58 {
+        out.push_str(&format!(
+            "parse/stream/case-{case:02}    time: [{:.3} ms {:.3} ms {:.3} ms]\n",
+            0.28 + case as f64 * 0.001,
+            0.30 + case as f64 * 0.001,
+            0.32 + case as f64 * 0.001
+        ));
+    }
+    out
+}
 
 /// `turns` from `CRUSTEO_STRESS`, read once.
 fn extra_turns() -> usize {

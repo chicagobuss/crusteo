@@ -247,10 +247,10 @@ impl Upstream {
             }
             None => {}
         }
-        let Some(link) = self.links.get(host).filter(|link| link.online) else {
+        let Some(link) = self.links.get(host).filter(|link| link.sync.online()) else {
             return done(self, Err("The host is offline".into()));
         };
-        let generation = link.generation;
+        let generation = link.sync.generation();
         let reply = guarded(&link.client, requests::providers_snapshot());
         self.providers
             .insert(host.to_string(), Providers::Fetching(vec![Box::new(done)]));
@@ -269,7 +269,7 @@ impl Upstream {
                 };
                 let result = result.map(Arc::new);
                 // Kept only for the connection that read them.
-                let same = (up.links.get(&host)).is_some_and(|l| l.generation == generation);
+                let same = (up.links.get(&host)).is_some_and(|l| l.sync.accepts(generation));
                 if let (Ok(list), true) = (&result, same) {
                     let at = Instant::now();
                     let list = list.clone();
@@ -279,6 +279,18 @@ impl Upstream {
                     waiter(up, result.clone());
                 }
             }));
+        });
+    }
+
+    /// Reads a host's providers and hands them to the CLI watch, which
+    /// tells when a CLI or its models changed.
+    pub(super) fn watch_providers(&mut self, host: &str) {
+        let name = host.to_string();
+        self.with_providers(host, move |up, result| {
+            if let Ok(providers) = result {
+                up.cli.observe(&name, &providers, std::time::Instant::now());
+                up.dirty_fleet = true;
+            }
         });
     }
 
@@ -637,6 +649,8 @@ mod tests {
                     default_thinking: None,
                 },
             ],
+            version: None,
+            install_kind: None,
         }
     }
 

@@ -105,6 +105,7 @@ async fn harness(home: &Path, server_id: &str) -> Harness {
                     "stableProjectIdentity",
                     "projectCreateDirectory",
                     "workspaceMultiplicity",
+                    "projectSuggestions",
                 ] {
                     assert!(info.has(feature), "{feature}");
                 }
@@ -1173,4 +1174,103 @@ async fn removing_a_project_archives_its_workspaces_and_keeps_the_disk() {
     );
     h.stop().await;
     let _ = std::fs::remove_dir_all(&home);
+}
+
+/// A provider whose CLI has run sessions in these folders, at these times
+/// (milliseconds ago), and nothing else.
+struct Remembers(EchoProvider, Vec<(PathBuf, i64)>);
+
+impl burrow_provider::Provider for Remembers {
+    fn info(&self) -> burrow_provider::ProviderInfo {
+        let mut info = self.0.info();
+        info.id = "remembers".into();
+        info
+    }
+
+    fn start(
+        &self,
+        spec: burrow_provider::SessionSpec,
+    ) -> Result<burrow_provider::Session, burrow_provider::ProviderError> {
+        self.0.start(spec)
+    }
+
+    fn recent_sessions(
+        &self,
+        _limit: usize,
+    ) -> Result<Vec<burrow_provider::RecentSession>, String> {
+        let now = burrow_daemon::clock::now_ms();
+        Ok((self.1.iter().enumerate())
+            .map(|(i, (cwd, ago))| burrow_provider::RecentSession {
+                id: format!("session-{i}"),
+                cwd: text(cwd),
+                first_prompt: Some("do the thing".into()),
+                last_activity_ms: now - ago,
+                ..Default::default()
+            })
+            .collect())
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn suggestions_are_the_folders_agents_ran_in_grouped_by_repository() {
+    let home = scratch("suggest-home");
+    let repo = repository("suggest-repo");
+    let worktree = scratch("suggest-wt").join("fix");
+    git(
+        &repo,
+        &["worktree", "add", "-q", &text(&worktree), "feature"],
+    );
+    let notes = scratch("suggest-notes");
+    let added = scratch("suggest-added");
+    let day = 24 * 60 * 60 * 1000;
+    let h = harness(&home, "srv_suggest").await;
+    h.daemon.agents.register(Arc::new(Remembers(
+        EchoProvider::default(),
+        vec![
+            (repo.join("app"), 60_000),
+            (worktree.clone(), 30_000),
+            (notes.clone(), 90_000),
+            (added.clone(), 10_000),
+            (home.join("gone"), 5_000),
+            (notes.clone(), 40 * day),
+        ],
+    )));
+    h.add_project(&added).await;
+
+    let reply = h
+        .request(json!({"type": "project.suggestions.request", "providers": ["remembers"]}))
+        .await;
+    let roots: Vec<&str> = (reply["suggestions"].as_array().unwrap().iter())
+        .map(|s| s["rootPath"].as_str().unwrap())
+        .collect();
+    // The repository first (its worktree's session is the latest), then the
+    // folder; not the added project, the missing folder or the old session.
+    assert_eq!(roots, [text(&repo), text(&notes)], "{reply}");
+    let first = &reply["suggestions"][0];
+    assert_eq!(first["sessionCount"], 2, "{reply}");
+    assert_eq!(first["providerIds"], json!(["remembers"]));
+    assert_eq!(
+        first["displayName"],
+        repo.file_name().unwrap().to_string_lossy().as_ref()
+    );
+    assert_eq!(reply["suggestions"][1]["sessionCount"], 1);
+    assert_eq!(reply["providerErrors"], json!([]));
+
+    let limited = h
+        .request(
+            json!({"type": "project.suggestions.request", "providers": ["remembers"],
+                        "limit": 1}),
+        )
+        .await;
+    assert_eq!(limited["suggestions"].as_array().unwrap().len(), 1);
+    let refused = h
+        .client
+        .request(json!({"type": "project.suggestions.request", "since": "last tuesday"}))
+        .await
+        .unwrap_err();
+    assert!(refused.to_string().contains("Invalid since"), "{refused}");
+    h.stop().await;
+    for dir in [home, repo, worktree, notes, added] {
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }

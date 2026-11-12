@@ -17,6 +17,7 @@ use burrow_protocol::directory::{
 };
 use burrow_protocol::envelope::{request_id, rpc_error, session, status_error};
 use burrow_protocol::labels::{LabelColor, LabelDefinition};
+use burrow_protocol::routing;
 use burrow_protocol::timeline::{
     Direction, FetchTimelineRequest, FetchTimelineResponse, Projection,
     TimelineSubscriptionRequest, TimelineWindow,
@@ -35,9 +36,6 @@ use crate::{daemon_requests, workspace_requests};
 
 /// Session messages that never get a reply, and that Burrow ignores.
 const FIRE_AND_FORGET: &[&str] = &[
-    "terminal_input",
-    "unsubscribe_terminal_request",
-    "unsubscribe_terminals_request",
     "unsubscribe_checkout_diff_request",
     "voice_audio_chunk",
     "abort_request",
@@ -86,6 +84,11 @@ pub fn handle(
             parse(&message).and_then(|r| fetch_workspaces(daemon, subs, r))
         }
         "project.list.request" => parse(&message).map(|r| project_list(daemon, r)),
+        // Paseo 0.15's onboarding: folders agents already ran in.
+        "project.suggestions.request" => {
+            crate::suggestions::handle(daemon, &message, late);
+            Ok(Vec::new())
+        }
         "workspace.label.list.request" => parse(&message).and_then(|r| label_list(daemon, subs, r)),
         "workspace.label.assignment.set.request" => {
             parse(&message).and_then(|r| label_assignment(daemon, r))
@@ -112,6 +115,38 @@ pub fn handle(
         "client_heartbeat" => parse(&message).map(|r| heartbeat(daemon, subs, r)),
         "register_push_token" => parse(&message).map(|r| register_push(daemon, subs, r)),
         "push.unregister.request" => parse(&message).map(|r| unregister_push(daemon, r)),
+        // A Reef says whether it routes to other hosts, and answers.
+        routing::ROUTER => {
+            let reef = message["reefId"].as_str().unwrap_or("reef");
+            let on = message["routing"] == "on";
+            daemon.router.announce(subs.connection(), late, reef, on);
+            Ok(Vec::new())
+        }
+        routing::RESPONSE => {
+            daemon.router.answered(&message);
+            Ok(Vec::new())
+        }
+        routing::FINISHED => match crate::mcp::finish::routed(daemon, &message, late) {
+            true => Ok(Vec::new()),
+            false => Err(Failure::Schema),
+        },
+        // A Reef runs a follow-up here for an agent on another host.
+        routing::TOOL_REQUEST => {
+            let routing = daemon.router.routes_for(subs.connection());
+            match crate::mcp::tools::for_reef(daemon, &message, late, routing) {
+                true => Ok(Vec::new()),
+                false => Err(Failure::Schema),
+            }
+        }
+        // A local client (`burrow ls --fleet`) asks for the fleet's agents.
+        routing::FLEET_AGENTS_REQUEST => {
+            crate::mcp::tools::fleet_agents_for_client(daemon, &message, late);
+            Ok(Vec::new())
+        }
+        other if crate::terminals::KINDS.contains(&other) => {
+            crate::terminals::handle(daemon, subs, shape, late, other, &message)
+                .ok_or(Failure::Schema)
+        }
         other if agent_requests::KINDS.contains(&other) => {
             agent_requests::handle(daemon, other, &message, shape, late).ok_or(Failure::Schema)
         }
@@ -123,6 +158,9 @@ pub fn handle(
         }
         other if crate::schedules::KINDS.contains(&other) => {
             crate::schedules::handle(daemon, other, &message, late).ok_or(Failure::Schema)
+        }
+        other if crate::import_sessions::KINDS.contains(&other) => {
+            crate::import_sessions::handle(daemon, other, &message, late).ok_or(Failure::Schema)
         }
         other if FIRE_AND_FORGET.contains(&other) => Ok(Vec::new()),
         _ => Err(Failure::Schema),
@@ -922,6 +960,9 @@ fn read_file(daemon: &Daemon, request: FileExplorerRequest) -> Vec<Value> {
 
 fn release(daemon: &Daemon, subs: &mut Subscriptions, request: ReleaseRequest) -> Vec<Value> {
     subs.release(&request.subscription_id);
+    daemon
+        .terminals
+        .release(subs.connection(), &request.subscription_id);
     daemon
         .clients
         .released(subs.connection(), &request.subscription_id);

@@ -543,7 +543,11 @@ fn style_runs(
         let in_selection = selected
             .is_some_and(|range| (col..=col + cell.width as usize - 1).any(|c| range.contains(&c)));
         if in_selection {
-            style.1 = rgba_hsla(rgb(0xffffff), 0.2);
+            style.1 = if crate::theme::is_light() {
+                rgba_hsla(rgb(0x000000), 0.15)
+            } else {
+                rgba_hsla(rgb(0xffffff), 0.2)
+            };
         }
         let on_cursor = cursor
             .is_some_and(|cursor_col| cursor_col >= col && cursor_col < col + cell.width as usize);

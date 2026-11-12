@@ -42,7 +42,8 @@ async fn a_finished_turn_is_announced_with_the_first_line_of_the_reply() {
     let (daemon, mut phone) = fleet_saving_to(None).await;
     assert_eq!(
         phone.settings,
-        json!({"notify_default": true, "show_background": true})
+        json!({"notify_default": true, "show_background": true, "notify_updates": true,
+               "agent_routing": false})
     );
     daemon.finish_turn(
         "agt_a_run",

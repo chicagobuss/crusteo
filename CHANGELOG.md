@@ -7,6 +7,332 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-11
+
+The first release without a pre-release tag. Highlights:
+
+- **Agents can message agents on other hosts**, through Reef, once you turn it on (off by
+  default): prompts, follow-ups by id, and the fleet's hosts and agents in the agent tools.
+- **Burrow serves workspace terminals and session import**, so Paseo's app has both against it.
+- **A light theme** for the desktop app (#1).
+- Extensions can offer settings and right-click menus, and a scrolling box inside a conversation
+  scrolls on its own.
+
+Before you rely on it:
+
+- **Burrow has no passwords.** Keep it on loopback or a private network such as a VPN.
+- **Messaging between hosts adds no reach beyond Reef's:** an agent reaches only the hosts Reef
+  already connects to, and only through the agent tools Reef allows.
+- **Terminals end when Burrow stops,** so upgrading or restarting Burrow closes open terminals.
+- **Session import lists Claude Code and Codex sessions only.**
+- **Paseo's app against Burrow** still lacks diffs, file editing, voice, connected hosts and relay
+  pairing. See docs/burrow/compatibility.md.
+
+### Added
+
+- **A light theme for the desktop app** (#1). Settings → Window → Theme: Match system (the
+  default), Light or Dark. Match system follows the system's setting, and switches when it does;
+  a switch repaints every window at once, popped-out ones included. The light palette is
+  Paseo's, with terminal colours, dialog shadows and scroll fades made to read on white.
+- **Agents can message agents on other hosts, through Reef**, once you turn it on: a new
+  setting, "Agents can message agents on other hosts", in Skiff's and crusteo's settings, off by
+  default and for the whole fleet. With it on, an agent's `send_agent_prompt` for an agent its
+  Burrow does not have goes to the Reef, which finds it on any host by id, a unique id prefix
+  (seven characters or more) or its name, and delivers it there as a local prompt would be:
+  steered into a running turn where the provider can, else queued behind it, never cut off unless
+  asked. The receipt names the target's host. When the turn ends, errors or needs permission, the
+  sender gets the same finish notice a local child sends, with a `Host:` line. Reef keeps each
+  route under way in `routes.json` until the sender's Burrow has the notice, so a restart of
+  either Burrow or of Reef loses none. A name several agents share is refused with the
+  candidates listed. A pair of agents may route 20 prompts in ten minutes. With the setting off,
+  or no Reef connected, nothing changes, and the sender is told which, and what would help.
+  With it on, the other agent tools reach other hosts too. `list_hosts` lists the fleet's
+  hosts. `list_agents` with `fleet: true`, and `burrow ls --fleet`, list every host's agents,
+  each with its host. `get_agent_status`, `get_agent_activity`, `cancel_agent` and
+  `respond_to_permission` work on an agent anywhere by its id or name, so the follow-ups a
+  finish notice points to (a cut-off reply, a waiting permission) need no host. Nothing that
+  creates, archives or reconfigures an agent goes across, and Reef's allowlist enforces that.
+  **It is not a lock**: Burrow has no passwords, so anything that reaches a host can prompt its
+  agents with the setting on or off; routing adds no reach beyond Reef's own. Reef also answers
+  `GET`/`POST /api/settings` for a desktop in reef mode.
+
+- **Extensions can offer settings:** a Rust extension's `Contributions::settings` show in
+  Settings under Extensions, one line of text each (such as a service's address), with Change to
+  edit or clear it. crusteo keeps them in `integrations.json`, leaving its other keys as they are,
+  and tells the extension, so a new value can apply without a restart.
+
+- **Toolbar items can have a right-click menu:** a `ToolbarItem`'s `menu()` entries come first
+  when the item is right-clicked, above the bars' own (Customize toolbars…), in any bar,
+  the title bar included. `crusteo::extensions::open_settings` opens Settings at its Extensions
+  section, for an entry such as "… settings".
+
+- **Terminals on Burrow hosts.** Burrow runs workspace terminals, as Paseo's daemon does, so
+  crusteo's terminals (and Paseo's app's) work on hosts that moved to Burrow. Before, they
+  worked only on hosts still running Paseo's daemon.
+  - A terminal is a PTY on the host, running the user's shell (or a command) in the
+    workspace's folder.
+  - Clients list and watch a workspace's terminals, make them, attach to them, type into them,
+    resize, rename, read them back and kill them.
+  - Attaching brings back the screen as it is, history and modes included (from crusteo's own
+    emulator, serialized), then the output as it comes. Burrow answers the program's own
+    queries (cursor position, device attributes).
+  - A socket that falls behind gets a fresh screen once it catches up, rather than everything
+    it missed.
+  - The client that claimed a terminal's size keeps it.
+  - Archiving a workspace closes its terminals. Burrow advertises `workspaceTerminals`,
+    `terminal-restore-modes` and `terminal-size-ownership`.
+  - **Terminals do not survive a restart of Burrow**; an upgrade closes them.
+  - crusteo now keeps a terminal's frames that arrive before the reply naming their slot,
+    which a fast host can send.
+
+- **Project suggestions for Paseo 0.15's app:** Burrow answers `project.suggestions.request` and
+  advertises `projectSuggestions`. The app's first-run setup lists the folders agents already
+  ran in on that host, from Claude Code's transcripts and Codex's threads of the last 30 days. A
+  worktree or subfolder counts toward its repository's main checkout. Projects already added,
+  the home folder and title-only sessions are left out.
+
+- **Import a session, for Paseo's app:** Burrow answers `fetch_recent_provider_sessions_request`
+  and `import_agent_request`, and advertises `importSessionWorkspaceTarget` and
+  `importSessionSearch`. The app's Import session sheet lists the Claude Code and Codex sessions
+  on that host, with their names and first and last prompts, for a folder or a search, and
+  leaves out those an agent already has. Importing one makes an agent in the folder's workspace
+  (made when there is none) with the session's conversation as its timeline; its first prompt
+  resumes the session. An archived agent of the session comes back in place of a new one. Other
+  providers' sessions are not listed.
+
+- **Agents by workspace label:** `burrow ls --label billing` lists the agents whose workspace has
+  that label (several `--label`s must all match; `--label key=value` matches an agent's own
+  label), and the agent tool `list_agents` takes `workspaceLabels` the same way, across every
+  directory, with each agent's `workspaceLabels` in the result. Before, only an agent's own
+  `key=value` labels could be matched, and workspace labels are the ones the app shows.
+
+- **Agents can run `burrow`:** Burrow puts its own folder on each agent's `PATH` when no `burrow`
+  is on it, as it does for the Paseo app's `paseo`. A Burrow installed outside `PATH` (as in
+  `~/burrow/burrow`) left its agents with no `burrow` command.
+
+- **`burrow run`, `burrow wait` and `burrow logs`**, with `paseo run`'s flags (`--provider
+  codex/gpt-5.4`, `--model`, `--thinking`, `--mode`, `--title`, `--cwd`, `--workspace`, `--env`,
+  `--label`, `--no-wait`, `--wait-timeout 5m`), so an agent needs only Burrow's CLI to start a
+  helper, wait for it and read what it did. Run from an agent, the new one is its child in its
+  workspace. `run` and `wait` exit 2 when the agent waits on a permission and 3 when it is still
+  working at the limit, as `send` does.
+
+- **Restart a host from crusteo:** the Hosts list has Restart beside Reconnect. Burrow answers
+  Paseo's `restart_server_request`: it stops as it does on SIGTERM, then starts its own program
+  again in the same process, so systemd, launchd or an init script sees no change, and an upgraded
+  program on disk is the one that starts. With agents mid-turn, crusteo says how many it would
+  interrupt and asks first. A Burrow from before this says it does not know the request.
+
+- On Linux, every coding-agent CLI Burrow starts gets the **desktop's session bus as it is at
+  that moment**, so a CLI that keeps its login in the desktop keyring (Antigravity's `agy`)
+  can read it under a Burrow started at boot by a service manager, and after a new desktop login.
+  Burrow's own `DBUS_SESSION_BUS_ADDRESS` while its socket is there, else systemd's per-user bus,
+  else the one the user's running keyring or desktop session uses. Before, such a Burrow had none
+  (or a dead one), and `agy` failed until the service was given the address by hand. `burrow
+  status` on the host says which bus the CLIs get, or that there is none until someone logs in to
+  the desktop.
+
+- **Hosts through SSH**, as Paseo's desktop app and CLI reach them. A host's address can be
+  `ssh://[user@]host[:port]` (`?daemonPort=N` when its daemon is not on 6767). It works in the
+  desktop's Hosts screen, Reef's `hosts.json` and a phone's Add host, and `burrow --host`. Each
+  connection runs the system `ssh` with Paseo's arguments (`-W 127.0.0.1:<daemonPort>`,
+  `BatchMode`, no forwardings), with the keys, agent and `~/.ssh/config` of whoever runs it. That
+  covers aliases, `ProxyJump` and ports, and reaches a daemon that listens only on its host's
+  loopback with no port opened or tunnel kept up. A host it cannot reach shows what ssh said
+  ("Permission denied (publickey)", "stdio forwarding failed"). Each reconnect starts ssh again,
+  and closing the connection ends it.
+
+- History has **Grep** and **Sort**. Grep narrows the docked History as you type, to agents whose
+  name, workspace, host, tool or model, state, labels (`key=value` or the key alone), question or
+  error line, or latest reply holds every word typed; the header says "12 of 136", Esc empties the
+  box, and Ctrl+G (Cmd+G) docks History and puts the cursor in it. Sort orders it by Recent (the
+  latest change, as before), Needs you first, Last prompt, Newest agent, Oldest agent or Name A–Z,
+  and is kept across restarts.
+- Burrow sends each agent's latest reply with the agent (`lastReplyPreview`, the 220-character
+  preview its notifications use), updated as each turn ends, so History shows and greps every
+  agent's reply without reading each one's conversation. A Burrow started after this upgrade
+  fills it in once for agents it already had, from their saved conversations, without counting
+  that as a change to them. Agents on Paseo's own daemon, which sends none, still have their
+  replies read as before.
+- Skiff has **micro usage dials**, to try on a device with `?usage=micro` (`?usage=dial` goes
+  back). Up to four accounts share the top bar's room in a 2×2 block, each dial showing two
+  numbers. The needle is how fast the account is burning: up is on pace, left is room to spare,
+  right is too fast, moving as far for ten times the room as for ten times too fast. The centre's
+  colour, solid at the middle and fading out before the rim, is how much is left in that window:
+  blue when full, then green, yellow, orange and red, to dark red when spent; indigo means
+  nothing in it is used yet. The rim is in the account's colour. In the usage drawer, a button at
+  the end of each account's heading, in its dial's colour while it shows, slides open that
+  account's settings: whether it shows (four at most), its place in the block, and its colour.
+  These choices belong to that device.
+- Burrow asks Claude Code which models it offers, so a new Claude model needs no Burrow release
+  and no restart. At discovery (start, a change of the `claude` file, the hourly probe) it starts
+  the CLI in print mode with `--no-session-persistence` and the user's hooks turned off (a
+  `SessionStart` hook would otherwise count every probe as a session), sends an `initialize` request and no
+  message, and reads the `models` of the reply: labels, thinking levels and the default come from
+  the CLI, and an alias such as `opus` or `fable` is offered under the model it resolves to
+  (`claude-fable-5-1`), once. Models Burrow's table does not know get a 200k context window until
+  it does. The built-in list stays as the fallback when the CLI does not answer.
+- Providers snapshot entries for Claude and Codex carry the CLI's `version` and `installKind`
+  (`native`, `package` or `unknown`), and each running agent carries `cli`: the version its
+  process runs and whether a newer one is installed, which it switches to at its next prompt
+  when idle. Paseo's apps ignore these fields.
+- Reef tells Skiff when a coding-agent CLI upgrades or a model appears, once for the fleet: one
+  notification per new version ("Claude Code 2.1.320, on 7 of 10 hosts · new: Fable 5.2") that
+  is sent again under the same id as more hosts upgrade, two minutes after the first change. A
+  model that appears with no version change is announced on its own. A setting, **Notify on CLI
+  updates and new models**, turns it off. Skiff's Hosts sheet lists each host's CLIs, marking
+  those behind the newest version in the fleet. The desktop app shows the same as a toast and
+  on its Hosts screen.
+- Skiff's map has bands when grouped by combination too, as crusteo's Lanes does: the raised
+  labels an agent has, together, are its band ("billing", or "billing + metrics" when both are
+  raised), holding one lane of its other labels' combination, or "just" the band. A combination's
+  box offers each of its labels to raise ("Raise billing", "Raise metrics"), a band's lane lowers
+  every label of its band, and the Bands menu shows by combination as by label. Before, bands
+  existed only by label, and a combination's box offered nothing.
+- Skiff's notification cards can be pinned, so one stays until you dismiss it, and dismissed with
+  the x at their top right or a sideways swipe; a tap still opens the agent. A thin line along a
+  card's top drains as its seven seconds run out, and stops while a finger is on it. Pinned cards
+  survive a fifth arriving; Skiff's own banners are the same cards.
+- Rename an agent from Skiff: the agent's details have a Rename button beside its name, which
+  becomes the name to edit (Enter or Save renames it, Esc keeps it). Reef sends the daemon one
+  `update_agent_request` with the new name alone, as crusteo's rename does, checked field by
+  field like the labels one; a blank name or one over 200 characters is refused before anything
+  is sent. The new name shows at once.
+- `burrow status` asks the running Burrow what it is: version, pid, providers and agent counts,
+  and on Linux where its log goes (a file, the journal, or a closed terminal). It connects and says hello as a client does, so a Burrow whose
+  port answers but whose sessions fail shows as failing (exit 1). It finds Burrow through Paseo's
+  daemon lock, `--listen` or the default; `--host` or `PASEO_HOST` names it.
+- Burrow's own agent commands, for hosts without Paseo's CLI and for agents that look for one:
+  `burrow ls` (`-a` adds archived ones), `inspect`, `send` (waits for the reply and prints the
+  agent's last message; `--no-wait`, `--timeout`, `--prompt-file`), `rename`, `label key=value`,
+  `stop` and `archive` (which stops a running agent first, as archiving one mid-turn does not
+  stick). An agent is its id, a unique prefix of it, or its name; an ambiguous prefix lists the
+  matches. They talk to this host's Burrow, or to another with `--host <host[:port]>` (port 6767
+  when left out) or `PASEO_HOST`; `--json` prints snapshots. `burrow --help` lists them first,
+  then what Paseo's CLI is still for, and why Burrow should run under a service manager.
+- A prompt for an agent mid-turn whose provider cannot take a message mid-turn (Cursor, OpenCode,
+  Gemini, Antigravity) can wait behind the turn instead of cutting it off: it starts when the turn
+  ends, in order, up to 20 at a time. That is now the default for prompts from agents (the
+  `send_agent_prompt` tool and `burrow send`), for finish notices and for schedules; agents whose
+  provider can be steered are still steered. `activeTurnBehavior` gains `queue` (always wait) and
+  `auto` (the new default); `steer` keeps Paseo's meaning, falling back to interrupting, and a
+  prompt from a person (Paseo's apps, crusteo, Skiff) still replaces the turn unless it asks
+  otherwise. `burrow send` has `--queue`, `--interrupt` and `--steer`. Stopping or archiving the
+  agent drops what waits.
+- `send_agent_prompt`'s receipt says what became of the prompt (`disposition`: started, steered,
+  queued with its `queuePosition`, or interrupting) and who got it (`target`: id, title and host),
+  and a queued prompt's finish notice comes when its own turn ends, with that turn's reply. The
+  protocol's `send_agent_message_response` carries the disposition, message id and turn id, and
+  `wait_for_finish_request` takes a `turnId` or a queued prompt's `messageId` to wait for that
+  turn rather than whichever is running.
+- Reef's recording puts every record's searchable text in one field, `body`: a reply's `text`, a
+  tool call's name, input and output, a finished turn's prompt and reply, a to-do list's items.
+  An index that searches `body` reaches them all, where one that searched `text` reached about a
+  seventh of the records. It is scrubbed as the other fields are and leaves out what `redact.drop`
+  drops (no tool output in it while `tool_output` is dropped). The Elasticsearch example through
+  Vector maps it as text.
+- A recording sink can start `from: "start"`: an agent it has no cursor for is read from the
+  beginning of its timeline, as far back as the daemon holds it, so a search index made today holds
+  yesterday's work. It is read a few agents at a time, and waits while the sink is far behind. A
+  sink without `from` starts at each agent's end, as before. Archived agents are left out.
+- Reef's recording tells each sink when an agent is deleted: a `forget` record, sent whatever the
+  sink's `kinds` say, after which the sink's cursor for it goes. A daemon says `remove` for an
+  archived agent as well as a deleted one, so Reef asks the daemon for the agent by id, and only
+  one it no longer has is forgotten; archiving sends nothing. A deletion Reef missed, because the
+  host was down or Reef was off, is caught up when Reef connects to the host.
+- Recording has an `http` sink: Reef POSTs each batch of `reef-sink/1` to a URL, with the token
+  from the environment variable `token_env` names as `Authorization: Bearer`, for a plugin that is
+  not on Reef's machine. Any `2xx` is the ack; a `429` or `503` with `Retry-After` is a retry; any
+  other answer is logged and tried again after a pause that grows to a minute, and nothing is
+  dropped. See docs/reef/record.md.
+
+### Changed
+
+- **Hosts slides in as a pane** over any layout, as Settings does, sized for its list, instead of
+  taking over the Paseo layout's whole screen with its buttons far from the hosts' names.
+
+- Skiff's views go round: the map, the current conversation (the one last opened, from the map or
+  the list), the list, and back to the map. A swipe left goes on round and a swipe right goes back
+  round, so a swipe left on the map reopens the current conversation, one on the list goes to the
+  map, and a swipe right on the list reopens the conversation. With no conversation opened yet,
+  or its agent gone from the map, it is the map and the list. A trackpad's two-finger swipe does
+  the same. In a lane a swipe right still goes back, and a conversation's back button still goes
+  back to where it was opened from.
+- Skiff puts the filters panel away while a conversation is open, however it was opened, and
+  brings it back with the map or the list, which its filters are for.
+- The docked History's Grep box and Sort sit in its header row, beside the count, rather than in
+  a row of their own under it, so the list starts a row higher.
+- Builds between releases call themselves `0.2.0-internal-<commit>` (`crusteo --version`, About, the
+  settings screen, `burrow --version` and `reef --version`) rather than the last release's version
+  with the commit beside it; a release still says `0.2.0 (<commit>)`. A Windows build from a
+  checkout whose git directory Windows' git cannot open (a worktree made from WSL) now finds its
+  commit from git's files rather than saying "unknown".
+- Such a build of Burrow tells clients it is `0.2.0-internal-<commit>-burrow`, so `burrow status`,
+  Reef's Hosts screen and Paseo's apps can tell two of them apart; they all said
+  `0.2.0-internal-burrow`. A release still says `0.2.0-burrow`.
+
+### Fixed
+
+- **A scrolling box inside a conversation scrolls alone.** The wheel over a tool's details, or
+  any box with its own scroll inside a conversation or a lane, moved the box and the
+  conversation (or the lane) together. Now the box scrolls until it reaches its end, and only
+  then does the conversation or lane behind it, as in a browser.
+
+- **Burrow no longer signs Claude out.** Its model check (at start, and hourly) killed `claude`
+  the moment it had listed its models. A CLI that starts after its sign-in has expired renews it
+  first, and one killed mid-renewal left the old refresh token spent and the new one unsaved:
+  every Claude agent on the host then failed with "OAuth session expired and could not be
+  refreshed" until someone signed in again. It struck hosts where no agent had run for longer
+  than a sign-in lasts, where the check was the first to renew it. The check now closes the CLI's
+  input and lets it exit by itself, which takes a third of a second; it is killed only if it is
+  still running a minute later.
+- **Burrow listens as soon as it starts**, and finds its providers meanwhile. It used to listen
+  only once every provider had said what it offers, which takes over 30 seconds on a host where
+  one is slow (Antigravity timing out, pi still loading its models), so an upgrade that waited 30
+  seconds for the port put the old binary back though the new one was fine. Each provider now
+  joins the providers snapshot as it is found, pushed to `providers_snapshot_update` subscribers.
+  Creating an agent, sending to one, or changing its mode, model or thinking while its provider
+  is still being found waits for it rather than failing. `burrow status` and
+  `daemon.get_status` say "not looked for yet" for a provider not reached yet.
+- The macOS upgrade script (`upgrade-macos.sh`) gives a started Burrow 90 seconds to listen
+  before it puts `burrow.prev` back (`BURROW_LISTEN_WAIT_SECONDS` to change it), and its log says
+  how long it took.
+- A recording sink's cursor never goes back when another sink, further behind, makes Reef read an
+  agent again from its own place; it could be put back and sent records it had had. A turn's
+  summary is also no longer sent again to a sink that is past the turn.
+- A finish notice, `burrow send` and a schedule run report the end of the turn they started or
+  joined, with that turn's reply. Before, they waited for the agent to go idle, so when another
+  prompt started a turn straight after, they could report that turn and its reply instead.
+
+- Burrow keeps serving when its standard output and error go away, as when it was started from a
+  terminal that has since closed. Each log line it could not write made the logging library
+  report the failure on stderr, which panicked once stderr was gone too: every new connection
+  died on its first log line (Paseo's CLI saw "Transport closed (code 1006)") while the daemon
+  and its agents kept running. A line that cannot be written is now dropped. Its log also has no
+  colour codes when it goes to a file.
+- An Antigravity agent's finished reply no longer ends in a "[System Error]" its run did not
+  have. agy can end a turn whose reply has already come with an ERROR result carrying an old
+  error (a 5 minute stream timeout reported after an 80 second turn its own transcript marks
+  DONE). Burrow now keeps such a turn as completed, with agy's error as a separate note; an
+  ERROR before the reply still fails the turn. A failed turn's "[System Error]" is a message of
+  its own, so it no longer runs on from the reply's last line.
+
+### Security
+
+- Burrow's agent tools (its MCP server) no longer serve a client with no token. A request without
+  one was a "top-level client" with the full tools, so any program on the host that found the
+  loopback port could create and prompt agents. Such a client now sends the token Burrow writes to
+  `~/.burrow/mcp-token` (readable by its user alone, kept across restarts) as `Authorization:
+  Bearer`; `burrow mcp-bridge`, given an address and no token, reads it. Agents are unaffected:
+  every provider hands each its own token, and none of Paseo's apps or CLI uses this server.
+  `--mcp-tokenless` (`BURROW_MCP_TOKENLESS=1`) accepts a client with no token again, for a script
+  not yet changed.
+- Reef's `/api/hosts` and `/api/labels` take the device token in an `Authorization: Bearer` header,
+  and the desktop in reef mode sends it there, so it no longer goes in a URL that a proxy's or
+  Reef's own log keeps. `?t=` is still read on them for a desktop from before this, and a desktop
+  asks again with it of a Reef that answers its header with a 401. `/image/` keeps `?t=`, as an
+  `<img>` cannot send a header.
+
 ## [0.1.0-beta.6] - 2026-11-06
 
 ### Added
@@ -784,7 +1110,8 @@ First alpha, for a few early testers. Early software: expect rough edges.
 - Patched GPUI (`vendor/gpui-pre`) that skips redraws on window moves and lets cached views be
   reused after they move.
 
-[Unreleased]: https://github.com/chicagobuss/crusteo/compare/v0.1.0-beta.6...HEAD
+[Unreleased]: https://github.com/chicagobuss/crusteo/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/chicagobuss/crusteo/releases/tag/v0.2.0
 [0.1.0-beta.6]: https://github.com/chicagobuss/crusteo/releases/tag/v0.1.0-beta.6
 [0.1.0-beta.5]: https://github.com/chicagobuss/crusteo/releases/tag/v0.1.0-beta.5
 [0.1.0-beta.4]: https://github.com/chicagobuss/crusteo/releases/tag/v0.1.0-beta.4

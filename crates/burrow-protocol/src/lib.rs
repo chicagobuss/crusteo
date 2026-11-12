@@ -22,7 +22,9 @@ pub mod envelope;
 pub mod hello;
 pub mod labels;
 pub mod reply;
+pub mod routing;
 pub mod server_info;
+pub mod terminal;
 pub mod timeline;
 
 /// The protocol version in `hello.protocolVersion` and `server_info`. The

@@ -30,7 +30,50 @@ type Socket = WebSocketStream<TcpStream>;
 
 enum Out {
     Text(String),
+    Binary(Vec<u8>),
     Close(u16, &'static str),
+}
+
+/// Another way onto a connection's outbound queue, in order with its
+/// replies: for terminal streams, which send their own frames, binary ones
+/// too, from their tasks. Bytes count toward the queue as the session's own
+/// do, and [`Frames::queued`] says how many wait, so a stream can fall
+/// back to a snapshot rather than overflow the socket.
+#[derive(Clone)]
+pub struct Frames {
+    tx: mpsc::UnboundedSender<Out>,
+    queued: Arc<AtomicUsize>,
+}
+
+impl std::fmt::Debug for Frames {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Frames")
+            .field("queued", &self.queued())
+            .finish()
+    }
+}
+
+impl Frames {
+    pub fn text(&self, frame: &Value) {
+        let text = frame.to_string();
+        self.queued.fetch_add(text.len(), Ordering::AcqRel);
+        let _ = self.tx.send(Out::Text(text));
+    }
+
+    pub fn binary(&self, bytes: Vec<u8>) {
+        self.queued.fetch_add(bytes.len(), Ordering::AcqRel);
+        let _ = self.tx.send(Out::Binary(bytes));
+    }
+
+    /// Bytes queued and not yet written.
+    pub fn queued(&self) -> usize {
+        self.queued.load(Ordering::Acquire)
+    }
+
+    /// Whether the socket is gone.
+    pub fn closed(&self) -> bool {
+        self.tx.is_closed()
+    }
 }
 
 /// The socket's outbound queue. Bytes count from enqueue until the frame is
@@ -65,6 +108,14 @@ fn spawn_writer(
                 Out::Text(text) => {
                     let len = text.len();
                     let sent = sink.send(Message::text(text)).await;
+                    queued.fetch_sub(len, Ordering::AcqRel);
+                    if sent.is_err() {
+                        return;
+                    }
+                }
+                Out::Binary(bytes) => {
+                    let len = bytes.len();
+                    let sent = sink.send(Message::binary(bytes)).await;
                     queued.fetch_sub(len, Ordering::AcqRel);
                     if sent.is_err() {
                         return;
@@ -116,6 +167,7 @@ pub async fn run(
             info!(%peer, client_id = hello.client_id(), "client connected");
             let shape = ClientShape {
                 compact_provider_snapshots: hello.has(capability::COMPACT_PROVIDER_SNAPSHOTS),
+                chunked_terminal_replay: hello.has(capability::TERMINAL_CHUNKED_REPLAY),
             };
             session(&daemon, &mut stream, &mut out, shape, shutdown).await
         }
@@ -182,12 +234,15 @@ async fn await_hello(
     Ok(hello)
 }
 
-/// Forgets a connection's client ([`crate::push::Clients`]) when dropped.
+/// Forgets a connection's client ([`crate::push::Clients`]), and the Reef
+/// routing over it, when dropped.
 struct Gone<'a>(&'a Daemon, u64);
 
 impl Drop for Gone<'_> {
     fn drop(&mut self) {
         self.0.clients.gone(self.1);
+        self.0.router.gone(self.1);
+        self.0.terminals.gone(self.1);
     }
 }
 
@@ -204,6 +259,10 @@ async fn session(
     let mut changes = daemon.changes();
     let generation = daemon.read(|store| store.generation.clone());
     let mut subs = Subscriptions::for_client(shape.compact_provider_snapshots);
+    subs.frames = Some(Frames {
+        tx: out.tx.clone(),
+        queued: out.queued.clone(),
+    });
     // However the session ends, notifications forget this client.
     let _gone = Gone(daemon, subs.connection());
     out.send(&daemon.server_info().frame());
@@ -246,10 +305,12 @@ async fn session(
                         Ok(Inbound::RecordingState(_)) => {}
                         Err(err) => out.send(&status_error(&format!("Invalid message: {err}"))),
                     },
-                    // Terminal input (0x02) and resize (0x03) need a slot
-                    // from subscribe_terminal_request; phase 0 has none, so
-                    // they are dropped. Anything else is an error.
-                    Message::Binary(bytes) if !matches!(bytes.first(), Some(0x02 | 0x03)) => {
+                    // Terminal input (0x02) and resize (0x03), on a slot this
+                    // socket holds. Anything else is an error.
+                    Message::Binary(bytes) if matches!(bytes.first(), Some(0x02 | 0x03)) => {
+                        daemon.terminals.binary(subs.connection(), &bytes);
+                    }
+                    Message::Binary(_) => {
                         out.send(&status_error("Invalid message: unknown binary frame"));
                     }
                     // tungstenite answers protocol pings itself. They do not

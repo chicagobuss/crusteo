@@ -66,6 +66,9 @@ pub fn parse_inbound(text: &str) -> Result<Inbound, InboundError> {
     }
 }
 
+/// The `type` of a correlated failure.
+pub const RPC_ERROR: &str = "rpc_error";
+
 /// `{"type":"session","message":{"type":kind,"payload":payload}}`.
 pub fn session(kind: &str, payload: impl Serialize) -> Value {
     json!({
@@ -112,7 +115,7 @@ pub fn rpc_error(request_id: &str, request_type: Option<&str>, error: &str, code
     }
     payload.insert("error".into(), error.into());
     payload.insert("code".into(), code.into());
-    session("rpc_error", Value::Object(payload))
+    session(RPC_ERROR, Value::Object(payload))
 }
 
 /// An uncorrelated failure: `status{status:"error"}`. It never closes the socket.
@@ -123,6 +126,50 @@ pub fn status_error(message: &str) -> Value {
 /// The `requestId` of an inbound session message, if it has a string one.
 pub fn request_id(message: &Value) -> Option<&str> {
     message.get("requestId").and_then(Value::as_str)
+}
+
+/// A session message as a client sends it: flat, with the arguments next to
+/// `type`. The counterpart of [`parse_inbound`].
+pub fn request_frame(message: Value) -> Value {
+    json!({ "type": "session", "message": message })
+}
+
+/// The session message inside a frame. A bare frame is its own message.
+pub fn unwrap_session(frame: &Value) -> &Value {
+    if frame["type"] == "session" {
+        &frame["message"]
+    } else {
+        frame
+    }
+}
+
+/// The `requestId` a reply echoes, inside its `payload`. The counterpart of
+/// [`request_id`].
+pub fn reply_request_id(message: &Value) -> Option<&str> {
+    message
+        .get("payload")
+        .and_then(|payload| payload.get("requestId"))
+        .and_then(Value::as_str)
+}
+
+/// What a client reads from an `rpc_error` payload. The counterpart of
+/// [`rpc_error`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RpcFailure {
+    pub code: Option<String>,
+    pub message: String,
+}
+
+impl RpcFailure {
+    pub fn from_payload(payload: &Value) -> Self {
+        Self {
+            code: payload["code"].as_str().map(str::to_string),
+            message: payload["error"]
+                .as_str()
+                .unwrap_or("request failed")
+                .to_string(),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -156,5 +203,37 @@ mod tests {
         assert_eq!(frame["message"]["payload"]["requestId"], "r1");
         let error = rpc_error("r2", Some("x"), "nope", "unknown_schema");
         assert_eq!(error["message"]["payload"]["code"], "unknown_schema");
+    }
+
+    #[test]
+    fn a_client_reads_what_the_daemon_writes() {
+        let error = rpc_error("r2", Some("x"), "nope", "unknown_schema");
+        let message = unwrap_session(&error);
+        assert_eq!(message["type"], RPC_ERROR);
+        assert_eq!(reply_request_id(message), Some("r2"));
+        assert_eq!(
+            RpcFailure::from_payload(&message["payload"]),
+            RpcFailure {
+                code: Some("unknown_schema".into()),
+                message: "nope".into()
+            }
+        );
+        assert_eq!(
+            RpcFailure::from_payload(&json!({})),
+            RpcFailure {
+                code: None,
+                message: "request failed".into()
+            }
+        );
+    }
+
+    #[test]
+    fn a_daemon_reads_what_the_client_writes() {
+        let frame = request_frame(json!({"type": "fetch_agents_request", "requestId": "r1"}));
+        let Ok(Inbound::Session(message)) = parse_inbound(&frame.to_string()) else {
+            panic!("session frame")
+        };
+        assert_eq!(request_id(&message), Some("r1"));
+        assert_eq!(unwrap_session(&json!({"type": "pong"}))["type"], "pong");
     }
 }

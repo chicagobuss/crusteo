@@ -13,7 +13,7 @@ mod workspace;
 
 pub use composer::bind_keys;
 pub use conversation::{Conversation, ConversationEvent};
-pub use screens::{SETTINGS_WIDTH, SettingsPane};
+pub use screens::{HOSTS_WIDTH, HostsPane, SETTINGS_WIDTH, SettingsAt, SettingsPane};
 pub use sidebar::{Sidebar, add_project};
 pub use terminal::TerminalView;
 pub use terminal::bind_keys as bind_terminal_keys;
@@ -28,7 +28,7 @@ use gpui_kit::prelude::FluentBuilder;
 
 use crate::app::{Core, Screen};
 use crate::theme::{palette, size};
-use screens::{HistoryScreen, HostsScreen, NewWorkspaceScreen};
+use screens::{HistoryScreen, NewWorkspaceScreen};
 use workspace::WorkspaceView;
 
 pub fn build(core: &Core, window: &mut Window, cx: &mut App) -> AnyView {
@@ -40,7 +40,6 @@ pub struct PaseoLayout {
     core: Core,
     pub sidebar: Entity<Sidebar>,
     workspace: Entity<WorkspaceView>,
-    hosts: Option<Entity<HostsScreen>>,
     new_workspace: Option<Entity<NewWorkspaceScreen>>,
     history: Option<Entity<HistoryScreen>>,
     last_screen: Screen,
@@ -56,7 +55,6 @@ impl PaseoLayout {
             core,
             sidebar,
             workspace,
-            hosts: None,
             new_workspace: None,
             history: None,
             last_screen: Screen::Workspace,
@@ -79,13 +77,6 @@ impl Render for PaseoLayout {
 
         let content: AnyElement = match screen {
             Screen::Workspace => self.workspace.clone().cached_fill(),
-            Screen::Hosts => {
-                let core = self.core.clone();
-                self.hosts
-                    .get_or_insert_with(|| cx.new(|cx| HostsScreen::new(core, window, cx)))
-                    .clone()
-                    .cached_fill()
-            }
             Screen::NewWorkspace { .. } => {
                 let core = self.core.clone();
                 self.new_workspace

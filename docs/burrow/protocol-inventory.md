@@ -45,7 +45,8 @@ outbound messages are `{type, payload}`. Both travel inside `{"type":"session","
 | `get_daemon_config_request` / `set_daemon_config_request` | C→D | Read / patch mutable config | | P2 | |
 | `read_project_config_request` / `write_project_config_request` | C→D | Read / write a repo's `paseo.json` | | P2 | |
 | `diagnostics.request` | C→D | Diagnostics dump | | P2 | |
-| `shutdown_server_request` / `restart_server_request` | C→D | Reply `status{shutdown_requested\|restart_requested}` | | P2 | |
+| `shutdown_server_request` | C→D | Reply `status{shutdown_requested}` | | P2 | |
+| `restart_server_request` | C→D | Reply `status{restart_requested}`, then stop as on SIGTERM and start again in the same process (Unix) | yes | P2 | done |
 | `daemon.update.request` | C→D | Self-update; `daemon.update.progress`* then `.response` | | P2 | |
 | `status{daemon_config_changed\|plugin_catalog_changed\|plugin_settings_changed}` | D→C | Config and plugin changes (event subscription) | | P2 | |
 
@@ -93,8 +94,8 @@ outbound messages are `{type, payload}`. Both travel inside `{"type":"session","
 | `close_items_request` | C→D | Archive agents and kill terminals together | | P2 | |
 | `wait_for_finish_request` | C→D | Block until the turn ends: `paseo send` (unless `--no-wait`), `paseo run`, `paseo wait` | | P1 | done: `idle`/`error`/`permission`/`timeout`, as Paseo answers |
 | `resume_agent_request` | C→D | Resume a provider handle; reply `status{agent_resumed}` | | P2 | |
-| `import_agent_request` | C→D | Import a provider session | | P2 | |
-| `fetch_recent_provider_sessions_request` | C→D | Importable provider sessions | | P2 | |
+| `import_agent_request` | C→D | Import a provider session; reply `status{agent_resumed\|agent_create_failed}` | | P2 | done: Claude and Codex; a closed agent that resumes the session at its first prompt, with its conversation as the timeline; an archived agent of it comes back |
+| `fetch_recent_provider_sessions_request` | C→D | Importable provider sessions (features `importSessionWorkspaceTarget`, `importSessionSearch`) | | P2 | done: Claude and Codex; `providers`, `cwd`, `since`, `query`, `limit` |
 | `agent.timeline.search.request` | C→D | Find in chat | | P2 | |
 | `agent.timeline.append.request` | C→D | Plugin appends a `plugin` item | | P2 | |
 | `agent.fork_context.request` | C→D | Export context for "fork chat from here" | | P2 | |
@@ -177,7 +178,7 @@ state), `0x05` restore. Slots are per socket.
 
 | Message | Purpose | C | Tier |
 |---|---|---|---|
-| `get_providers_snapshot_request` | Providers with modes, models, thinking options; `compactSnapshot` when the client has `compact_provider_snapshots` | yes | P1 |
+| `get_providers_snapshot_request` | Providers with modes, models, thinking options; `compactSnapshot` when the client has `compact_provider_snapshots`. Burrow adds `version` and `installKind` to the entries of providers whose CLI it knows, and `cli` (`version`, `newerInstalled`) to an agent with a running process: extra keys that Paseo's zod objects strip | yes | P1 |
 | `providers_snapshot_update` (D→C) | Snapshot changed (event subscription) | | P1 |
 | `refresh_providers_snapshot_request` | Force a re-probe | | P1 |
 | `set_agent_mode_request`, `set_agent_model_request`, `set_agent_thinking_request` | Switch mode / model / thinking level | yes | P1 |

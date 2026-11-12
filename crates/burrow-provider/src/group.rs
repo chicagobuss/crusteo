@@ -24,8 +24,10 @@ use tokio::process::{Child, Command};
 /// How long the group has to exit after `SIGTERM` before `SIGKILL`.
 pub const KILL_AFTER: Duration = Duration::from_secs(2);
 
-/// Starts `command` as the leader of a new process group.
+/// Starts `command` as the leader of a new process group, with the
+/// desktop's session bus as it is now ([`crate::session_bus`]).
 pub fn spawn(command: &mut Command) -> std::io::Result<Grouped> {
+    crate::session_bus::apply(command.as_std_mut());
     #[cfg(unix)]
     command.process_group(0);
     #[cfg(not(unix))]

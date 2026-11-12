@@ -815,6 +815,9 @@ fn import_agent(
         attention_reason: agent.attention_reason.filter(|_| attention),
         attention_timestamp: agent.attention_timestamp.clone().filter(|_| attention),
         archived_at: agent.archived_at.clone(),
+        // Filled from the imported timeline when Burrow next starts.
+        last_reply_preview: None,
+        cli: None,
     };
     if let Some(prompt) = config.and_then(|c| c.system_prompt.as_deref()) {
         store.set_provider_config(&id, json!({"systemPrompt": prompt}));

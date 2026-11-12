@@ -6,32 +6,46 @@
 
 use std::mem::size_of;
 
-use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value, json};
+use serde::Deserialize;
+use serde_json::{Map, Value};
+
+// The symmetric pieces of the wire live in `burrow-protocol`, where the daemon
+// shares them. The entities below stay here: they are the lenient inbound
+// views, which absorb the quirks of older daemons in one place.
+pub use burrow_protocol::directory::{
+    Cursor, PageInfo, StateBucket as Bucket, SyncMeta, SyncRemoval as Removal,
+};
 
 /// Capabilities advertised in `hello`. The same set the Paseo app sends, minus
 /// browser hosting. `owned_subscriptions` matters most: without it the daemon
 /// broadcasts directory traffic to every client.
 pub fn capabilities() -> Value {
-    json!({
-        "hello_rejection": true,
-        "owned_subscriptions": true,
-        "all_providers": true,
-        "selective_agent_timeline": true,
-        "reasoning_merge_enum": true,
-        "custom_mode_icons": true,
-        "terminal_reflowable_snapshot": true,
-        "provider_subagents": true,
-        "projected_subagent_timeline": true,
-        "project_updates": true,
-        "compact_provider_snapshots": true,
-        "provider_snapshot_references": true,
-        "timeline_replacement_invalidation": true,
-        "timeline_notifications": true,
-        "plugin_timeline_items": true,
-        "workspace_setup_blocked": true,
-        "explicit_event_subscriptions": true,
-    })
+    use burrow_protocol::hello::capability as cap;
+    let advertised = [
+        cap::HELLO_REJECTION,
+        cap::OWNED_SUBSCRIPTIONS,
+        cap::ALL_PROVIDERS,
+        cap::SELECTIVE_AGENT_TIMELINE,
+        cap::REASONING_MERGE_ENUM,
+        cap::CUSTOM_MODE_ICONS,
+        cap::TERMINAL_REFLOWABLE_SNAPSHOT,
+        cap::PROVIDER_SUBAGENTS,
+        cap::PROJECTED_SUBAGENT_TIMELINE,
+        cap::PROJECT_UPDATES,
+        cap::COMPACT_PROVIDER_SNAPSHOTS,
+        cap::PROVIDER_SNAPSHOT_REFERENCES,
+        cap::TIMELINE_REPLACEMENT_INVALIDATION,
+        cap::TIMELINE_NOTIFICATIONS,
+        cap::PLUGIN_TIMELINE_ITEMS,
+        cap::WORKSPACE_SETUP_BLOCKED,
+        cap::EXPLICIT_EVENT_SUBSCRIPTIONS,
+    ];
+    Value::Object(
+        advertised
+            .into_iter()
+            .map(|name| (name.to_string(), Value::Bool(true)))
+            .collect(),
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -86,52 +100,6 @@ impl ServerInfo {
 /// The feature a daemon advertises when it hides background workspaces, and
 /// their agents, from clients that do not send `includeBackground`.
 pub const BACKGROUND_WORKSPACES: &str = "backgroundWorkspaces";
-
-/// Directory sync cursor: `{generation, afterSeq}`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "camelCase")]
-pub struct Cursor {
-    pub generation: String,
-    pub after_seq: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Deserialize, Default)]
-#[serde(rename_all = "camelCase")]
-pub struct SyncMeta {
-    #[serde(default)]
-    pub generation: String,
-    #[serde(default)]
-    pub head_seq: u64,
-    #[serde(default)]
-    pub mode: String,
-    #[serde(default)]
-    pub reason: Option<String>,
-    #[serde(default)]
-    pub removals: Vec<Removal>,
-}
-
-impl SyncMeta {
-    pub fn is_snapshot(&self) -> bool {
-        self.mode != "changes"
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-pub struct Removal {
-    #[serde(alias = "name")]
-    pub id: String,
-    #[serde(default)]
-    pub seq: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Deserialize, Default)]
-#[serde(rename_all = "camelCase")]
-pub struct PageInfo {
-    #[serde(default)]
-    pub next_cursor: Option<String>,
-    #[serde(default)]
-    pub has_more: bool,
-}
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
@@ -384,6 +352,13 @@ impl Agent {
         })
     }
 
+    /// Burrow's preview of the agent's latest reply, sent with the agent:
+    /// None from a daemon that sends none (Paseo's), empty for an agent with
+    /// no reply yet.
+    pub fn last_reply_preview(&self) -> Option<&str> {
+        self.raw.get("lastReplyPreview").and_then(Value::as_str)
+    }
+
     pub fn display_title(&self) -> String {
         match self.title.as_deref() {
             Some(title) if !title.eq_ignore_ascii_case("new agent") => title.to_string(),
@@ -461,58 +436,6 @@ impl Agent {
     }
 }
 
-/// Paseo's state buckets, highest priority first.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum Bucket {
-    NeedsInput,
-    Failed,
-    Running,
-    Attention,
-    Done,
-}
-
-impl Bucket {
-    pub fn parse(status: &str) -> Self {
-        match status {
-            "needs_input" => Bucket::NeedsInput,
-            "failed" => Bucket::Failed,
-            "running" => Bucket::Running,
-            "attention" => Bucket::Attention,
-            _ => Bucket::Done,
-        }
-    }
-
-    /// The name [`Bucket::parse`] reads back.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Bucket::NeedsInput => "needs_input",
-            Bucket::Failed => "failed",
-            Bucket::Running => "running",
-            Bucket::Attention => "attention",
-            Bucket::Done => "done",
-        }
-    }
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Bucket::NeedsInput => "Needs input",
-            Bucket::Failed => "Failed",
-            Bucket::Running => "Working",
-            Bucket::Attention => "Ready to review",
-            Bucket::Done => "Done",
-        }
-    }
-
-    /// Sidebar status-group order.
-    pub const GROUP_ORDER: [Bucket; 5] = [
-        Bucket::NeedsInput,
-        Bucket::Failed,
-        Bucket::Attention,
-        Bucket::Running,
-        Bucket::Done,
-    ];
-}
-
 // Approximate allocations, not serialized bytes: JSON strings, array
 // capacity, and map nodes can be much larger than their wire representation.
 pub(crate) fn json_bytes(value: &Value) -> usize {
@@ -535,7 +458,24 @@ pub(crate) fn json_bytes(value: &Value) -> usize {
 
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
+
     use super::*;
+
+    #[test]
+    fn advertised_capabilities_are_the_paseo_app_set() {
+        let expected = json!({
+            "hello_rejection": true, "owned_subscriptions": true, "all_providers": true,
+            "selective_agent_timeline": true, "reasoning_merge_enum": true,
+            "custom_mode_icons": true, "terminal_reflowable_snapshot": true,
+            "provider_subagents": true, "projected_subagent_timeline": true,
+            "project_updates": true, "compact_provider_snapshots": true,
+            "provider_snapshot_references": true, "timeline_replacement_invalidation": true,
+            "timeline_notifications": true, "plugin_timeline_items": true,
+            "workspace_setup_blocked": true, "explicit_event_subscriptions": true,
+        });
+        assert_eq!(capabilities(), expected);
+    }
 
     #[test]
     fn server_info_from_status() {

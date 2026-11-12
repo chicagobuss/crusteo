@@ -1010,6 +1010,8 @@ mod tests {
                 label: "Auto".into(),
             }],
             models: vec![],
+            version: None,
+            install_kind: None,
         };
         let config = agent_config(&provider, Some("opus"), None, None, "/w");
         assert_eq!(config["modeId"], "auto");

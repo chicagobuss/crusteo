@@ -388,33 +388,37 @@ from Paseo's 7,177-line adapter.
 6. **Manual end-to-end runs.** Crusteo, Reef and the official desktop app against a local
    Burrow, before a phase is called done.
 
-## 10. One shared protocol crate
+## 10. Shared wire primitives
 
-Today the wire format is described twice (the type-by-type list is in
-[README.md](README.md#next-step-one-shared-protocol-crate)):
+The wire format was described twice (the table is in
+[README.md](README.md#shared-wire-primitives)):
 - Burrow's `burrow-protocol` holds the server's side: typed payloads it produces, inbound
   request structs, reply naming, codes.
 - Crusteo's `paseo-client` holds the client's side: `proto.rs` (lenient typed views,
-  capabilities), the envelope handling in `connection.rs`, and the terminal frame codec in
-  `terminal.rs`.
+  capabilities), the envelope handling in `connection.rs`, and the terminal frame codec.
 
-Reef adds a third consumer. Merge them into one `crates/paseo-protocol`:
+Reef adds a third consumer. The two crates now share what is the same in both directions, and
+nothing more. `burrow-protocol` keeps its name: Crusteo, Burrow and Paseo are heading in their
+own directions, so a crate named for Paseo would promise a parity nobody has agreed to.
 
-1. **Contents.**
-   - Envelopes, hello, `server_info` and capability names.
-   - Reply naming, close and error codes, timing constants.
-   - Directory, timeline, permission and terminal payloads.
-   - Binary frame codecs.
+1. **Shared, in `burrow-protocol`.**
+   - `PROTOCOL_VERSION`, capability names, close and error codes.
+   - Envelope helpers, each writer beside its reader.
+   - Directory sync metadata (`Cursor`, `SyncMeta`, `SyncRemoval`, `PageInfo`) and `StateBucket`.
+   - The binary terminal frame codec, which Burrow's terminals will use too.
    - No I/O and no async: serde and serde_json only.
-2. **One type, both directions.** Every payload derives both `Serialize` and `Deserialize`.
-   Unknown fields are tolerated, and optional fields default, as Crusteo's `proto.rs` does
-   today. `Option` fields keep Paseo's distinction between `nullable` (sent as `null`) and
-   `optional` (left out), so the daemon emits what Paseo emits.
-3. **Order of work.**
-   1. Rename `burrow-protocol` to `paseo-protocol`, and move in `paseo-client`'s terminal
-      codec.
-   2. Change `paseo-client` to re-export its types, and delete the duplicates in `proto.rs`.
-   3. Do it after the P1 payloads (agents, permissions, terminals) settle, so the API moves once.
+2. **Separate, on purpose.** Directory entities stay two types:
+   - `AgentSnapshot`, `WorkspaceDescriptor` and `ProjectDescriptor` are strict and written
+     whole. `Option` fields keep Paseo's distinction between `nullable` (sent as `null`) and
+     `optional` (left out), so the daemon emits what Paseo emits.
+   - `Agent`, `Workspace` and `Project` in `paseo-client` are lenient views. Unknown fields are
+     tolerated, optional fields default, and the shims for Paseo 0.10-0.14 stay in this one
+     place.
+   - One type for both would need `serde` contortions and would put those shims into Burrow's
+     clean types.
+3. **Lenient where shared.** A shared type that a client reads and the daemon writes derives
+   both, and is lenient on the read side only: missing fields default, an unknown `mode` is a
+   snapshot, an unknown `reason` is absent. The daemon's output is unchanged.
 4. **Generated JSON Schema as an oracle, not a source.** Paseo's `codegen` step only compiles a
    fast outbound validator with zod-aot; it does not generate types.
    - `z.toJSONSchema` on the two wire unions, run through `typify`, could produce Rust types.
@@ -423,9 +427,10 @@ Reef adds a third consumer. Merge them into one `crates/paseo-protocol`:
    - Generated types would also make every Paseo quirk part of our API.
    - So use the schema as the CI oracle (section 9) instead.
 
-Burrow crates depend only on each other and on `paseo-client`, and only as a
-dev-dependency of `burrow-daemon`. They do not depend on the desktop app, `fleet` or Reef.
-Keep it that way, so the daemon builds and ships without GPUI.
+`burrow-protocol` depends on nothing but serde, and not on `paseo-client`. `paseo-client` depends
+on it, so the dependency runs one way. The other Burrow crates depend only on each other, and on
+`paseo-client` only as a dev-dependency of `burrow-daemon`. They do not depend on the desktop app,
+`fleet` or Reef. Keep it that way, so the daemon builds and ships without GPUI.
 
 ## 11. Roadmap
 
@@ -471,7 +476,7 @@ Keep it that way, so the daemon builds and ships without GPUI.
    as Paseo does, rather than through generated types.
    - Still to do: plan mode and the Speed feature, sub-agents, slash commands.
 8. Usage reports, provider sub-agents, `agent.detach.request`.
-9. Extract the shared `paseo-protocol` crate (section 10).
+9. **Done:** share the symmetric wire primitives between `burrow-protocol` and `paseo-client` (section 10).
 
 **P2: what the official apps use beyond that.**
 - Git status and diff, file browsing and editing.

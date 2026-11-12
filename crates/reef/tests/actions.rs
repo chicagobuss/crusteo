@@ -267,6 +267,121 @@ async fn a_desktop_gets_the_hosts_with_a_device_token_and_no_passwords() {
     assert!(head.starts_with("HTTP/1.1 401"), "{head}");
 }
 
+/// A plain HTTP request with extra headers: the status line and headers, and
+/// the body.
+async fn http(
+    addr: std::net::SocketAddr,
+    method: &str,
+    path: &str,
+    headers: &[(&str, &str)],
+    body: Option<&str>,
+) -> (String, Vec<u8>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let mut request = format!("{method} {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n");
+    for (name, value) in headers {
+        request.push_str(&format!("{name}: {value}\r\n"));
+    }
+    if let Some(body) = body {
+        request.push_str(&format!(
+            "Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        ));
+    } else {
+        request.push_str("\r\n");
+    }
+    stream.write_all(request.as_bytes()).await.unwrap();
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response).await.unwrap();
+    let end = response.windows(4).position(|w| w == b"\r\n\r\n").unwrap();
+    let head = String::from_utf8_lossy(&response[..end]).to_string();
+    (head, response[end + 4..].to_vec())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_desktop_can_send_its_token_in_a_header_and_an_older_one_in_the_query() {
+    let (daemon, _phone, addr) = fleet_at().await;
+    let bearer = format!("Bearer {TOKEN}");
+
+    // The header, on every route the desktop uses.
+    let header = [("Authorization", bearer.as_str())];
+    let (head, body) = http(addr, "GET", "/api/hosts", &header, None).await;
+    assert!(head.starts_with("HTTP/1.1 200"), "{head}");
+    let answer: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(answer["hosts"][0]["endpoint"], daemon.endpoint());
+    let (head, body) = http(addr, "GET", "/api/labels", &header, None).await;
+    assert!(head.starts_with("HTTP/1.1 200"), "{head}");
+    let before: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(before["ok"], true);
+    let edit = r#"{"op": "create", "name": "urgent"}"#;
+    let (head, body) = http(addr, "POST", "/api/labels", &header, Some(edit)).await;
+    assert!(head.starts_with("HTTP/1.1 200"), "{head}");
+    let made: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(made["ok"], true, "{made}");
+    assert!(made["revision"].as_u64() > before["catalog"]["revision"].as_u64());
+    // The scheme's case does not matter; the images take the header too.
+    let lower = format!("bearer {TOKEN}");
+    let lower = [("Authorization", lower.as_str())];
+    let (head, _) = http(addr, "GET", "/api/hosts", &lower, None).await;
+    assert!(head.starts_with("HTTP/1.1 200"), "{head}");
+    let (head, _) = http(addr, "GET", "/image/0123456789abcdef", &header, None).await;
+    assert!(
+        head.starts_with("HTTP/1.1 404"),
+        "authorized, and no such image: {head}"
+    );
+
+    // The query still does, as an older desktop sends it.
+    let (head, _) = http(addr, "GET", &format!("/api/hosts?t={TOKEN}"), &[], None).await;
+    assert!(head.starts_with("HTTP/1.1 200"), "{head}");
+    let (head, _) = http(addr, "GET", &format!("/api/labels?t={TOKEN}"), &[], None).await;
+    assert!(head.starts_with("HTTP/1.1 200"), "{head}");
+    let (head, _) = http(
+        addr,
+        "POST",
+        &format!("/api/labels?t={TOKEN}"),
+        &[],
+        Some(edit),
+    )
+    .await;
+    assert!(head.starts_with("HTTP/1.1 200"), "{head}");
+
+    // Neither, or not the token: nothing, on each route and in each way.
+    for (method, path, authorization) in [
+        ("GET", "/api/hosts", None),
+        ("GET", "/api/hosts", Some("Bearer wrong")),
+        ("GET", "/api/hosts", Some("Basic dXNlcjpwYXNz")),
+        ("GET", "/api/hosts", Some(TOKEN)),
+        ("GET", "/api/labels", Some("Bearer wrong")),
+        ("POST", "/api/labels", Some("Bearer wrong")),
+        ("POST", "/api/labels", None),
+        ("GET", "/image/0123456789abcdef", Some("Bearer wrong")),
+    ] {
+        let headers: Vec<(&str, &str)> = authorization
+            .map(|value| ("Authorization", value))
+            .into_iter()
+            .collect();
+        // No body: Reef turns it away before it reads one.
+        let (head, _) = http(addr, method, path, &headers, None).await;
+        assert!(
+            head.starts_with("HTTP/1.1 401"),
+            "{method} {path} {authorization:?}: {head}"
+        );
+    }
+    // A wrong token in the query is not made right by anything else wrong,
+    // and the right one in the header wins over a wrong one in the query.
+    let (head, _) = http(
+        addr,
+        "GET",
+        "/api/hosts?t=wrong",
+        &[("Authorization", "Bearer wrong")],
+        None,
+    )
+    .await;
+    assert!(head.starts_with("HTTP/1.1 401"), "{head}");
+    let (head, _) = http(addr, "GET", "/api/hosts?t=wrong", &header, None).await;
+    assert!(head.starts_with("HTTP/1.1 200"), "{head}");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_conversations_images_are_fetched_by_key_with_a_device_token() {
     use base64::Engine;
@@ -685,4 +800,52 @@ async fn a_queue_holds_twenty_and_goes_with_its_agent() {
     phone
         .until("an empty queue", |p| queued(p).is_empty())
         .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn renaming_sends_the_name_alone_and_the_conversation_shows_it() {
+    let (daemon, mut phone) = fleet().await;
+    open(&mut phone, "agt_a_failed").await;
+    // No name, or one too long, is refused before anything is sent.
+    for bad in [json!("   "), json!("x".repeat(201))] {
+        let refused = act(
+            &mut phone,
+            json!({"action": "rename", "host": "example-a", "agent": "agt_a_failed", "name": bad}),
+        )
+        .await;
+        assert_eq!(refused["error"]["code"], "bad_request", "{refused}");
+        let why = refused["error"]["message"].as_str().unwrap_or_default();
+        assert!(
+            why.contains("name"),
+            "refused for its name, not as unknown: {refused}"
+        );
+    }
+    assert!(writes(&daemon).is_empty());
+
+    let answer = act(
+        &mut phone,
+        json!({"action": "rename", "host": "example-a", "agent": "agt_a_failed",
+               "name": "  Retry the flaky test  "}),
+    )
+    .await;
+    assert_eq!(answer["ok"], true, "{answer}");
+    assert_eq!(writes(&daemon), ["update_agent_request"]);
+    let sent = &daemon.writes()[0];
+    assert_eq!(sent["agentId"], "agt_a_failed");
+    assert_eq!(sent["name"], "Retry the flaky test");
+    assert!(sent.get("labels").is_none(), "{sent}");
+    phone
+        .until("the new title", |p| {
+            p.views
+                .get("c")
+                .is_some_and(|v| v.fields["agent"]["title"] == "Retry the flaky test")
+        })
+        .await;
+
+    let missing = act(
+        &mut phone,
+        json!({"action": "rename", "host": "example-a", "agent": "agt_nope", "name": "x"}),
+    )
+    .await;
+    assert_eq!(missing["error"]["code"], "not_found");
 }

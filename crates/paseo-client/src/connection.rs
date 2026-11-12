@@ -9,6 +9,8 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::time::{Instant, timeout};
 use tokio_tungstenite::tungstenite::Message;
 
+use burrow_protocol::envelope::{self, RpcFailure};
+
 use crate::proto::ServerInfo;
 use crate::{Command, Config, Error, Event};
 
@@ -32,6 +34,8 @@ pub enum ConnState {
 const MAX_MESSAGE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+/// As long as Paseo's desktop app gives an SSH connection to set up.
+const SSH_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 const CLOSE_TIMEOUT: Duration = Duration::from_millis(250);
 const HEARTBEAT_EVERY: Duration = Duration::from_secs(10);
 const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(15);
@@ -174,38 +178,72 @@ async fn idle(delay: Option<Duration>, commands: &mut mpsc::UnboundedReceiver<Co
     }
 }
 
+/// What the WebSocket runs over: a TCP connection, or ssh's standard streams.
+trait Transport: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send {}
+impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send> Transport for T {}
+
 async fn session(
     config: &Config,
     commands: &mut mpsc::UnboundedReceiver<Command>,
     events: &crate::events::EventSender,
     attempt: &mut u32,
 ) -> Ended {
+    let mut ssh = None;
+    let ended = session_over(config, commands, events, attempt, &mut ssh).await;
+    // A connection through ssh that failed or dropped: what ssh said is
+    // the reason worth showing ("Permission denied", "Could not resolve
+    // hostname", the daemon's port refused on the far side).
+    match (ended, ssh) {
+        (Ended::Lost(reason), Some(ssh)) => Ended::Lost(ssh.failure().await.unwrap_or(reason)),
+        (ended, _) => ended,
+    }
+}
+
+async fn session_over(
+    config: &Config,
+    commands: &mut mpsc::UnboundedReceiver<Command>,
+    events: &crate::events::EventSender,
+    attempt: &mut u32,
+    ssh: &mut Option<crate::ssh::Watch>,
+) -> Ended {
     let url = config.url();
+    let target = match crate::ssh::Target::parse(&config.endpoint) {
+        None => None,
+        Some(Ok(target)) => Some(target),
+        Some(Err(err)) => return Ended::Lost(err),
+    };
+    // ssh may make two hops and a key exchange before the daemon answers.
+    let within = if target.is_some() {
+        SSH_CONNECT_TIMEOUT
+    } else {
+        CONNECT_TIMEOUT
+    };
     let connect = async {
         let ws_config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
             .max_message_size(Some(MAX_MESSAGE_BYTES))
             .max_frame_size(Some(MAX_FRAME_BYTES));
-        match authority(&url) {
-            Some((host, port)) => {
-                let stream = dial(host, port)
-                    .await
-                    .map_err(tokio_tungstenite::tungstenite::Error::Io)?;
-                tokio_tungstenite::client_async_with_config(
-                    url.as_str(),
-                    tokio_tungstenite::MaybeTlsStream::Plain(stream),
-                    Some(ws_config),
-                )
-                .await
+        let transport: Box<dyn Transport> = match (&target, authority(&url)) {
+            (Some(target), _) => {
+                let (stream, watch) = crate::ssh::open(target, config.ssh_program.as_deref())?;
+                *ssh = Some(watch);
+                Box::new(stream)
             }
-            None => {
-                tokio_tungstenite::connect_async_with_config(url.as_str(), Some(ws_config), false)
-                    .await
+            (None, Some((host, port))) => {
+                Box::new(dial(host, port).await.map_err(|e| e.to_string())?)
             }
-        }
+            (None, None) => {
+                return Err(format!(
+                    "{url}: only host:port, ws:// and ssh:// addresses are supported"
+                ));
+            }
+        };
+        tokio_tungstenite::client_async_with_config(url.as_str(), transport, Some(ws_config))
+            .await
+            .map_err(|err| describe(&err))
     };
-    let socket = match timeout(CONNECT_TIMEOUT, connect).await {
+    let socket = match timeout(within, connect).await {
         Ok(Ok((socket, _))) => socket,
-        Ok(Err(err)) => return Ended::Lost(describe(&err)),
+        Ok(Err(err)) => return Ended::Lost(err),
         Err(_) => return Ended::Lost("connect timed out".into()),
     };
     let (mut sink, mut stream) = socket.split();
@@ -242,7 +280,7 @@ async fn session(
             let reason = value["reason"].as_str().unwrap_or("rejected").to_string();
             return Ended::Refused(reason);
         }
-        let message = unwrap_session(&value);
+        let message = envelope::unwrap_session(&value);
         if let Some(info) = ServerInfo::from_status(message) {
             break info;
         }
@@ -319,7 +357,7 @@ async fn session(
                         let _ = reply.send(Err(Error::Timeout));
                     }
                     Some(Command::Request { id, message, reply, until, .. }) => {
-                        let frame = json!({ "type": "session", "message": message });
+                        let frame = envelope::request_frame(message);
                         match sink.send(Message::text(frame.to_string())).await {
                             Ok(()) => {
                                 pending.insert(id, Waiting { reply, until, updates: Vec::new() });
@@ -332,7 +370,7 @@ async fn session(
                     }
                     Some(Command::Cancel(id)) => { pending.remove(&id); }
                     Some(Command::Send(message)) => {
-                        let frame = json!({ "type": "session", "message": message });
+                        let frame = envelope::request_frame(message);
                         if let Err(err) = sink.send(Message::text(frame.to_string())).await {
                             break Ended::Lost(describe(&err));
                         }
@@ -391,12 +429,7 @@ async fn route(
 /// before the one that ends it, and gets them with it as
 /// `{"updates": [...], "final": ...}`.
 fn settle(pending: &mut Pending, mut message: Value) -> Option<Value> {
-    let Some(id) = message
-        .get("payload")
-        .and_then(|payload| payload.get("requestId"))
-        .and_then(Value::as_str)
-        .map(str::to_string)
-    else {
+    let Some(id) = envelope::reply_request_id(&message).map(str::to_string) else {
         return Some(message);
     };
     let Some(waiting) = pending.get_mut(&id) else {
@@ -409,20 +442,15 @@ fn settle(pending: &mut Pending, mut message: Value) -> Option<Value> {
         .unwrap_or(Value::Null);
     if let Some(until) = &waiting.until
         && kind != *until
-        && kind != "rpc_error"
+        && kind != envelope::RPC_ERROR
     {
         waiting.updates.push(payload);
         return None;
     }
     let waiting = pending.remove(&id)?;
-    let result = if kind == "rpc_error" {
-        Err(Error::Rpc {
-            code: payload["code"].as_str().map(str::to_string),
-            message: payload["error"]
-                .as_str()
-                .unwrap_or("request failed")
-                .to_string(),
-        })
+    let result = if kind == envelope::RPC_ERROR {
+        let RpcFailure { code, message } = RpcFailure::from_payload(&payload);
+        Err(Error::Rpc { code, message })
     } else if waiting.until.is_some() {
         Ok(json!({ "updates": waiting.updates, "final": payload }))
     } else {
@@ -430,14 +458,6 @@ fn settle(pending: &mut Pending, mut message: Value) -> Option<Value> {
     };
     let _ = waiting.reply.send(result);
     None
-}
-
-fn unwrap_session(value: &Value) -> &Value {
-    if value["type"] == "session" {
-        &value["message"]
-    } else {
-        value
-    }
 }
 
 fn describe(err: &tokio_tungstenite::tungstenite::Error) -> String {

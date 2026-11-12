@@ -116,3 +116,28 @@ async fn an_address_without_a_port_gets_the_daemons() {
     assert_eq!(saved(&file)[1]["endpoint"], "192.0.2.7:6767");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_ssh_address_is_kept_as_given_and_a_malformed_one_refused() {
+    let a = FakeDaemon::start("srv_a").await.unwrap();
+    let dir = std::env::temp_dir().join(format!("reef-ssh-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("hosts.json");
+    let addr = reef_with_hosts_file(&[("example-a", &a)], file.clone()).await;
+    let (mut phone, _) = Phone::connect(addr, TOKEN).await;
+    let answer = act(
+        &mut phone,
+        json!({"action": "host_add", "name": "example-ssh", "endpoint": "ssh://dev@example-ssh.invalid"}),
+    )
+    .await;
+    assert_eq!(answer["ok"], true, "{answer}");
+    assert_eq!(saved(&file)[1]["endpoint"], "ssh://dev@example-ssh.invalid");
+    let answer = act(
+        &mut phone,
+        json!({"action": "host_add", "name": "example-bad", "endpoint": "ssh://dev:secret@box"}),
+    )
+    .await;
+    assert_eq!(answer["ok"], false, "{answer}");
+    assert_eq!(saved(&file).len(), 2);
+    let _ = std::fs::remove_dir_all(&dir);
+}

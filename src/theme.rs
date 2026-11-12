@@ -1,7 +1,88 @@
-//! Paseo's default dark theme ("Paseo"), from the app's v0.10.1 tokens.
-//! Views read colors and sizes from here instead of inlining hex values.
+//! Paseo's default dark theme ("Paseo") and its light one, from the app's
+//! v0.10.1 tokens. Views read colors and sizes from here instead of inlining
+//! hex values, at render time, so a switch of theme repaints every view.
 
 use gpui_kit::gpui::{Hsla, Pixels, Rgba, px, rgb, rgba};
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// Which theme the user picked: the system's, or one of the two always.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Appearance {
+    #[default]
+    System,
+    Light,
+    Dark,
+}
+
+impl Appearance {
+    pub const ALL: [Appearance; 3] = [Appearance::System, Appearance::Light, Appearance::Dark];
+
+    /// As saved in `ui.json`; the system's is the empty string.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Appearance::System => "",
+            Appearance::Light => "light",
+            Appearance::Dark => "dark",
+        }
+    }
+
+    pub fn parse(saved: &str) -> Appearance {
+        match saved {
+            "light" => Appearance::Light,
+            "dark" => Appearance::Dark,
+            _ => Appearance::System,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Appearance::System => "Match system",
+            Appearance::Light => "Light",
+            Appearance::Dark => "Dark",
+        }
+    }
+}
+
+static LIGHT: AtomicBool = AtomicBool::new(false);
+/// Whether [`show`] has painted the component library yet.
+static SHOWN: AtomicBool = AtomicBool::new(false);
+
+/// Whether the light theme is the one showing.
+pub fn is_light() -> bool {
+    LIGHT.load(Ordering::Relaxed)
+}
+
+/// Shows the theme `appearance` asks for, reading the system's from `window`
+/// when there is one (more reliable on Linux than the app-wide value), and
+/// repaints every window if that changes the theme.
+pub fn show(
+    appearance: Appearance,
+    window: Option<&gpui_kit::gpui::Window>,
+    cx: &mut gpui_kit::gpui::App,
+) {
+    use gpui_kit::gpui::WindowAppearance;
+    let light = match appearance {
+        Appearance::Light => true,
+        Appearance::Dark => false,
+        Appearance::System => matches!(
+            window.map_or_else(|| cx.window_appearance(), |window| window.appearance()),
+            WindowAppearance::Light | WindowAppearance::VibrantLight
+        ),
+    };
+    let first = !SHOWN.swap(true, Ordering::Relaxed);
+    if !first && light == is_light() {
+        return;
+    }
+    LIGHT.store(light, Ordering::Relaxed);
+    let mode = if light {
+        gpui_kit::component::ThemeMode::Light
+    } else {
+        gpui_kit::component::ThemeMode::Dark
+    };
+    gpui_kit::component::Theme::change(mode, None, cx);
+    apply(cx);
+    cx.refresh_windows();
+}
 
 pub struct Palette {
     pub surface0: Rgba,
@@ -30,7 +111,46 @@ pub struct Palette {
     pub dot_running: Rgba,
 }
 
+/// The palette of the theme showing.
 pub fn palette() -> &'static Palette {
+    if is_light() { light() } else { dark() }
+}
+
+/// Paseo's light theme. Where its brief gives no value (surface4, the
+/// sidebar's hover, the second border, the bright accent, merged), the value
+/// keeps the dark theme's step on the light scale; the bright accent, which
+/// links and selections use, is darkened to read on white.
+pub fn light() -> &'static Palette {
+    static LIGHT: std::sync::OnceLock<Palette> = std::sync::OnceLock::new();
+    LIGHT.get_or_init(|| Palette {
+        surface0: rgb(0xffffff),
+        surface1: rgb(0xfafafa),
+        surface2: rgb(0xf4f4f5),
+        surface3: rgb(0xe4e4e7),
+        surface4: rgb(0xd4d4d8),
+        sidebar: rgb(0xf4f4f5),
+        sidebar_hover: rgb(0xebebed),
+        sidebar_selected: rgb(0xe4e4e7),
+        foreground: rgb(0x1a1a1e),
+        muted: rgb(0x71717a),
+        extra_muted: rgb(0xa1a1aa),
+        border: rgb(0xe4e4e7),
+        border_accent: rgb(0xd4d4d8),
+        accent: rgb(0x20744A),
+        accent_bright: rgb(0x1f7a4d),
+        destructive: rgb(0xc64f43),
+        status_success: rgb(0x3e704a),
+        status_danger: rgb(0x9d433b),
+        status_warning: rgb(0x7b5d39),
+        status_merged: rgb(0x6d49b5),
+        dot_success: rgb(0x299f51),
+        dot_danger: rgb(0xf12e2f),
+        dot_warning: rgb(0xb37824),
+        dot_running: rgb(0x268ae0),
+    })
+}
+
+pub fn dark() -> &'static Palette {
     static DARK: std::sync::OnceLock<Palette> = std::sync::OnceLock::new();
     DARK.get_or_init(|| Palette {
         surface0: rgb(0x181B1A),
@@ -75,6 +195,25 @@ pub const IDENTITY: [(&str, u32, u32, &str); 10] = [
     ("blue", 0x5179b0, 0x7ba1d5, "Azure"),
 ];
 
+/// The identity foregrounds on light, in [`IDENTITY`]'s order.
+const IDENTITY_ON_LIGHT: [u32; 10] = [
+    0x6d49b5, 0x3d6985, 0x3e6e5d, 0x845838, 0x974168, 0x5251c2, 0x3e6d6c, 0x9c4243, 0x716239,
+    0x39649e,
+];
+
+/// An identity's (fill, foreground) in the theme showing.
+fn identity(index: usize) -> (u32, u32) {
+    let (_, fill, on_dark, _) = IDENTITY[index];
+    (
+        fill,
+        if is_light() {
+            IDENTITY_ON_LIGHT[index]
+        } else {
+            on_dark
+        },
+    )
+}
+
 /// Categorical swatches selected by farthest-point sampling in CIELAB, then
 /// ordered by hue (D65, sRGB).
 pub const LANE_COLORS: [(&str, u32); 32] = [
@@ -118,25 +257,31 @@ pub const RECENCY_RAMP: [u32; 4] = [0x5a9ded, 0x3da975, 0xcba43a, 0x9b3b42];
 /// Project icon color, hashed the way the app does (`hash*31 + char`, mod 10).
 pub fn identity_for(key: &str) -> (u32, u32) {
     let hash = paseo_hash(key) as i32;
-    let (_, fill, fg, _) = IDENTITY[(hash.unsigned_abs() as usize) % IDENTITY.len()];
-    (fill, fg)
+    identity((hash.unsigned_abs() as usize) % IDENTITY.len())
 }
 
 pub fn identity_named(name: &str) -> Option<(u32, u32)> {
     IDENTITY
         .iter()
-        .find(|(id, _, _, _)| *id == name)
-        .map(|(_, fill, fg, _)| (*fill, *fg))
+        .position(|(id, _, _, _)| *id == name)
+        .map(identity)
 }
 
-/// Paseo's dark terminal ANSI palette, plus the xterm 256-colour cube.
+/// Paseo's terminal ANSI palette, plus the xterm 256-colour cube. On light,
+/// the named colours are darker shades that read on white, and "white" is a
+/// grey, as light terminal themes have it.
 pub fn ansi(index: u8) -> Rgba {
-    const NAMED: [u32; 16] = [
+    const ON_DARK: [u32; 16] = [
         0x141716, 0xe07070, 0x5dba80, 0xd4a44a, 0x6a9de0, 0xb07ad0, 0x4aabb8, 0xd4d4d8, 0x434645,
         0xe89090, 0x7ecf9a, 0xe0be6e, 0x8ab4e8, 0xc49ae0, 0x6ec2cc, 0xf0f0f2,
     ];
+    const ON_LIGHT: [u32; 16] = [
+        0x1a1a1e, 0xc4343a, 0x2f8a4f, 0x8f6400, 0x2f6ac4, 0x8a46b0, 0x1f8592, 0x71717a, 0x5f5f66,
+        0xd24a4a, 0x3a9c5d, 0xa67700, 0x4a82d6, 0xa05cc6, 0x2a9aa8, 0xa1a1aa,
+    ];
     if index < 16 {
-        return rgb(NAMED[index as usize]);
+        let named = if is_light() { ON_LIGHT } else { ON_DARK };
+        return rgb(named[index as usize]);
     }
     if index >= 232 {
         let level = 8 + (index - 232) * 10;
@@ -148,6 +293,12 @@ pub fn ansi(index: u8) -> Rgba {
     let g = levels[((cube / 6) % 6) as usize];
     let b = levels[(cube % 6) as usize];
     rgb(u32::from(r) << 16 | u32::from(g) << 8 | u32::from(b))
+}
+
+/// The black laid behind a dialog, `alpha` deep on dark and lighter on
+/// light, where the dark one turns the whole window grey.
+pub fn scrim(alpha: f32) -> Hsla {
+    gpui_kit::gpui::hsla(0., 0., 0., if is_light() { alpha * 0.55 } else { alpha })
 }
 
 pub fn with_alpha(color: Rgba, alpha: f32) -> Hsla {
@@ -201,9 +352,9 @@ pub fn mono_font() -> &'static str {
     }
 }
 
-/// Paints the component library (buttons, menus, inputs, scrollbars) in
-/// Paseo's dark palette so stock components match hand-drawn ones.
-pub fn apply(cx: &mut gpui_kit::gpui::App) {
+/// Paints the component library (buttons, menus, inputs, scrollbars) in the
+/// palette showing so stock components match hand-drawn ones.
+fn apply(cx: &mut gpui_kit::gpui::App) {
     use gpui_kit::gpui::Hsla;
     let p = palette();
     let h = |c: Rgba| -> Hsla { c.into() };
@@ -254,7 +405,11 @@ pub fn apply(cx: &mut gpui_kit::gpui::App) {
         c.title_bar = h(p.sidebar);
         c.title_bar_border = h(p.border);
         c.window_border = h(p.border);
-        c.overlay = h(rgba(0x00000080));
+        c.overlay = h(if is_light() {
+            rgba(0x00000040)
+        } else {
+            rgba(0x00000080)
+        });
     });
 }
 
@@ -280,3 +435,28 @@ pub const LANE_CARD_TINT: f32 = 0.10;
 /// selected in.
 pub const LANE_BOX_TINT: f32 = 0.12;
 pub const LANE_RECENCY_TINT: f32 = 0.30;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_theme_choice_round_trips_and_anything_else_matches_the_system() {
+        for appearance in Appearance::ALL {
+            assert_eq!(Appearance::parse(appearance.as_str()), appearance);
+        }
+        assert_eq!(Appearance::parse(""), Appearance::System);
+        assert_eq!(Appearance::parse("solarized"), Appearance::System);
+        assert_eq!(Appearance::default(), Appearance::System);
+    }
+
+    #[test]
+    fn the_light_palette_reads_dark_on_light() {
+        let luma = |c: Rgba| 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b;
+        let (light, dark) = (light(), dark());
+        assert!(luma(light.surface0) > luma(light.foreground) + 0.7);
+        assert!(luma(dark.surface0) + 0.7 < luma(dark.foreground));
+        assert!(luma(light.surface0) > luma(light.muted));
+        assert!(luma(light.accent_bright) < 0.4);
+    }
+}

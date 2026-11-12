@@ -1,0 +1,10 @@
+{
+  "index_patterns": ["reef-fleet-*"],
+  "template": {
+    "mappings": {
+      "properties": {
+        "body": { "type": "text" }
+      }
+    }
+  }
+}

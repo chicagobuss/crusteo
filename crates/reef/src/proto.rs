@@ -46,6 +46,9 @@ pub struct Limits {
     /// How often recording looks at `record.json`, reads due agents and
     /// sends sinks their next batch.
     pub record: Duration,
+    /// How long CLI upgrades and new models gather before they are told
+    /// ([fleet::cli_watch]).
+    pub updates: Duration,
 }
 
 impl Default for Limits {
@@ -66,6 +69,7 @@ impl Default for Limits {
             usage_ask: usage_source::reports::ASK_EVERY,
             usage_feed: crate::usage::FEED_EVERY,
             record: Duration::from_secs(1),
+            updates: fleet::cli_watch::DEBOUNCE,
         }
     }
 }
@@ -244,6 +248,7 @@ pub const ACTIONS: &[&str] = &[
     "archive",
     "delete",
     "relabel",
+    "rename",
     "notify",
     "seen",
 ];

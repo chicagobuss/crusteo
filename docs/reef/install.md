@@ -26,7 +26,7 @@ Each holds the `reef` binary, this guide as `INSTALL.md`, the license, the chang
 `reef-settings.json` (in the source tree they are in `packaging/reef/`).
 
 ```sh
-version=0.1.0-beta.1
+version=0.2.0
 target=x86_64-unknown-linux-musl
 base=https://github.com/chicagobuss/crusteo/releases/download/v$version
 curl -LO "$base/reef-$version-$target.tar.gz"
@@ -47,7 +47,7 @@ The examples keep everything in one folder, `~/reef`:
 mkdir -p ~/reef
 install -m 0755 "reef-$version-$target/reef" ~/reef/
 cp "reef-$version-$target/examples/hosts.json" ~/reef/
-~/reef/reef --version      # reef 0.1.0-beta.1 (<commit>)
+~/reef/reef --version      # reef 0.2.0 (<commit>)
 ```
 
 ### hosts.json
@@ -63,12 +63,48 @@ as it is:
 ```
 
 - `endpoint` is `host:port`: 6767 for Paseo's daemon, 6797 for a Burrow next to it.
+- Or `ssh://[user@]host[:port]` to go through SSH, as Paseo's desktop app does. See
+  [Hosts through SSH](#hosts-through-ssh).
 - `password` is optional, for daemons that require one.
 - Daemons check the `Host` header, so use IP addresses or names the daemon allows.
 - Hosts added or removed from a phone are saved back to this file.
 - Names must be unique, without a `/`, and at most 64 characters; Reef stops at start, naming the
   entry, if one is not. Reef knows hosts by name, so it writes each host's `id` as its name; an `id`
   the desktop app gave a host is replaced.
+
+### Hosts through SSH
+
+An `ssh://` endpoint reaches a daemon that listens only on its host's loopback, or a host behind a
+VPN or a jump host, with no port opened and no tunnel to keep up:
+
+```json
+{"name": "devbox", "endpoint": "ssh://dev@devbox.example"}
+```
+
+For each connection Reef runs the system `ssh`, as Paseo's desktop app and CLI do:
+
+```
+ssh -T -o BatchMode=yes -o ConnectTimeout=10 -o ClearAllForwardings=yes \
+    -o ExitOnForwardFailure=yes [-p <port>] -W 127.0.0.1:<daemonPort> <user@host>
+```
+
+`-W` makes ssh's input and output a connection to the daemon's port on that host, and the
+WebSocket runs over it.
+
+- **Keys and config.** `ssh` runs as the user Reef runs as, with that user's keys, agent and
+  `~/.ssh/config`. An alias, a `ProxyJump` to reach the host through another, or another port
+  all go there.
+- **No password prompts.** `BatchMode` turns them off, so the key must work without one. Under
+  systemd there is often no agent, so the key needs no passphrase or the unit needs an agent's
+  socket.
+- **Host keys.** The host's key must already be in `known_hosts`: connect once by hand first.
+- **Ports.** `?daemonPort=6797` reaches a daemon that is not on 6767. `:<port>` is the SSH port.
+- **The far side.** Nothing is installed or started there, and the daemon must already be
+  running. `sshd` must allow TCP forwarding (`AllowTcpForwarding`, on by default).
+- **When it fails.** A host that cannot be reached shows what ssh said, such as `Permission
+  denied (publickey)` or `stdio forwarding failed` when no daemon listens on the far side.
+- **The desktop app.** In reef mode it connects to the same `ssh://` address through its own
+  `ssh` and config, so that machine needs the key as well.
 
 ### The data folder
 

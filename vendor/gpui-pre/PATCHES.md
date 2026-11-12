@@ -84,3 +84,16 @@ pressure and file-drop positions, and the window's tracked mouse position.
 Not converted: IME candidate bounds the input handler reports to the platform
 (`bounds_for_range`, `update_ime_position`). With a zoom other than 1, an IME
 composition window can open offset from the caret.
+
+## A box scrolls alone until it reaches its end
+
+A scrolling div (`overflow_y_scroll` and the like) added the wheel's delta to
+its offset and let the event go on, and the offset was clamped only at the
+next layout. A box nested in another scroller, such as a tool's detail box in
+a conversation or a lane, moved together with the scroller behind it.
+
+`Interactivity::scroll_max` keeps how far the element scrolls from this frame's
+layout (`clamp_scroll_position`). The wheel listener (`paint_scroll_listener`)
+clamps the new offset against it. If the offset moved, the listener stops the
+event. One already at its end in that direction leaves the event to the
+scroller behind it, the way browsers chain scrolling.

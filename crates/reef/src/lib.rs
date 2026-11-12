@@ -40,4 +40,4 @@ pub use reef::{ReefHandle, start};
 
 /// The release version and the commit built, as --version and the startup
 /// line show them.
-pub const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), " (", env!("CRUSTEO_COMMIT"), ")");
+pub const VERSION: &str = env!("CRUSTEO_VERSION");

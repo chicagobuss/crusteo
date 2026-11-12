@@ -9,22 +9,27 @@ pub const FADE_WIDTH: f32 = 40.;
 /// How deep a lane's top and bottom shadows are.
 const FADE_HEIGHT: f32 = 36.;
 /// Laid over the board's side fades, so they read as an edge against dark
-/// cards and not only as content dimming into the background.
-const SHADOW: Rgba = Rgba {
-    r: 0.,
-    g: 0.,
-    b: 0.,
-    a: 0.45,
-};
+/// cards and not only as content dimming into the background. On light, a
+/// shadow that deep would be a grey smudge; a faint one reads as the edge.
+fn shadow() -> Rgba {
+    black(if crate::theme::is_light() { 0.10 } else { 0.45 })
+}
+
 /// A lane's top and bottom are a shadow alone, and a deeper one: fading
 /// into the lane's colour reads as the card simply ending wherever a lane's
 /// cards are tinted close to it.
-const LANE_SHADOW: Rgba = Rgba {
-    r: 0.,
-    g: 0.,
-    b: 0.,
-    a: 0.7,
-};
+fn lane_shadow() -> Rgba {
+    black(if crate::theme::is_light() { 0.09 } else { 0.7 })
+}
+
+fn black(a: f32) -> Rgba {
+    Rgba {
+        r: 0.,
+        g: 0.,
+        b: 0.,
+        a,
+    }
+}
 
 #[derive(Clone, Copy)]
 enum Edge {
@@ -113,10 +118,10 @@ pub fn fades(handle: &ScrollHandle, background: Rgba) -> impl IntoElement {
         move |bounds, (left, right), window, _| {
             let w = width(bounds);
             if left {
-                paint_fade(window, bounds, Edge::Left, w, Some(background), SHADOW);
+                paint_fade(window, bounds, Edge::Left, w, Some(background), shadow());
             }
             if right {
-                paint_fade(window, bounds, Edge::Right, w, Some(background), SHADOW);
+                paint_fade(window, bounds, Edge::Right, w, Some(background), shadow());
             }
         },
     )
@@ -155,10 +160,10 @@ pub fn list_fades(state: ListState) -> impl IntoElement {
             let viewport = state.viewport_bounds();
             let depth = px(FADE_HEIGHT).min(viewport.size.height / 2.);
             if above {
-                paint_fade(window, viewport, Edge::Top, depth, None, LANE_SHADOW);
+                paint_fade(window, viewport, Edge::Top, depth, None, lane_shadow());
             }
             if below {
-                paint_fade(window, viewport, Edge::Bottom, depth, None, LANE_SHADOW);
+                paint_fade(window, viewport, Edge::Bottom, depth, None, lane_shadow());
             }
         },
     )
@@ -175,10 +180,10 @@ pub fn scroll_fades(handle: &ScrollHandle) -> impl IntoElement {
         move |bounds, (above, below), window, _| {
             let depth = px(FADE_HEIGHT).min(bounds.size.height / 2.);
             if above {
-                paint_fade(window, bounds, Edge::Top, depth, None, LANE_SHADOW);
+                paint_fade(window, bounds, Edge::Top, depth, None, lane_shadow());
             }
             if below {
-                paint_fade(window, bounds, Edge::Bottom, depth, None, LANE_SHADOW);
+                paint_fade(window, bounds, Edge::Bottom, depth, None, lane_shadow());
             }
         },
     )

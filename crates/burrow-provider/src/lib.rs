@@ -19,6 +19,8 @@
 pub mod echo;
 pub mod env;
 pub mod group;
+pub mod process;
+pub mod session_bus;
 
 use serde_json::Value;
 use tokio::sync::mpsc;
@@ -229,6 +231,25 @@ pub enum ProviderError {
     Start { provider: String, message: String },
 }
 
+/// A session the provider's CLI keeps on this host, from its own records:
+/// for Paseo's project suggestions, which group them by repository, and its
+/// import sheet.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RecentSession {
+    /// The provider's own id for it.
+    pub id: String,
+    pub cwd: String,
+    /// The name it has in the CLI (a rename, else a summary or the first
+    /// prompt), when known.
+    pub title: Option<String>,
+    /// The first thing the user asked, when known.
+    pub first_prompt: Option<String>,
+    /// The latest thing the user asked, when known.
+    pub last_prompt: Option<String>,
+    /// Milliseconds since the epoch.
+    pub last_activity_ms: i64,
+}
+
 /// One item of a conversation read back from the provider's own records.
 #[derive(Debug, Clone, PartialEq)]
 pub struct HistoryItem {
@@ -272,6 +293,80 @@ impl Discovery {
     }
 }
 
+/// How a provider's CLI was installed, as far as its path says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InstallKind {
+    /// The vendor's own installer, which updates the CLI itself (Claude
+    /// Code's lives in a `claude/versions/` directory).
+    Native,
+    /// A package manager's (npm, Homebrew, apt, WinGet, Nix, ...).
+    Package,
+    Unknown,
+}
+
+impl InstallKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Native => "native",
+            Self::Package => "package",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    /// Classifies the file a CLI resolves to (through its symlinks).
+    pub fn of_path(real: &std::path::Path) -> Self {
+        let path = real
+            .to_string_lossy()
+            .replace('\\', "/")
+            .to_ascii_lowercase();
+        let path = format!("{path}/");
+        let has = |part: &str| path.contains(part);
+        if has("/claude/versions/") {
+            Self::Native
+        } else if [
+            "/node_modules/",
+            "/cellar/",
+            "/caskroom/",
+            "/homebrew/",
+            "/nix/store/",
+        ]
+        .iter()
+        .any(|p| has(p))
+            || has("/winget/")
+            || has("/snap/")
+            || ["/usr/bin/", "/usr/lib/", "/usr/local/lib/"]
+                .iter()
+                .any(|p| path.starts_with(p))
+        {
+            Self::Package
+        } else {
+            Self::Unknown
+        }
+    }
+}
+
+/// What a provider knows of the CLI it runs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CliInfo {
+    /// `2.1.317`, without the CLI's own wording around it.
+    pub version: Option<String>,
+    pub install_kind: InstallKind,
+}
+
+impl CliInfo {
+    /// Of `binary` (a bare name is looked up on `PATH`), which reports
+    /// `version`.
+    pub fn of(binary: &std::path::Path, version: Option<String>) -> Self {
+        let install_kind = find_program(binary)
+            .and_then(|found| std::fs::canonicalize(found).ok())
+            .map_or(InstallKind::Unknown, |real| InstallKind::of_path(&real));
+        Self {
+            version,
+            install_kind,
+        }
+    }
+}
+
 /// A CLI's `--version`, read again only when the file the CLI resolves to
 /// changed (its path, through symlinks, its size or its modified time).
 /// The daemon looks every few minutes, and running a CLI is not free: one
@@ -299,7 +394,10 @@ impl CachedVersion {
             return version.clone();
         }
         let version = version_line(program);
-        *last = Some((now, version.clone()));
+        // Only a CLI that ran is remembered: one that could not be run this
+        // time is tried again at the next look, not taken as gone until its
+        // file changes.
+        *last = version.clone().map(|version| (now, Some(version)));
         version
     }
 }
@@ -307,26 +405,46 @@ impl CachedVersion {
 /// The file `program` runs, as a path through its symlinks, with its size
 /// and modified time. A bare name is looked up on `PATH`.
 fn file_stamp(program: &std::path::Path) -> Option<FileStamp> {
-    let found = if program.components().count() > 1 {
-        Some(program.to_path_buf())
-    } else {
-        let path = std::env::var_os("PATH")?;
-        std::env::split_paths(&path)
-            .map(|dir| dir.join(program))
-            .find(|candidate| candidate.is_file())
-    }?;
+    let found = find_program(program)?;
     let real = std::fs::canonicalize(found).ok()?;
     let meta = std::fs::metadata(&real).ok()?;
     meta.is_file()
         .then(|| (real, meta.len(), meta.modified().ok()))
 }
 
+/// The file `program` names: itself when it has a directory, else the first
+/// match on `PATH`.
+pub fn find_program(program: &std::path::Path) -> Option<std::path::PathBuf> {
+    if program.components().count() > 1 {
+        Some(program.to_path_buf())
+    } else {
+        let path = std::env::var_os("PATH")?;
+        std::env::split_paths(&path)
+            .map(|dir| dir.join(program))
+            .find(|candidate| candidate.is_file())
+    }
+}
+
 /// What `program --version` prints, or `None` when it cannot be run.
 pub fn version_line(program: &std::path::Path) -> Option<String> {
-    let output = std::process::Command::new(program)
-        .arg("--version")
-        .output()
-        .ok()?;
+    // A CLI being written as it is launched (an upgrade landing, or another
+    // thread's child still holding the file open for a moment) fails with
+    // ETXTBSY: try again shortly rather than report it missing.
+    const BUSY: i32 = 26; // ETXTBSY on Linux and macOS
+    let mut tries = 0;
+    let output = loop {
+        match std::process::Command::new(program)
+            .arg("--version")
+            .output()
+        {
+            Ok(output) => break output,
+            Err(err) if cfg!(unix) && err.raw_os_error() == Some(BUSY) && tries < 5 => {
+                tries += 1;
+                std::thread::sleep(std::time::Duration::from_millis(20 * tries));
+            }
+            Err(_) => return None,
+        }
+    };
     Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
@@ -340,11 +458,48 @@ pub trait Provider: Send + Sync {
     fn history(&self, _cwd: &str, _session_id: &str) -> Vec<HistoryItem> {
         Vec::new()
     }
+    /// Up to `limit` of the CLI's own sessions on this host, the most
+    /// recently used first (Paseo's `listImportableSessions`), or why they
+    /// could not be read. Blocking: call off the async runtime. None for a
+    /// provider that keeps no sessions Burrow can read.
+    fn recent_sessions(&self, _limit: usize) -> Result<Vec<RecentSession>, String> {
+        Ok(Vec::new())
+    }
+    /// Whether the CLI's own sessions can be imported as agents (Paseo's
+    /// import sheet): listed by [`importable_sessions`](Self::importable_sessions),
+    /// read by [`history`](Self::history), and continued by a start that
+    /// resumes them.
+    fn imports_sessions(&self) -> bool {
+        false
+    }
+    /// Up to `limit` of the CLI's own sessions that ran in `cwd` (anywhere
+    /// when none), the most recently used first. A provider that cannot tell
+    /// the directory of a session before reading it returns the sessions of
+    /// other directories too, and the caller filters. Blocking: call off the
+    /// async runtime.
+    fn importable_sessions(
+        &self,
+        _cwd: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<RecentSession>, String> {
+        self.recent_sessions(limit)
+    }
+    /// The name the user gave a session in the CLI itself (Claude's
+    /// `/rename`), which an agent imported from it takes as its title.
+    /// Blocking.
+    fn session_title(&self, _cwd: &str, _session_id: &str) -> Option<String> {
+        None
+    }
     /// Whether [`info`](Self::info) is still being found out (an ACP agent
     /// probes for its models); the providers snapshot then says `loading`,
     /// and subscribers get a `providers_snapshot_update` once it is done.
     fn loading(&self) -> bool {
         false
+    }
+    /// The CLI this provider runs: its version and how it was installed.
+    /// Clients show it, and tell when a CLI was upgraded under them.
+    fn cli(&self) -> Option<CliInfo> {
+        None
     }
     /// Why the provider cannot be used, when it found that out (an ACP
     /// agent whose probe has never succeeded, such as a CLI its vendor no
@@ -419,5 +574,56 @@ mod tests {
         let missing = dir.join("gone");
         assert_eq!(cached.of(&missing), None);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A CLI that could not be run is looked at again next time, though its
+    /// file (path, size, modified time) did not change.
+    #[test]
+    fn a_cli_that_could_not_run_is_tried_again() {
+        let dir = std::env::temp_dir().join(format!(
+            "burrow-cached-failure-{}-{:?}",
+            std::process::id(),
+            std::time::SystemTime::now()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cli = dir.join("cli");
+        std::fs::write(&cli, "#!/bin/sh\necho 2.0.0\n").unwrap();
+        std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let cached = CachedVersion::default();
+        assert_eq!(cached.of(&cli), None, "not executable yet");
+        // chmod leaves the size and the modified time alone.
+        std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(cached.of(&cli).as_deref(), Some("2.0.0"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod install_kind_tests {
+    use super::InstallKind::{self, *};
+    use std::path::Path;
+
+    #[test]
+    fn a_path_tells_how_the_cli_was_installed() {
+        let kind = |p: &str| InstallKind::of_path(Path::new(p));
+        assert_eq!(
+            kind("/home/box/.local/share/claude/versions/2.1.317"),
+            Native
+        );
+        assert_eq!(
+            kind(r"C:\Users\box\.local\share\claude\versions\2.1.317"),
+            Native
+        );
+        assert_eq!(
+            kind("/usr/lib/node_modules/@anthropic-ai/claude-code/bin/claude"),
+            Package
+        );
+        assert_eq!(
+            kind("/opt/homebrew/Caskroom/claude-code/2.1.3/claude"),
+            Package
+        );
+        assert_eq!(kind("/usr/bin/claude"), Package);
+        assert_eq!(kind("/home/box/bin/claude"), Unknown);
+        assert_eq!(Native.as_str(), "native");
     }
 }

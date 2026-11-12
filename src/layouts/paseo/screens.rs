@@ -42,6 +42,36 @@ fn page(title: &str) -> gpui_kit::gpui::Div {
     )
 }
 
+/// A slide-in pane's title bar, with its close button.
+fn pane_header(key: &str, icon: &'static str, title: &str, core: &Core) -> gpui_kit::gpui::Div {
+    let p = palette();
+    let nav = core.nav.clone();
+    div()
+        .h(px(40.))
+        .flex_shrink_0()
+        .px(px(16.))
+        .flex()
+        .items_center()
+        .gap(px(8.))
+        .border_b_1()
+        .border_color(p.border)
+        .child(ui::icon(icon, 14., p.muted))
+        .child(
+            div()
+                .flex_1()
+                .text_color(p.foreground)
+                .child(title.to_string()),
+        )
+        .child(
+            Button::new(SharedString::from(format!("{key}-close")))
+                .icon(gpui_kit::component::Icon::empty().path("icons/x.svg"))
+                .ghost()
+                .xsmall()
+                .tooltip("Close (Esc)")
+                .on_click(move |_, _, cx| nav.update(cx, |nav, cx| nav.set_pane(None, cx))),
+        )
+}
+
 fn card() -> gpui_kit::gpui::Div {
     let p = palette();
     div()
@@ -55,22 +85,47 @@ fn card() -> gpui_kit::gpui::Div {
 
 // ---- hosts -------------------------------------------------------------------
 
-pub struct HostsScreen {
+/// The Hosts pane's width, where the window has room for it: enough for a
+/// host's name and state beside its buttons.
+pub const HOSTS_WIDTH: f32 = 600.;
+
+/// The fleet's hosts, sliding in over any layout as Settings does.
+pub struct HostsPane {
     core: Core,
     name: Entity<InputState>,
     endpoint: Entity<InputState>,
+    /// Why the last address could not be added.
+    error: Option<String>,
+    /// The host whose Restart was clicked while agents run on it: it asks
+    /// once more, saying how many it interrupts.
+    confirming: Option<HostId>,
 }
 
-impl HostsScreen {
+impl HostsPane {
     pub fn new(core: Core, window: &mut Window, cx: &mut Context<Self>) -> Self {
         cx.observe(&core.store, |_, _, cx| cx.notify()).detach();
         Self {
             core,
             name: cx.new(|cx| InputState::new(window, cx).placeholder("Name, e.g. workstation")),
-            endpoint: cx.new(|cx| {
-                InputState::new(window, cx).placeholder("host:port, e.g. workstation.local:6767")
-            }),
+            endpoint: cx
+                .new(|cx| InputState::new(window, cx).placeholder("host:port, or ssh://user@host")),
+            error: None,
+            confirming: None,
         }
+    }
+
+    /// Restarts `host` at once when nothing runs there, else asks first.
+    fn restart(&mut self, host: &HostId, confirmed: bool, cx: &mut Context<Self>) {
+        let running = self.core.store.read(cx).running_on(host);
+        if running > 0 && !confirmed {
+            self.confirming = Some(host.clone());
+        } else {
+            self.confirming = None;
+            self.core
+                .store
+                .update(cx, |store, cx| store.restart_host(host, cx));
+        }
+        cx.notify();
     }
 
     fn add(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -79,6 +134,15 @@ impl HostsScreen {
         if name.is_empty() || endpoint.is_empty() {
             return;
         }
+        // Through this desktop's ssh, with its keys and ~/.ssh/config.
+        if let Some(Err(err)) = paseo_client::ssh::Target::parse(&endpoint) {
+            self.error = Some(format!(
+                "{err}. An SSH address is ssh://[user@]host[:port], with ?daemonPort=N when the daemon is not on 6767."
+            ));
+            cx.notify();
+            return;
+        }
+        self.error = None;
         let mut hosts: Vec<HostConfig> = self
             .core
             .store
@@ -108,7 +172,7 @@ impl HostsScreen {
     }
 }
 
-impl Render for HostsScreen {
+impl Render for HostsPane {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette();
         let reef = self.core.store.read(cx).reef.clone();
@@ -118,6 +182,11 @@ impl Render for HostsScreen {
             let name = host.id().clone();
             let core = self.core.clone();
             let core_remove = self.core.clone();
+            let online = matches!(host.connection, Connection::Online);
+            let restart_id = host.id().clone();
+            let asking = (self.confirming.as_ref() == Some(host.id()))
+                .then(|| self.core.store.read(cx).running_on(host.id()))
+                .filter(|running| *running > 0);
             let detail = match &host.connection {
                 Connection::Online => host
                     .server
@@ -135,66 +204,193 @@ impl Render for HostsScreen {
                 Connection::Offline(reason) | Connection::Refused(reason) => reason.clone(),
                 other => other.label().to_string(),
             };
-            list = list.child(
+            // The coding-agent CLIs the host runs; one behind the fleet's
+            // newest version is marked.
+            let clis = self.core.store.read(cx).cli_rows(host.id());
+            let row = div()
+                .flex()
+                .items_start()
+                .gap(px(10.))
+                .child(
+                    div()
+                        .pt(px(5.))
+                        .child(ui::host_status_dot(&host.connection)),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.))
+                        .flex()
+                        .flex_col()
+                        .gap(px(2.))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(8.))
+                                .min_w(px(0.))
+                                .child(
+                                    div()
+                                        .flex_shrink_0()
+                                        .text_color(p.foreground)
+                                        .child(host.config.name.clone()),
+                                )
+                                .child(
+                                    div()
+                                        .min_w(px(0.))
+                                        .truncate()
+                                        .text_size(size::sm())
+                                        .text_color(p.muted)
+                                        .child(
+                                            host.config
+                                                .endpoint
+                                                .clone()
+                                                .unwrap_or_else(|| "no address".into()),
+                                        ),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .text_size(size::sm())
+                                .text_color(p.muted)
+                                .truncate()
+                                .child(detail),
+                        )
+                        .when(!clis.is_empty(), |col| {
+                            col.child(
+                                div()
+                                    .flex()
+                                    .flex_wrap()
+                                    .gap(px(12.))
+                                    .text_size(size::sm())
+                                    .children(clis.iter().map(|row| {
+                                        let mut text = format!(
+                                            "{} {}",
+                                            row.label,
+                                            row.version.as_deref().unwrap_or("?")
+                                        );
+                                        if let Some(kind) =
+                                            row.install_kind.as_deref().filter(|k| *k != "unknown")
+                                        {
+                                            text.push_str(&format!(" \u{b7} {kind}"));
+                                        }
+                                        if row.behind {
+                                            text.push_str(" \u{b7} behind");
+                                        }
+                                        div()
+                                            .text_color(if row.behind {
+                                                p.status_warning
+                                            } else {
+                                                p.muted
+                                            })
+                                            .child(text)
+                                    })),
+                            )
+                        }),
+                )
+                .child(
+                    div()
+                        .flex_shrink_0()
+                        .flex()
+                        .gap(px(2.))
+                        .child(
+                            Button::new(SharedString::from(format!("reconnect-{i}")))
+                                .label("Reconnect")
+                                .ghost()
+                                .xsmall()
+                                .on_click(move |_, _, cx| {
+                                    core.store.update(cx, |store, _| store.reconnect(&name));
+                                }),
+                        )
+                        .child({
+                            let restart_id = restart_id.clone();
+                            Button::new(SharedString::from(format!("restart-{i}")))
+                                .label("Restart")
+                                .ghost()
+                                .xsmall()
+                                .disabled(!online)
+                                .tooltip(if online {
+                                    "Restart its daemon: running turns are interrupted"
+                                } else {
+                                    "Not connected"
+                                })
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.restart(&restart_id, false, cx)
+                                }))
+                        })
+                        .when(reef.is_none(), |row| {
+                            row.child({
+                                let remove = host.id().clone();
+                                Button::new(SharedString::from(format!("remove-{i}")))
+                                    .label("Remove")
+                                    .ghost()
+                                    .xsmall()
+                                    .on_click(move |_, _, cx| {
+                                        let hosts: Vec<HostConfig> = core_remove
+                                            .store
+                                            .read(cx)
+                                            .fleet
+                                            .hosts
+                                            .iter()
+                                            .map(|h| h.config.clone())
+                                            .filter(|h| h.id != remove)
+                                            .collect();
+                                        core_remove
+                                            .store
+                                            .update(cx, |store, cx| store.set_hosts(hosts, cx));
+                                    })
+                            })
+                        }),
+                );
+            // Restart while agents run: say what it interrupts, and ask.
+            let confirm = asking.map(|running| {
+                let agents = if running == 1 { "agent" } else { "agents" };
                 div()
+                    .ml(px(18.))
+                    .mt(px(8.))
+                    .p(px(8.))
+                    .rounded(px(6.))
+                    .bg(p.surface0)
                     .flex()
                     .items_center()
-                    .gap(px(12.))
-                    .p(px(16.))
-                    .when(i > 0, |d| d.border_t_1().border_color(p.border))
-                    .child(ui::host_status_dot(&host.connection))
+                    .gap(px(8.))
                     .child(
                         div()
                             .flex_1()
                             .min_w(px(0.))
-                            .flex()
-                            .flex_col()
-                            .gap(px(2.))
-                            .child(div().text_color(p.foreground).child(format!(
-                                "{}  {}",
-                                host.config.name,
-                                host.config.endpoint.clone().unwrap_or_else(|| "no address".into())
-                            )))
-                            .child(
-                                div()
-                                    .text_size(size::sm())
-                                    .text_color(p.muted)
-                                    .truncate()
-                                    .child(detail),
-                            ),
+                            .text_size(size::sm())
+                            .text_color(p.status_warning)
+                            .child(format!(
+                                "{running} {agents} mid-turn here. Restarting interrupts them; they stay, and pick up when sent a prompt."
+                            )),
                     )
+                    .child({
+                        let id = restart_id.clone();
+                        Button::new(SharedString::from(format!("restart-anyway-{i}")))
+                            .label("Restart")
+                            .danger()
+                            .xsmall()
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.restart(&id, true, cx)
+                            }))
+                    })
                     .child(
-                        Button::new(SharedString::from(format!("reconnect-{i}")))
-                            .label("Reconnect")
+                        Button::new(SharedString::from(format!("restart-cancel-{i}")))
+                            .label("Cancel")
                             .ghost()
-                            .small()
-                            .on_click(move |_, _, cx| {
-                                core.store.update(cx, |store, _| store.reconnect(&name));
-                            }),
+                            .xsmall()
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.confirming = None;
+                                cx.notify();
+                            })),
                     )
-                    .when(reef.is_none(), |row| {
-                        row.child({
-                            let remove = host.id().clone();
-                            Button::new(SharedString::from(format!("remove-{i}")))
-                                .label("Remove")
-                                .ghost()
-                                .small()
-                                .on_click(move |_, _, cx| {
-                                    let hosts: Vec<HostConfig> = core_remove
-                                        .store
-                                        .read(cx)
-                                        .fleet
-                                        .hosts
-                                        .iter()
-                                        .map(|h| h.config.clone())
-                                        .filter(|h| h.id != remove)
-                                        .collect();
-                                    core_remove
-                                        .store
-                                        .update(cx, |store, cx| store.set_hosts(hosts, cx));
-                                })
-                        })
-                    }),
+            });
+            list = list.child(
+                div()
+                    .p(px(12.))
+                    .when(i > 0, |d| d.border_t_1().border_color(p.border))
+                    .child(row)
+                    .children(confirm),
             );
         }
         // In reef mode the list is Reef's: say whose, and how the last ask went.
@@ -211,15 +407,17 @@ impl Render for HostsScreen {
                 }
             }
         };
-        page("Hosts").child(
+        let header = pane_header("hosts", "server", "Hosts", &self.core);
+        div().size_full().flex().flex_col().child(header).child(
             div()
                 .id("hosts-scroll")
                 .flex_1()
+                .min_h(px(0.))
                 .overflow_y_scroll()
-                .p(px(24.))
+                .p(px(16.))
                 .flex()
                 .flex_col()
-                .gap(px(16.))
+                .gap(px(12.))
                 .child(div().text_size(size::sm()).text_color(p.muted).child(intro))
                 .child(list)
                 .when(reef.is_none(), |page| {
@@ -232,7 +430,7 @@ impl Render for HostsScreen {
                                 div()
                                     .flex()
                                     .gap(px(8.))
-                                    .child(div().w(px(200.)).child(Input::new(&self.name).small()))
+                                    .child(div().w(px(150.)).child(Input::new(&self.name).small()))
                                     .child(div().flex_1().child(Input::new(&self.endpoint).small()))
                                     .child(
                                         Button::new("add-host")
@@ -243,7 +441,15 @@ impl Render for HostsScreen {
                                                 this.add(window, cx)
                                             })),
                                     ),
-                            ),
+                            )
+                            .when_some(self.error.clone(), |card, error| {
+                                card.child(
+                                    div()
+                                        .text_size(size::sm())
+                                        .text_color(p.status_warning)
+                                        .child(error),
+                                )
+                            }),
                     )
                 }),
         )
@@ -614,10 +820,11 @@ fn preference_choice(
 
 /// A preference's title and description, with the control that sets it.
 fn preference_row(
-    title: &'static str,
-    description: &'static str,
+    title: impl Into<SharedString>,
+    description: impl Into<SharedString>,
     control: impl IntoElement,
 ) -> gpui_kit::gpui::Div {
+    let (title, description) = (title.into(), description.into());
     let p = palette();
     div()
         .p(px(16.))
@@ -646,12 +853,26 @@ fn preference_row(
 /// The Settings pane's width, where the window has room for it.
 pub const SETTINGS_WIDTH: f32 = 560.;
 
+/// A section the Settings pane scrolls to the next time it draws; see
+/// [`crate::extensions::open_settings`].
+pub enum SettingsAt {
+    Extensions,
+}
+
+impl gpui_kit::gpui::Global for SettingsAt {}
+
 pub struct SettingsPane {
     core: Core,
     /// The window border's color, chosen with a picker.
     border_color: Entity<ColorPickerState>,
     /// How long an agent's notification stays up, 0 until closed.
     notification_seconds: Entity<SliderState>,
+    /// Extension settings as last read or saved, by key, and why the last
+    /// change of one was refused.
+    extension_values: std::collections::HashMap<&'static str, Option<String>>,
+    extension_errors: std::collections::HashMap<&'static str, String>,
+    /// The pane's scroll, to bring a section into view ([`SettingsAt`]).
+    scroll: gpui_kit::gpui::ScrollHandle,
 }
 
 /// Bright colors offered first for the window border.
@@ -712,12 +933,99 @@ impl SettingsPane {
             core,
             border_color,
             notification_seconds,
+            extension_values: Default::default(),
+            extension_errors: Default::default(),
+            scroll: Default::default(),
         }
+    }
+
+    /// The Extensions card: each extension setting with its value and a
+    /// Change button; none when no extension offers one.
+    fn extensions_card(&mut self, cx: &mut Context<Self>) -> Option<gpui_kit::gpui::Div> {
+        let settings = self.core.extensions.read(cx).settings.clone();
+        if settings.is_empty() {
+            return None;
+        }
+        let p = palette();
+        let pane = cx.entity().downgrade();
+        let mut extensions = card();
+        for setting in settings {
+            let key = setting.key;
+            let value = (self.extension_values.entry(key))
+                .or_insert_with(|| crate::app::config::integration(key))
+                .clone();
+            let shown = value.clone().unwrap_or_else(|| setting.empty.to_string());
+            let set = value.is_some();
+            let error = self.extension_errors.get(key).cloned();
+            let pane = pane.clone();
+            let change = Button::new(SharedString::from(format!("extension-setting-{key}")))
+                .label("Change")
+                .small()
+                .on_click({
+                    let setting = setting.clone();
+                    move |_, window, cx| {
+                        let (setting, pane) = (setting.clone(), pane.clone());
+                        let current = value.clone().unwrap_or_default();
+                        ui::prompt_text(window, cx, &setting.title, &current, "Save", {
+                            move |typed, cx| {
+                                let saved = (setting.parse)(&typed).and_then(|kept| {
+                                    crate::app::config::set_integration(key, kept.as_deref())?;
+                                    Ok(kept)
+                                });
+                                if let Ok(kept) = &saved {
+                                    (setting.changed)(kept.clone(), cx);
+                                }
+                                let _ = pane.update(cx, |pane, cx| {
+                                    match saved {
+                                        Ok(kept) => {
+                                            pane.extension_values.insert(key, kept);
+                                            pane.extension_errors.remove(key);
+                                        }
+                                        Err(error) => {
+                                            pane.extension_errors.insert(key, error);
+                                        }
+                                    }
+                                    cx.notify();
+                                });
+                            }
+                        });
+                    }
+                });
+            let control = div()
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .child(
+                    div()
+                        .text_color(if set { p.foreground } else { p.muted })
+                        .child(shown),
+                )
+                .child(change);
+            extensions = extensions.child(
+                preference_row(setting.title.clone(), setting.description.clone(), control)
+                    .when_some(error, |row, error| {
+                        row.child(
+                            div()
+                                .w_full()
+                                .text_size(size::sm())
+                                .text_color(p.status_warning)
+                                .child(error),
+                        )
+                    }),
+            );
+        }
+        Some(extensions)
     }
 }
 
 impl Render for SettingsPane {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Asked to show the Extensions section: the content's children are
+        // three headings and three cards before its heading.
+        if cx.has_global::<SettingsAt>() {
+            let SettingsAt::Extensions = cx.remove_global::<SettingsAt>();
+            self.scroll.scroll_to_top_of_item(6);
+        }
         let p = palette();
         let data_dir = crate::app::config::data_dir().display().to_string();
         let client_id = crate::app::config::client_id();
@@ -769,7 +1077,33 @@ impl Render for SettingsPane {
         let recency_nav = nav.clone();
         let box_nav = nav.clone();
         let background_nav = nav.clone();
+        // Reef's, for the whole fleet; without a Reef there is nothing to
+        // route through.
+        let reef = self.core.store.read(cx).reef.clone();
+        let routing_store = self.core.store.clone();
+        let routing = match &reef {
+            Some(reef) => preference_toggle(
+                "agent-routing",
+                "Agents can message agents on other hosts",
+                "Reef routes their prompts and finish notices, for the whole fleet. Not a lock: anything that reaches a host can still prompt its agents.",
+                reef.routing.unwrap_or(false),
+                move |checked, _, cx| {
+                    routing_store.update(cx, |store, cx| store.set_agent_routing(*checked, cx))
+                },
+            )
+            .when_some(reef.routing_error.clone(), |row, error| {
+                row.child(div().text_size(size::sm()).text_color(p.status_warning).child(error))
+            }),
+            None => preference_toggle(
+                "agent-routing",
+                "Agents can message agents on other hosts",
+                "Needs a Reef: it routes between hosts. Without one, agents message agents on their own host.",
+                false,
+                |_, _, _| {},
+            ),
+        };
         let preferences = card()
+            .child(routing)
             .child(preference_toggle(
                 "show-background",
                 "Show background",
@@ -946,7 +1280,26 @@ impl Render for SettingsPane {
             ));
         let border = self.core.nav.read(cx).window_border;
         let border_nav = self.core.nav.clone();
+        let appearance = self.core.nav.read(cx).appearance;
+        let appearance_nav = self.core.nav.clone();
         let window_card = card()
+            .child(preference_choice(
+                "Theme",
+                "Light or dark, or whichever your system shows, switching when it does.",
+                ButtonGroup::new("appearance")
+                    .children(crate::theme::Appearance::ALL.into_iter().map(|option| {
+                        Button::new(SharedString::from(format!("appearance-{}", option.label())))
+                            .label(option.label())
+                            .selected(option == appearance)
+                    }))
+                    .on_click(move |indices, _, cx| {
+                        if let Some(&option) =
+                            indices.first().and_then(|ix| crate::theme::Appearance::ALL.get(*ix))
+                        {
+                            appearance_nav.update(cx, |nav, cx| nav.set_appearance(option, cx));
+                        }
+                    }),
+            ))
             .child(preference_choice(
                 "Window border",
                 "A solid line around the window's edge, to tell it apart from the windows beside it.",
@@ -978,29 +1331,12 @@ impl Render for SettingsPane {
                     )
                     .anchor(gpui_kit::gpui::Anchor::TopRight),
             ));
-        let nav = self.core.nav.clone();
-        let header = div()
-            .h(px(40.))
-            .flex_shrink_0()
-            .px(px(16.))
-            .flex()
-            .items_center()
-            .gap(px(8.))
-            .border_b_1()
-            .border_color(p.border)
-            .child(ui::icon("settings", 14., p.muted))
-            .child(div().flex_1().text_color(p.foreground).child("Settings"))
-            .child(
-                Button::new("settings-close")
-                    .icon(gpui_kit::component::Icon::empty().path("icons/x.svg"))
-                    .ghost()
-                    .xsmall()
-                    .tooltip("Close (Esc)")
-                    .on_click(move |_, _, cx| nav.update(cx, |nav, cx| nav.set_pane(None, cx))),
-            );
+        let extensions = self.extensions_card(cx);
+        let header = pane_header("settings", "settings", "Settings", &self.core);
         div().size_full().flex().flex_col().child(header).child(
             div()
                 .id("settings-content")
+                .track_scroll(&self.scroll)
                 .flex_1()
                 .min_h(px(0.))
                 .overflow_y_scroll()
@@ -1015,9 +1351,14 @@ impl Render for SettingsPane {
                 .child(notifications)
                 .child(div().text_color(p.muted).child("Window"))
                 .child(window_card)
+                .when_some(extensions, |content, extensions| {
+                    content
+                        .child(div().text_color(p.muted).child("Extensions"))
+                        .child(extensions)
+                })
                 .child(
                     card()
-                        .child(row("Crusteo", format!("v{}", env!("CARGO_PKG_VERSION"))))
+                        .child(row("Crusteo", env!("CRUSTEO_VERSION").to_string()))
                         .child(row("Data directory", data_dir))
                         .child(row("Client id", client_id))
                         .child(row("Daemons", versions)),

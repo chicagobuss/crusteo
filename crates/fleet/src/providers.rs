@@ -29,6 +29,10 @@ pub struct Provider {
     pub default_mode: Option<String>,
     pub modes: Vec<Choice>,
     pub models: Vec<Model>,
+    /// The CLI's version, from a daemon that says (Burrow does).
+    pub version: Option<String>,
+    /// `native`, `package` or `unknown`.
+    pub install_kind: Option<String>,
 }
 
 impl Provider {
@@ -116,6 +120,8 @@ pub fn parse(payload: &Value) -> Vec<Provider> {
                 default_mode: entry["defaultModeId"].as_str().map(str::to_string),
                 modes: choices(&entry["modes"]),
                 models,
+                version: entry["version"].as_str().map(str::to_string),
+                install_kind: entry["installKind"].as_str().map(str::to_string),
             })
         })
         .collect()
@@ -201,5 +207,15 @@ mod tests {
         let model = providers[0].default_model().unwrap();
         assert_eq!(model.thinking.len(), 2);
         assert_eq!(model.default_thinking.as_deref(), Some("medium"));
+        assert_eq!(providers[0].version, None);
+    }
+
+    #[test]
+    fn a_burrow_entry_carries_its_cli() {
+        let payload = json!({"entries": [{"provider": "claude", "status": "ready", "version": "2.1.317",
+            "installKind": "native", "models": []}]});
+        let providers = parse(&payload);
+        assert_eq!(providers[0].version.as_deref(), Some("2.1.317"));
+        assert_eq!(providers[0].install_kind.as_deref(), Some("native"));
     }
 }

@@ -10,6 +10,8 @@
 //! | anything else | `echo: <text>` in two chunks |
 //!
 //! A steer during a turn adds `steered: <text>` to the reply and ends the wait.
+//! A prompt from another agent comes in Paseo's `<paseo-system>` envelope; its
+//! command is read from inside it.
 
 use std::time::Duration;
 
@@ -113,6 +115,20 @@ fn unique() -> u128 {
         .unwrap_or_default()
 }
 
+/// What a prompt asks: the text inside Paseo's `<paseo-system ...>` envelope
+/// for one another agent sent, the prompt itself otherwise.
+fn words(prompt: &str) -> &str {
+    let Some(opened) = prompt.trim_start().strip_prefix("<paseo-system") else {
+        return prompt;
+    };
+    let Some((_, inner)) = opened.split_once('>') else {
+        return prompt;
+    };
+    (inner.rsplit_once("</paseo-system>"))
+        .map_or(inner, |(body, _)| body)
+        .trim()
+}
+
 struct Worker {
     events: mpsc::UnboundedSender<ProviderEvent>,
     commands: mpsc::UnboundedReceiver<Command>,
@@ -202,7 +218,8 @@ impl Worker {
     async fn turn(&mut self, turn: Option<String>, prompt: String) -> bool {
         self.emit(ProviderEvent::TurnStarted { turn: turn.clone() });
         let message_id = self.id("echo-msg");
-        let (verb, rest) = prompt.split_once(' ').unwrap_or((prompt.as_str(), ""));
+        let words = words(&prompt);
+        let (verb, rest) = words.split_once(' ').unwrap_or((words, ""));
         let rest = rest.to_string();
         let outcome = match verb {
             "tool" => self.tool(&turn, &message_id, &rest).await,
@@ -466,5 +483,14 @@ mod tests {
             events.last(),
             Some(ProviderEvent::TurnCanceled { reason, .. }) if reason == "Interrupted"
         ));
+    }
+
+    #[test]
+    fn another_agents_prompt_is_read_from_inside_its_envelope() {
+        let sent = "<paseo-system version=\"1\" kind=\"agent-message\" message-id=\"m\">\n\
+                    slow work\n</paseo-system>";
+        assert_eq!(words(sent), "slow work");
+        assert_eq!(words("slow work"), "slow work");
+        assert_eq!(words("<paseo-system unclosed"), "<paseo-system unclosed");
     }
 }

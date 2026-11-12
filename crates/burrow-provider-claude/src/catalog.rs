@@ -304,6 +304,121 @@ pub fn models(version: Option<&[u32]>) -> Vec<Model> {
         .collect()
 }
 
+/// A context window for a model id the CLI offered: the manifest's when it
+/// knows the model (a dated id such as `claude-haiku-4-5-20251001` counts
+/// as its undated name), one million for a `[1m]` id, else 200k.
+fn probed_context(id: &str) -> u64 {
+    let undated = id
+        .rsplit_once('-')
+        .filter(|(_, tail)| tail.len() == 8 && tail.bytes().all(|b| b.is_ascii_digit()))
+        .map_or(id, |(head, _)| head);
+    context_window(Some(id))
+        .or_else(|| context_window(Some(undated)))
+        .unwrap_or(200_000)
+}
+
+/// The models Claude Code reports in its `initialize` reply (`models`).
+///
+/// An alias entry (`opus`, `fable`, `default`, ...) is offered under the
+/// model it resolves to, so a model keeps one stable id however many names
+/// the CLI gives it, and an entry the CLI lists under its full id wins over
+/// an alias of the same model. The model the `default` alias resolves to is
+/// the default. `None` when the reply lists no models (an old CLI).
+pub fn from_initialize(reply: &serde_json::Value) -> Option<Vec<Model>> {
+    let entries = reply["models"].as_array()?;
+    let resolved = |e: &serde_json::Value| -> Option<String> {
+        let id = e["resolvedModel"]
+            .as_str()
+            .or_else(|| e["value"].as_str())?;
+        Some(id.to_string())
+    };
+    let mut ids: Vec<String> = Vec::new();
+    let mut picked: Vec<&serde_json::Value> = Vec::new();
+    let mut default = None;
+    for entry in entries {
+        let Some(id) = resolved(entry) else { continue };
+        if entry["value"] == "default" {
+            default = Some(id);
+            continue;
+        }
+        match ids.iter().position(|seen| *seen == id) {
+            Some(at) => {
+                if entry["value"].as_str() == Some(id.as_str()) {
+                    picked[at] = entry;
+                }
+            }
+            None => {
+                ids.push(id);
+                picked.push(entry);
+            }
+        }
+    }
+    // A default that no other entry names is still offered.
+    if let Some(id) = default.as_ref().filter(|id| !ids.contains(id))
+        && let Some(entry) = entries.iter().find(|e| e["value"] == "default")
+    {
+        ids.insert(0, id.clone());
+        picked.insert(0, entry);
+    }
+    if ids.is_empty() {
+        return None;
+    }
+    let default = default.unwrap_or_else(|| ids[0].clone());
+    let known = |id: &str| MANIFEST.iter().find(|e| e.id == id);
+    Some(
+        ids.iter()
+            .zip(picked)
+            .map(|(id, entry)| {
+                let levels: Vec<&str> = entry["supportedEffortLevels"]
+                    .as_array()
+                    .map(|l| l.iter().filter_map(|v| v.as_str()).collect())
+                    .unwrap_or_default();
+                let default_thinking = known(id)
+                    .and_then(|e| e.default_thinking)
+                    .filter(|d| levels.contains(d))
+                    .or_else(|| {
+                        levels
+                            .contains(&DEFAULT_THINKING)
+                            .then_some(DEFAULT_THINKING)
+                    })
+                    .or_else(|| levels.first().copied());
+                let mut thinking = Vec::new();
+                if entry["supportsEffort"].as_bool() != Some(false) && !levels.is_empty() {
+                    if entry["supportsThinkingOff"].as_bool() == Some(true) {
+                        thinking.push(ThinkingOption {
+                            id: THINKING_OFF.into(),
+                            label: "Off".into(),
+                            is_default: false,
+                        });
+                    }
+                    for level in &levels {
+                        thinking.push(ThinkingOption {
+                            id: (*level).into(),
+                            label: label(level).into(),
+                            is_default: Some(*level) == default_thinking,
+                        });
+                    }
+                    if levels.contains(&"xhigh") {
+                        thinking.push(ThinkingOption {
+                            id: ULTRACODE.into(),
+                            label: "Ultra Code".into(),
+                            is_default: false,
+                        });
+                    }
+                }
+                Model {
+                    id: id.clone(),
+                    label: entry["displayName"].as_str().unwrap_or(id).into(),
+                    description: entry["description"].as_str().map(Into::into),
+                    is_default: *id == default,
+                    context_window_max_tokens: Some(probed_context(id)),
+                    thinking,
+                }
+            })
+            .collect(),
+    )
+}
+
 pub fn context_window(model: Option<&str>) -> Option<u64> {
     let model = model?;
     if model.ends_with("[1m]") {
@@ -315,6 +430,7 @@ pub fn context_window(model: Option<&str>) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn versions_gate_models_and_pick_a_default() {
@@ -333,5 +449,86 @@ mod tests {
         assert_eq!(opus.thinking[0].id, "off");
         assert!(opus.thinking.iter().any(|t| t.id == "ultracode"));
         assert!(opus.thinking.iter().any(|t| t.id == "high" && t.is_default));
+    }
+
+    /// A real `initialize` reply of Claude Code 2.1.317 (account removed).
+    fn reply() -> serde_json::Value {
+        let frame: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/initialize.json")).unwrap();
+        frame["response"]["response"].clone()
+    }
+
+    #[test]
+    fn the_cli_reported_models_are_offered_by_resolved_id() {
+        let models = from_initialize(&reply()).unwrap();
+        let ids: Vec<&str> = models.iter().map(|m| m.id.as_str()).collect();
+        // Aliases collapse into the model they resolve to, once each.
+        assert_eq!(
+            ids[..3],
+            ["claude-opus-5-5", "claude-fable-5-2", "claude-sonnet-5-5"]
+        );
+        assert!(ids.contains(&"claude-fable-5-1"), "the `fable` alias");
+        assert!(
+            !ids.iter()
+                .any(|id| ["default", "opus", "fable", "sonnet", "haiku"].contains(id))
+        );
+        let mut unique = ids.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(unique.len(), ids.len());
+        // The `default` alias picks the default.
+        let defaults: Vec<&str> = (models.iter().filter(|m| m.is_default))
+            .map(|m| m.id.as_str())
+            .collect();
+        assert_eq!(defaults, ["claude-opus-5-5"]);
+        // A model the manifest has never heard of still gets a window.
+        let fable = models.iter().find(|m| m.id == "claude-fable-5-2").unwrap();
+        assert_eq!(fable.label, "Fable 5.2");
+        assert_eq!(fable.context_window_max_tokens, Some(200_000));
+        assert!(fable.thinking.iter().any(|t| t.id == "ultracode"));
+        assert!(!fable.thinking.iter().any(|t| t.id == "off"));
+        // One the manifest knows keeps its window and its default effort.
+        let opus = models.iter().find(|m| m.id == "claude-opus-5-5").unwrap();
+        assert_eq!(opus.context_window_max_tokens, Some(1_000_000));
+        assert!(
+            opus.thinking
+                .iter()
+                .any(|t| t.id == "medium" && t.is_default)
+        );
+        // supportsThinkingOff and a missing effort list.
+        let sonnet = models.iter().find(|m| m.id == "claude-sonnet-5").unwrap();
+        assert_eq!(sonnet.thinking[0].id, "off");
+        let haiku = models
+            .iter()
+            .find(|m| m.id == "claude-haiku-4-5-20251001")
+            .unwrap();
+        assert!(haiku.thinking.is_empty());
+        assert_eq!(haiku.context_window_max_tokens, Some(200_000));
+        let opus46 = models.iter().find(|m| m.id == "claude-opus-4-6").unwrap();
+        assert!(
+            !opus46
+                .thinking
+                .iter()
+                .any(|t| t.id == "xhigh" || t.id == "ultracode")
+        );
+    }
+
+    #[test]
+    fn a_reply_without_models_is_no_catalog() {
+        assert!(from_initialize(&json!({"claude_code_version": "2.1.1"})).is_none());
+        assert!(from_initialize(&json!({"models": []})).is_none());
+    }
+
+    #[test]
+    fn a_full_id_entry_wins_over_an_alias_of_the_same_model() {
+        let models = from_initialize(&json!({"models": [
+            {"value": "default", "resolvedModel": "claude-x-1", "displayName": "Default"},
+            {"value": "x", "resolvedModel": "claude-x-1", "displayName": "X alias"},
+            {"value": "claude-x-1", "resolvedModel": "claude-x-1", "displayName": "X 1"},
+        ]}))
+        .unwrap();
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].label, "X 1");
+        assert!(models[0].is_default);
     }
 }

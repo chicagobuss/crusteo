@@ -172,7 +172,8 @@ async fn play(fixture: &str, options: Options) -> Played {
             "exit" => current
                 .cli
                 .send(Output::Exited {
-                    status: body["status"].as_i64().map(|s| s as i32),
+                    code: body["status"].as_i64().map(|s| s as i32),
+                    signal: None,
                     stderr: body["stderr"].as_str().unwrap_or_default().into(),
                 })
                 .unwrap(),
@@ -582,4 +583,38 @@ async fn a_real_resume_after_a_restart_replays() {
     .await;
     assert_eq!(played.launches[0].0.as_deref(), Some(REAL));
     assert_eq!(text(&played.events, "foreground-turn-4"), "ready\n");
+}
+
+#[tokio::test]
+async fn an_error_after_the_reply_is_a_note_and_one_before_it_fails_the_turn() {
+    let played = play(
+        include_str!("fixtures/error_after_reply.jsonl"),
+        Options::default(),
+    )
+    .await;
+    let e = &played.events;
+    // The first turn's reply came, then the ERROR: it completes, with a note.
+    assert_eq!(text(e, "foreground-turn-1"), "The disks are fine.\n");
+    assert!(e.iter().any(
+        |x| matches!(x, ProviderEvent::TurnCompleted { turn: Some(t), .. } if t == "foreground-turn-1")
+    ));
+    let notes: Vec<String> = items(e)
+        .iter()
+        .filter(|(t, i)| t.as_deref() == Some("foreground-turn-1") && i["type"] == "notification")
+        .map(|(_, i)| i["message"].as_str().unwrap_or_default().to_string())
+        .collect();
+    assert_eq!(notes.len(), 1, "{notes:?}");
+    assert!(notes[0].starts_with("Antigravity reported an error after its reply"));
+    assert!(notes[0].contains("stream idle timeout"));
+    // The second ends mid tool call, its reply not yet given: it fails.
+    let failed: Vec<(Option<String>, String)> = e
+        .iter()
+        .filter_map(|x| match x {
+            ProviderEvent::TurnFailed { turn, error, .. } => Some((turn.clone(), error.clone())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(failed.len(), 1, "{failed:?}");
+    assert_eq!(failed[0].0.as_deref(), Some("foreground-turn-2"));
+    assert!(failed[0].1.contains("attempt 3"));
 }

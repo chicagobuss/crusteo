@@ -47,6 +47,11 @@ It runs next to Paseo's daemon until it has proved as good or better. It uses it
   saved as JSON records; git worktrees Burrow makes are in `<home>/worktrees`. Each agent's timeline is an append-only file that keeps its epoch and seqs across
   restarts. After a restart, agents come back `closed` and resume their provider session when
   they are next used. A deleted agent's record and timeline are removed.
+- **Startup:** Burrow listens at once and finds its providers meanwhile, one after another. Each
+  joins the providers snapshot as it is found, pushed to `providers_snapshot_update` subscribers;
+  until then `daemon.get_status` lists it as "not looked for yet". Creating an agent, sending to
+  one, or changing its mode, model or thinking while its provider is still being found waits for
+  it, and fails as before only if it is not found at all.
 - **CLI upgrades:** each provider's CLI is checked (its `--version`) every 5 minutes. When it
   changed, or a CLI turned up, the provider is found again with its models, and clients get a
   `providers_snapshot_update`. Every hour, and on `refresh_providers_snapshot_request`, providers
@@ -149,6 +154,7 @@ Reef.
 | `--server-id`, `--hostname`, `--advertise-version` | taken from home, the OS, and `<version>-burrow` | What `server_info` reports. |
 | `--seed-demo` | off | Adds a placeholder project and agent to an empty home. |
 | `--allow-host`, `--allow-origin` | none | Extra `Host` and `Origin` values to accept at upgrade. |
+| `--mcp-tokenless` | off (`BURROW_MCP_TOKENLESS`) | Serves the agent tools (MCP) to a client with no token, as Burrow did before 0.2.0. Off, such a client is refused; it sends the token in `<home>/mcp-token`. Agents always send their own. |
 
 Other settings:
 - Each `BURROW_*` variable here was `CARAPACE_*` before 0.1.0-beta.1. For one release the old
@@ -164,7 +170,15 @@ Other settings:
 - `BURROW_ACP_TRACE=<dir>` does the same for each ACP agent session, Cursor's included.
 - `burrow mcp-bridge` is not for people: it is the stdio MCP server Burrow hands ACP agents that
   take no HTTP servers, and Antigravity through its plugin, relaying to the agent tools with the
-  URL and token in its environment. Without them it is a server with no tools.
+  URL and token in its environment (`BURROW_MCP_URL`, `BURROW_MCP_TOKEN`). Without a URL it is a
+  server with no tools. Given a URL and no token, it sends the token in `<home>/mcp-token`
+  (`--home`, `$BURROW_HOME`, else `~/.burrow`), that of a client that is not an agent.
+- `<home>/mcp-token` is the token for the agent tools of a client that is not an agent, which gets
+  the top-level tools (create and prompt agents, make workspaces). Burrow writes it when it starts,
+  readable by its user alone, and keeps it across restarts; delete the file and restart to change
+  it. The server is on a loopback port of its own, which changes at each start and is in Burrow's
+  log (`agent tools (MCP) on http://127.0.0.1:<port>/mcp`); send the token as `Authorization:
+  Bearer <token>`.
 - On SIGTERM or Ctrl-C the daemon stops its agents and flushes state.
 
 ## Move a host over from Paseo
@@ -236,28 +250,29 @@ cargo test -p burrow-protocol -p burrow-daemon -p burrow-provider -p burrow-prov
 | `burrow-provider-acp/tests/replay.rs` | The ACP session against scripted agent transcripts, the catalog probe, and one real Cursor session and its resume, recorded and scrubbed; no process, no model |
 | `burrow-daemon/examples/smoke.rs` | Not a test: it drives one real agent (Claude by default; Codex with `first codex <model>`, Antigravity with `agy`, pi with `pi <model>`, Cursor with `cursor <model>`) through any daemon and logs every frame, for live and differential checks. Every turn is a real model call. |
 
-## Next step: one shared protocol crate
+## Shared wire primitives
 
-`burrow-protocol` (the daemon's side) and `paseo-client` (the client's side) both describe
-the wire. Merge them into one `paseo-protocol` crate that both the daemon and the clients depend
-on (design.md, section 10).
+`paseo-client` depends on `burrow-protocol` for the parts of the wire that are the same in both
+directions, and keeps the rest of its own (design.md, section 10). The crate stays
+`burrow-protocol`; it is not renamed or merged.
+
+| Concept | Lives in | Notes |
+|---|---|---|
+| Protocol version | `burrow_protocol::PROTOCOL_VERSION` | `paseo_client` re-exports it |
+| Capability names | `hello::capability` | `Hello` parses them; `paseo_client::proto::capabilities()` builds from them |
+| Envelope | `envelope::{session, rpc_error, request_frame, unwrap_session, request_id, reply_request_id, RpcFailure}` | Each writer has its reader beside it |
+| Directory sync | `directory::{Cursor, SyncMeta, SyncRemoval, PageInfo}` | One type each, read leniently by clients; `paseo_client::proto` re-exports them (`SyncRemoval` as `Removal`) |
+| State bucket | `directory::StateBucket` | `paseo_client::proto::Bucket` is the same type |
+| Terminal frames | `terminal` | opcodes, `encode_frame`/`decode_frame`, resize, `TerminalState`; `paseo_client::terminal` re-exports the module |
+
+Kept apart on purpose:
 
 | Concept | `burrow-protocol` | `paseo-client` |
 |---|---|---|
-| Protocol version | `PROTOCOL_VERSION` (`lib.rs`) | `PROTOCOL_VERSION` (`lib.rs`) |
-| Hello capabilities | `hello::capability` names, `Hello` (parse) | `proto::capabilities()` (build) |
+| Directory entities | `directory::{AgentSnapshot, WorkspaceDescriptor, ProjectDescriptor, ProjectPlacement}`: strict, written whole | `proto::{Agent, Workspace, Project}`: lenient views that absorb older daemons |
 | Welcome | `server_info::ServerInfo` (serialize) | `proto::ServerInfo::from_status` (parse) |
-| Envelope | `envelope::{session, rpc_error, request_id}` | `connection.rs` `unwrap_session`, `settle` (`rpc_error` decode) |
-| Directory sync | `directory::{SyncCursor, SyncMeta, SyncRemoval, PageInfo}` | `proto::{Cursor, SyncMeta, Removal, PageInfo}` |
-| Directory entities | `directory::{AgentSnapshot, WorkspaceDescriptor, ProjectDescriptor, ProjectPlacement}` | `proto::{Agent, Workspace, Project}` |
-| State bucket | `directory::StateBucket`, `store::agent_bucket` | `proto::Bucket`, `Agent::bucket` |
-| Terminal frames | none yet | `terminal.rs`: opcodes, `encode_frame`/`decode_frame`, resize, `TerminalState` snapshot |
+| Request cursor | `directory::SyncCursor`: either half may be missing | `directory::Cursor`: always both |
 
-How to merge each side:
-- Where `burrow-protocol` serializes one of these and `paseo-client` parses it, a single type
-  should derive both `Serialize` and `Deserialize`.
-- Keep `paseo-client`'s leniency: unknown fields are kept, optional fields default.
-- Keep `burrow-protocol`'s distinction between nullable fields (sent as `null`) and optional
-  fields (omitted).
-- Burrow's terminals should use `paseo-client`'s terminal codec rather than write a second
-  one.
+Why: a type that serves both the strict writer and the lenient reader needs `serde`
+contortions, and puts the compatibility shims for Paseo 0.10-0.14 on the daemon's side. The
+client's read path is the one place they belong.

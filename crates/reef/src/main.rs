@@ -87,7 +87,7 @@ async fn run(args: config::Args) -> Result<(), String> {
             args.bind.ip()
         );
     }
-    let reef_config = ReefConfig {
+    let mut reef_config = ReefConfig {
         open: args.open,
         bind: args.bind,
         // The demo keeps its settings in memory.
@@ -99,6 +99,10 @@ async fn run(args: config::Args) -> Result<(), String> {
         record_dir: args.data_dir.clone().filter(|_| args.demo),
         ..ReefConfig::new(hosts, client_id, devices.clone())
     };
+    if args.demo {
+        // The demo's CLI upgrades are told within seconds, not minutes.
+        reef_config.limits.updates = Duration::from_secs(8);
+    }
     let names: Vec<String> = reef_config.hosts.iter().map(|h| h.name.clone()).collect();
     let handle = reef::start(reef_config)
         .await
@@ -236,6 +240,19 @@ async fn demo_fleet() -> Result<Vec<HostConfig>, String> {
         });
         daemons.push(daemon);
     }
+    // Claude Code upgrades itself on three of the four hosts, a few seconds
+    // apart, one of them adding a model, as a Burrow reports it.
+    let upgrading = daemons[..3].to_vec();
+    tokio::spawn(async move {
+        for (daemon, wait, new_model) in [
+            (upgrading[1].clone(), 20, true),
+            (upgrading[2].clone(), 6, true),
+            (upgrading[0].clone(), 40, true),
+        ] {
+            tokio::time::sleep(Duration::from_secs(wait)).await;
+            daemon.update_providers(fake::providers_upgraded("2.1.320", new_model));
+        }
+    });
     let daemon = daemons[0].clone();
     // Now and then an agent elsewhere runs a turn and replies, so the
     // newest-first list moves.

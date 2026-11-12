@@ -29,6 +29,22 @@ pub fn default_home() -> Option<PathBuf> {
     Some(prepare_default(Path::new(&user)))
 }
 
+/// The state directory as it is now, found without changing anything: what
+/// [`default_home`] would give, but `~/.carapace` is not moved, only used if
+/// that is the one there is. For a command that only reads a file in it.
+pub fn existing_home() -> Option<PathBuf> {
+    if let Some(home) = burrow_provider::env::var_os("BURROW_HOME") {
+        return Some(PathBuf::from(home));
+    }
+    let user = PathBuf::from(std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))?);
+    let home = user.join(DIR);
+    if home.is_dir() {
+        return Some(home);
+    }
+    let legacy = user.join(LEGACY_DIR);
+    Some(if legacy.is_dir() { legacy } else { home })
+}
+
 /// `<user>/.burrow`, after moving `<user>/.carapace` there if that is the
 /// only one of the two. When the move fails, `<user>/.carapace` is used as
 /// before, and the next start tries again.

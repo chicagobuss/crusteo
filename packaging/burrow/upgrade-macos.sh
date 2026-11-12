@@ -8,8 +8,9 @@
 # It hands the work to a one-off launchd job in your login session, then
 # returns. The job waits until no agent is mid-turn (up to 30 minutes), stops
 # Burrow, keeps the old binary as burrow.prev, installs the new one, signs it,
-# starts Burrow again and checks it listens. Its log is upgrade.log beside the
-# binary.
+# starts Burrow again and checks it listens within 90 seconds, else puts
+# burrow.prev back. Its log is upgrade.log beside the binary, with how long
+# Burrow took to listen.
 #
 # Signing is what keeps macOS's Local Network permission. macOS gives it to
 # a program by its signature, and an ad-hoc signature (what cargo and the
@@ -24,7 +25,8 @@
 # login session, where the keychain is open; codesign over SSH usually cannot.
 #
 # Environment: BURROW_DIR (the binary's folder, default ~/burrow),
-# BURROW_HOME (the state folder, default ~/.burrow), BURROW_SIGN_IDENTITY.
+# BURROW_HOME (the state folder, default ~/.burrow), BURROW_SIGN_IDENTITY,
+# BURROW_LISTEN_WAIT_SECONDS (default 90).
 set -u
 
 LABEL=dev.crusteo.burrow
@@ -34,6 +36,8 @@ HOME_DIR=${BURROW_HOME:-$HOME/.burrow}
 PLIST=$HOME/Library/LaunchAgents/$LABEL.plist
 LOG=$DIR/upgrade.log
 IDLE_WAIT_SECONDS=1800
+# How long a started Burrow has to listen before burrow.prev is put back.
+LISTEN_WAIT_SECONDS=${BURROW_LISTEN_WAIT_SECONDS:-90}
 
 if [ "${1:-}" != "--job" ]; then
   new=${1:?usage: upgrade-macos.sh <new burrow binary>}
@@ -45,7 +49,8 @@ if [ "${1:-}" != "--job" ]; then
   install -m 0755 "$0" "$DIR/upgrade-job.sh"
   launchctl remove "$JOB" 2>/dev/null
   launchctl submit -l "$JOB" -- /usr/bin/env BURROW_DIR="$DIR" BURROW_HOME="$HOME_DIR" \
-    BURROW_SIGN_IDENTITY="$identity" /bin/bash "$DIR/upgrade-job.sh" --job
+    BURROW_SIGN_IDENTITY="$identity" BURROW_LISTEN_WAIT_SECONDS="$LISTEN_WAIT_SECONDS" \
+    /bin/bash "$DIR/upgrade-job.sh" --job
   echo "queued $("$DIR/burrow.new" --version); it installs once no agent is mid-turn. Log: $LOG"
   exit 0
 fi
@@ -55,6 +60,19 @@ say() { echo "$(date '+%F %T') $*"; }
 done_() {
   launchctl remove "$JOB"
   exit "$1"
+}
+# Waits up to LISTEN_WAIT_SECONDS for Burrow to listen; sets `waited` to the
+# seconds it took (or gave up after). Older Burrows listen only once every
+# provider has said what it offers, which can take over 30 s; this one may be
+# putting such a one back.
+listening() {
+  local started=$SECONDS
+  until lsof -nP -a -c burrow -iTCP -sTCP:LISTEN >/dev/null 2>&1; do
+    waited=$((SECONDS - started))
+    [ "$waited" -ge "$LISTEN_WAIT_SECONDS" ] && return 1
+    sleep 1
+  done
+  waited=$((SECONDS - started))
 }
 # Agents mid-turn, from Burrow's records (top-level "status" of each).
 busy() { grep -l -E '^  "status": "(running|initializing)"' "$HOME_DIR"/agents/*.json 2>/dev/null | wc -l | tr -d ' '; }
@@ -91,16 +109,18 @@ else
 fi
 say "starting $("$DIR/burrow" --version)"
 launchctl bootstrap "gui/$(id -u)" "$PLIST"
-for _ in $(seq 1 30); do
-  lsof -nP -a -c burrow -iTCP -sTCP:LISTEN >/dev/null 2>&1 && break
-  sleep 1
-done
-if lsof -nP -a -c burrow -iTCP -sTCP:LISTEN; then
-  say "finished"
+if listening; then
+  say "listening after ${waited}s; finished"
+  lsof -nP -a -c burrow -iTCP -sTCP:LISTEN
   done_ 0
 fi
-say "burrow is not listening; putting burrow.prev back"
+say "burrow is not listening after ${waited}s (waited up to ${LISTEN_WAIT_SECONDS}s); putting burrow.prev back"
 launchctl bootout "gui/$(id -u)/$LABEL"
 cp -p "$DIR/burrow.prev" "$DIR/burrow"
 launchctl bootstrap "gui/$(id -u)" "$PLIST"
+if listening; then
+  say "burrow.prev is back and listening after ${waited}s"
+else
+  say "burrow.prev is back but not listening after ${waited}s either"
+fi
 done_ 1

@@ -44,7 +44,10 @@ http = "1"
 tower-service = "0.3"
 # Crusteo's timeline model and tool labels, for `get_agent_activity`.
 fleet.workspace = true
-
-[dev-dependencies]
-# Crusteo's own client, the reference consumer of this daemon.
+# Crusteo's client: its ssh:// transport for `burrow --host ssh://...`, and
+# the reference consumer of this daemon in the tests.
 paseo-client.workspace = true
+# Terminals: a PTY per terminal, and crusteo's emulator for the screen a
+# client attaching to one is sent.
+portable-pty = "0.9"
+term.workspace = true

@@ -118,7 +118,7 @@ fn dial(needle: Option<f64>, color: Hsla) -> impl IntoElement {
     let p = palette();
     let bands = [
         (0., 74., p.status_success),
-        (74., 106., rgb(0x79c0ff)),
+        (74., 106., on_pace()),
         (106., 140., p.status_warning),
         (140., 180., p.status_danger),
     ];
@@ -166,9 +166,18 @@ fn severity_color(severity: Severity) -> Hsla {
     match severity {
         Severity::Critical => p.status_danger.into(),
         Severity::Warn => p.status_warning.into(),
-        Severity::OnPace => rgb(0x79c0ff).into(),
+        Severity::OnPace => on_pace().into(),
         Severity::Surplus => p.status_success.into(),
         Severity::Unknown => p.muted.into(),
+    }
+}
+
+/// A light blue on dark; on light, a blue dark enough to read on white.
+fn on_pace() -> gpui_kit::gpui::Rgba {
+    if crate::theme::is_light() {
+        rgb(0x2f6ac4)
+    } else {
+        rgb(0x79c0ff)
     }
 }
 

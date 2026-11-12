@@ -118,6 +118,8 @@ pub struct UiState {
     /// History docked at the window's right.
     pub history_docked: bool,
     pub history_width: Option<f32>,
+    /// How the docked History is ordered.
+    pub history_sort: fleet::state_list::Sort,
     pub group_by_status: bool,
     pub collapsed: Vec<String>,
     pub collapsed_pinned: bool,
@@ -153,6 +155,8 @@ pub struct UiState {
     pub box_single_workspaces: Option<bool>,
     /// Window zoom; None is 100%.
     pub zoom: Option<f32>,
+    /// `light`, `dark`, or empty to match the system's.
+    pub appearance: String,
     /// Where each toolbar item sits.
     pub toolbars: crate::toolbars::Arrangement,
     /// Which agents Lanes shows, by host, tool and label.
@@ -223,6 +227,29 @@ pub fn integration(key: &str) -> Option<String> {
         .remove(key)
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
+}
+
+/// Sets one of [`integrations`], or removes it with `None`, keeping every
+/// other key as it is. A file that is there but does not parse is left
+/// alone, and the error says so.
+pub fn set_integration(key: &str, value: Option<&str>) -> Result<(), String> {
+    const FILE: &str = "integrations.json";
+    let mut all: serde_json::Map<String, serde_json::Value> = if data_dir().join(FILE).exists() {
+        read(FILE).ok_or_else(|| {
+            format!(
+                "{} is not a JSON object; fix or remove it first",
+                data_dir().join(FILE).display()
+            )
+        })?
+    } else {
+        Default::default()
+    };
+    match value.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(value) => all.insert(key.to_string(), value.into()),
+        None => all.remove(key),
+    };
+    write(FILE, &all);
+    Ok(())
 }
 
 /// Sets each environment variable from its `integrations.json` key, for

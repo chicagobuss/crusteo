@@ -5,9 +5,8 @@ mod keys;
 
 pub use keys::{Key, encode_key, encode_paste};
 
-use std::cell::RefCell;
 use std::ops::RangeInclusive;
-use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 
 use alacritty_terminal::event::{Event, EventListener};
 use alacritty_terminal::grid::Dimensions;
@@ -16,14 +15,29 @@ use alacritty_terminal::term::cell::{Cell, Flags};
 use alacritty_terminal::term::{Config, Term, TermMode};
 use alacritty_terminal::vte::ansi::{CursorShape as VteCursor, Processor};
 
+mod serialize;
+
 const SCROLLBACK: usize = 10_000;
 
-struct Listener(Rc<RefCell<Option<String>>>);
+/// What the emulator tells its owner: the title, and, for one that answers
+/// for a program (a daemon's), the replies to its queries.
+#[derive(Default)]
+struct Heard {
+    title: Option<String>,
+    /// Device status, attributes and colour answers, for the program.
+    replies: Vec<u8>,
+    answering: bool,
+}
+
+#[derive(Clone)]
+struct Listener(Arc<Mutex<Heard>>);
 impl EventListener for Listener {
     fn send_event(&self, event: Event) {
+        let mut heard = self.0.lock().unwrap_or_else(|p| p.into_inner());
         match event {
-            Event::Title(title) => *self.0.borrow_mut() = Some(title),
-            Event::ResetTitle => *self.0.borrow_mut() = None,
+            Event::Title(title) => heard.title = Some(title),
+            Event::ResetTitle => heard.title = None,
+            Event::PtyWrite(text) if heard.answering => heard.replies.extend(text.as_bytes()),
             _ => {}
         }
     }
@@ -132,25 +146,39 @@ pub struct Terminal {
     rows: usize,
     cols: usize,
     selection: Option<(BufferPoint, BufferPoint)>,
-    title: Rc<RefCell<Option<String>>>,
+    heard: Arc<Mutex<Heard>>,
 }
 
 impl Terminal {
     pub fn new(rows: usize, cols: usize) -> Self {
+        Self::with(rows, cols, false)
+    }
+
+    /// An emulator that keeps what a program asked of the terminal (device
+    /// status, attributes, colours) answered, for [`Self::take_replies`]:
+    /// for the side that owns the program, as a daemon does.
+    pub fn answering(rows: usize, cols: usize) -> Self {
+        Self::with(rows, cols, true)
+    }
+
+    fn with(rows: usize, cols: usize, answering: bool) -> Self {
         let rows = rows.max(1);
         let cols = cols.max(1);
         let config = Config {
             scrolling_history: SCROLLBACK,
             ..Config::default()
         };
-        let title = Rc::new(RefCell::new(None));
+        let heard = Arc::new(Mutex::new(Heard {
+            answering,
+            ..Heard::default()
+        }));
         let term = Term::new(
             config,
             &Size {
                 lines: rows,
                 columns: cols,
             },
-            Listener(title.clone()),
+            Listener(heard.clone()),
         );
         Self {
             term,
@@ -158,13 +186,65 @@ impl Terminal {
             rows,
             cols,
             selection: None,
-            title,
+            heard,
         }
+    }
+
+    fn heard(&self) -> std::sync::MutexGuard<'_, Heard> {
+        self.heard.lock().unwrap_or_else(|p| p.into_inner())
     }
 
     /// Title set by OSC 0 / OSC 2, if the shell has sent one.
     pub fn title(&self) -> Option<String> {
-        self.title.borrow().clone()
+        self.heard().title.clone()
+    }
+
+    /// The answers to the program's queries since last asked, to write back
+    /// to it. Always empty for an emulator made with [`Self::new`].
+    pub fn take_replies(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.heard().replies)
+    }
+
+    /// The screen as bytes that redraw it on an emulator of the same size
+    /// after a reset (`ESC c`): up to `scrollback` lines of history first,
+    /// then the screen, the cursor, and the modes a program set. What a
+    /// daemon sends a client attaching to a running terminal.
+    pub fn serialize(&self, scrollback: usize) -> Vec<u8> {
+        let mut out = serialize::screen(&self.term, scrollback);
+        if let Some(title) = self.title() {
+            out.extend(format!("\x1b]2;{title}\x07").as_bytes());
+        }
+        out
+    }
+
+    /// Lines of the whole buffer as plain text, trailing spaces trimmed:
+    /// line 0 is the oldest kept. `start` and `end` are inclusive; negative
+    /// ones count from the end; both are clamped. Also the number of lines.
+    pub fn capture(&self, start: Option<i64>, end: Option<i64>) -> (Vec<String>, usize) {
+        let total = self.buffer_lines();
+        if total == 0 {
+            return (Vec::new(), 0);
+        }
+        let at = |index: i64| -> usize {
+            let index = if index < 0 {
+                total as i64 + index
+            } else {
+                index
+            };
+            index.clamp(0, total as i64 - 1) as usize
+        };
+        let (from, to) = (at(start.unwrap_or(0)), at(end.unwrap_or(-1)));
+        if from > to {
+            return (Vec::new(), total);
+        }
+        let lines = (from..=to)
+            .map(|index| {
+                let line = self.buffer_line(index);
+                let text: String = line.cells.iter().map(|c| c.text.as_str()).collect();
+                trim_trailing_space(&text)
+            })
+            .collect();
+        (lines, total)
     }
 
     pub fn rows(&self) -> usize {
@@ -328,6 +408,12 @@ impl Terminal {
         self.term.grid().history_size()
     }
 
+    /// The program's mode flags, for tests.
+    #[cfg(test)]
+    fn mode(&self) -> TermMode {
+        *self.term.mode()
+    }
+
     fn buffer_lines(&self) -> usize {
         self.history_len() + self.rows
     }
@@ -461,6 +547,85 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    /// What `term` shows, cell by cell, for comparing two emulators.
+    fn picture(term: &Terminal) -> (Vec<SnapshotLine>, Option<Cursor>) {
+        let snap = term.snapshot();
+        (snap.lines, snap.cursor)
+    }
+
+    #[test]
+    fn a_serialized_screen_draws_the_same_screen_again() {
+        let mut daemon = Terminal::answering(5, 12);
+        // History, colour, a wide character, a wrapped line, the cursor
+        // mid-line, and modes a program set.
+        daemon.feed("one\r\ntwo\r\nthree\r\nfour\r\n\x1b[1;31mred\x1b[0m 漢字\r\n".as_bytes());
+        daemon.feed(b"a line long enough to wrap\r\n$ ls\x1b[2D");
+        daemon.feed(b"\x1b[?1h\x1b[?2004h\x1b[6 q\x1b]2;build\x07");
+        let bytes = daemon.serialize(100);
+        let mut client = Terminal::new(5, 12);
+        client.restore(&bytes);
+        assert_eq!(picture(&client), picture(&daemon));
+        assert_eq!(client.title().as_deref(), Some("build"));
+        assert!(client.app_cursor() && client.bracketed_paste());
+        let (lines, total) = client.capture(None, None);
+        let (theirs, _) = daemon.capture(None, None);
+        assert_eq!(lines, theirs, "the history came too");
+        assert_eq!(total, daemon.capture(None, None).1);
+        // Less history when asked for less.
+        let mut short = Terminal::new(5, 12);
+        short.restore(&daemon.serialize(1));
+        assert_eq!(picture(&short), picture(&daemon));
+        assert!(short.capture(None, None).1 < total);
+    }
+
+    #[test]
+    fn a_line_that_wraps_onto_a_blank_row_keeps_the_rows_after_it() {
+        let mut daemon = Terminal::answering(4, 12);
+        // Twelve characters and a space: the space wraps onto a row that
+        // looks empty.
+        daemon.feed(b"xxxxxxxxxxxx \r\nLINE 3\r\nend");
+        let mut client = Terminal::new(4, 12);
+        client.restore(&daemon.serialize(10));
+        assert_eq!(picture(&client), picture(&daemon));
+    }
+
+    #[test]
+    fn the_alternate_screen_and_a_hidden_cursor_come_back() {
+        let mut daemon = Terminal::answering(4, 10);
+        daemon.feed(b"shell\r\n\x1b[?1049h\x1b[H\x1b[44mTOP BAR   \x1b[0m\r\nfile\x1b[?25l");
+        let mut client = Terminal::new(4, 10);
+        client.restore(&daemon.serialize(50));
+        assert_eq!(picture(&client), picture(&daemon));
+        assert!(client.mode().contains(TermMode::ALT_SCREEN));
+        assert!(client.snapshot().cursor.unwrap().hidden);
+    }
+
+    #[test]
+    fn an_answering_emulator_keeps_the_replies_a_program_asked_for() {
+        let mut daemon = Terminal::answering(4, 10);
+        daemon.feed(b"ab\x1b[6n");
+        assert_eq!(daemon.take_replies(), b"\x1b[1;3R");
+        assert!(daemon.take_replies().is_empty());
+        let mut client = Terminal::new(4, 10);
+        client.feed(b"\x1b[6n");
+        assert!(
+            client.take_replies().is_empty(),
+            "a client leaves answering to the daemon"
+        );
+    }
+
+    #[test]
+    fn capture_counts_from_either_end() {
+        let mut term = Terminal::new(3, 10);
+        term.feed(b"a\r\nb\r\nc\r\nd\r\ne");
+        let (lines, total) = term.capture(None, None);
+        assert_eq!(total, 5);
+        assert_eq!(lines, ["a", "b", "c", "d", "e"]);
+        assert_eq!(term.capture(Some(-2), None).0, ["d", "e"]);
+        assert_eq!(term.capture(Some(1), Some(2)).0, ["b", "c"]);
+        assert_eq!(term.capture(Some(9), Some(99)).0, ["e"]);
     }
 
     #[test]

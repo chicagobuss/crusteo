@@ -14,7 +14,9 @@
 //!   answer when Enter is pressed with none chosen;
 //! - [`WorkspaceAction`]s in a workspace's header;
 //! - a [`NeedsSource`] of items for the "Needs you" strip;
-//! - a [`UsageSource`] of numbers for the usage gauges.
+//! - a [`UsageSource`] of numbers for the usage gauges;
+//! - [`Setting`]s, one line of text each, such as a service's address, in
+//!   Settings under Extensions and kept in `integrations.json`.
 //!
 //! [`lua`] loads toolbar items from scripts.
 
@@ -54,7 +56,37 @@ pub struct Contributions {
     pub workspace_actions: Vec<WorkspaceAction>,
     pub needs: Option<Rc<dyn NeedsSource>>,
     pub usage: Option<Arc<dyn UsageSource>>,
+    /// Offered even while the extension is off, so it can be turned on.
+    pub settings: Vec<Setting>,
 }
+
+/// A setting an extension keeps in `integrations.json` under [`Self::key`]:
+/// one line of text, shown in Settings under Extensions, where it can be
+/// changed or cleared. Saved first, then [`Self::changed`] is told.
+#[derive(Clone)]
+pub struct Setting {
+    pub key: &'static str,
+    pub title: SharedString,
+    pub description: SharedString,
+    /// What an empty value means, such as "Off".
+    pub empty: SharedString,
+    pub parse: ParseSetting,
+    pub changed: SettingChanged,
+}
+
+/// Opens Settings at its Extensions section, where every extension's
+/// [`Setting`]s are: for an entry such as "Notes settings…" in a toolbar
+/// item's right-click menu ([`crate::toolbars::ToolbarItem::menu`]).
+pub fn open_settings(window: &mut Window, cx: &mut App) {
+    cx.set_global(crate::layouts::paseo::SettingsAt::Extensions);
+    window.dispatch_action(Box::new(crate::shell::OpenSettings), cx);
+    window.refresh();
+}
+
+/// Turns what was typed into what is kept, or why not; `Ok(None)` clears it.
+pub type ParseSetting = Rc<dyn Fn(&str) -> Result<Option<String>, String>>;
+/// Told a [`Setting`]'s new value, none when cleared, once it is saved.
+pub type SettingChanged = Rc<dyn Fn(Option<String>, &mut App)>;
 
 /// Something to do, by name: in the command palette and the help panel,
 /// on a key, and on macOS in a menu.
@@ -196,6 +228,7 @@ pub struct Contributed {
     pub find: Vec<Arc<dyn FindSource>>,
     pub workspace_actions: Vec<WorkspaceAction>,
     pub needs: Vec<Rc<dyn NeedsSource>>,
+    pub settings: Vec<Setting>,
 }
 
 impl Contributed {

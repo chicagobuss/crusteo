@@ -88,6 +88,21 @@ pub struct SinkConfig {
     /// The most records in one batch.
     #[serde(default = "default_batch")]
     pub batch: usize,
+    /// Where an agent the sink has no cursor for starts: its end (`now`, the
+    /// default) or the beginning of its timeline (`start`).
+    #[serde(default)]
+    pub from: Begin,
+}
+
+/// Where a sink begins on an agent it has not seen before.
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Begin {
+    /// What happens from now on, not the history before.
+    #[default]
+    Now,
+    /// The whole timeline the daemon still holds, then what follows.
+    Start,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -106,6 +121,14 @@ pub enum SinkKind {
         /// Handed to the program in its hello line.
         #[serde(default)]
         settings: Value,
+    },
+    /// A service Reef POSTs each batch to, `reef-sink/1` over HTTP(S).
+    Http {
+        url: String,
+        /// The environment variable holding the bearer token sent with
+        /// each batch; none, no `Authorization` header.
+        #[serde(default)]
+        token_env: Option<String>,
     },
 }
 
@@ -167,6 +190,18 @@ impl Config {
             {
                 return Err(format!("sink {:?}: an empty command", sink.name));
             }
+            if let SinkKind::Http { url, token_env } = &sink.kind {
+                let scheme = url.starts_with("http://") || url.starts_with("https://");
+                if !scheme || url.contains(char::is_whitespace) {
+                    return Err(format!(
+                        "sink {:?}: url {url:?} is not an http:// or https:// address",
+                        sink.name
+                    ));
+                }
+                if token_env.as_deref().is_some_and(str::is_empty) {
+                    return Err(format!("sink {:?}: an empty token_env", sink.name));
+                }
+            }
         }
         Ok(Some(config))
     }
@@ -211,6 +246,64 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn where_a_sink_starts_and_an_http_sink_are_in_the_file() {
+        let config = parse(
+            r#"{ "follow_all": true, "sinks": [
+                { "name": "now", "type": "jsonl", "dir": "a" },
+                { "name": "history", "type": "jsonl", "dir": "b", "from": "start" },
+                { "name": "search", "type": "http", "url": "https://search.example/feed",
+                  "token_env": "SEARCH_FEED_TOKEN", "kinds": ["prompt"], "from": "start" },
+                { "name": "open", "type": "http", "url": "http://127.0.0.1:7100/feed" }
+            ] }"#,
+        )
+        .unwrap()
+        .unwrap();
+        let from: Vec<Begin> = config.sinks.iter().map(|sink| sink.from).collect();
+        assert_eq!(from, [Begin::Now, Begin::Start, Begin::Start, Begin::Now]);
+        assert_eq!(
+            config.sinks[2].kind,
+            SinkKind::Http {
+                url: "https://search.example/feed".into(),
+                token_env: Some("SEARCH_FEED_TOKEN".into()),
+            }
+        );
+        assert_eq!(config.sinks[2].kinds, ["prompt"]);
+        assert!(matches!(
+            &config.sinks[3].kind,
+            SinkKind::Http {
+                token_env: None,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn a_bad_http_sink_or_start_is_refused() {
+        let http = |fields: &str| {
+            parse(&format!(
+                r#"{{ "sinks": [ {{ "name": "x", "type": "http", {fields} }} ] }}"#
+            ))
+        };
+        assert!(http(r#""url": "https://search.example/feed""#).is_ok());
+        // Not a web address, or none.
+        assert!(http(r#""url": "ftp://search.example""#).is_err());
+        assert!(http(r#""url": "search.example/feed""#).is_err());
+        assert!(http(r#""url": "https://a b""#).is_err());
+        assert!(http(r#""token_env": "T""#).is_err());
+        assert!(http(r#""url": "https://a.example", "token_env": """#).is_err());
+        // The other kinds' settings do not belong to it.
+        assert!(http(r#""url": "https://a.example", "command": ["x"]"#).is_err());
+        let from = |value: &str| {
+            parse(&format!(
+                r#"{{ "sinks": [ {{ "name": "x", "type": "jsonl", "dir": "a", "from": {value} }} ] }}"#
+            ))
+        };
+        assert!(from(r#""start""#).is_ok() && from(r#""now""#).is_ok());
+        assert!(from(r#""beginning""#).is_err());
+        assert!(from("true").is_err());
     }
 
     #[test]

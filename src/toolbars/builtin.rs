@@ -14,7 +14,7 @@ use gpui_kit::gpui::{
 use gpui_kit::prelude::FluentBuilder as _;
 
 use super::{Side, TITLE, ToolbarItem};
-use crate::app::{Core, Pane, Screen};
+use crate::app::{Core, Pane};
 use crate::theme::{palette, size as sz};
 use crate::ui;
 
@@ -436,10 +436,7 @@ impl ToolbarItem for Hosts {
                 ))
                 .child(format!("{online}/{total}"))
                 .on_click(move |_: &ClickEvent, _, cx| {
-                    nav.update(cx, |nav, cx| {
-                        nav.set_layout("paseo", cx);
-                        nav.show(Screen::Hosts, cx);
-                    });
+                    nav.update(cx, |nav, cx| nav.toggle_pane(Pane::Hosts, Side::Right, cx));
                 })
                 .into_any_element(),
         )

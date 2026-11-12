@@ -26,9 +26,41 @@ impl Upstream {
         if !self.record.following() {
             return;
         }
+        self.record_checks();
         self.record_reads();
         self.record.pump();
         self.record.save();
+    }
+
+    /// Asks the daemons about the agents that left their active lists, a few
+    /// at a time: archived, or deleted?
+    fn record_checks(&mut self) {
+        for key in self.record.checks_due() {
+            self.record_check(key);
+        }
+    }
+
+    /// A daemon's `remove` says an agent left its active list, and says the
+    /// same of one archived and one deleted. Asked for by id, an archived
+    /// agent is still there and a deleted one is not.
+    fn record_check(&mut self, key: Key) {
+        let Some(link) = self.links.get(&key.0).filter(|link| link.sync.online()) else {
+            self.record.unchecked(&key);
+            return;
+        };
+        let reply = guarded(
+            &link.client,
+            json!({ "type": "fetch_agent_request", "agentId": key.1 }),
+        );
+        let apply = self.apply.clone();
+        tokio::spawn(async move {
+            let result = reply
+                .await
+                .and_then(|payload| record::is_gone(&payload, &key.1));
+            let _ = apply.send(Box::new(move |up: &mut Upstream| {
+                up.record.checked(&key, result)
+            }));
+        });
     }
 
     /// Starts the reads due, keeping [`record::READS`] in flight.
@@ -43,7 +75,7 @@ impl Upstream {
     /// have open, and every one when recording.
     pub(super) fn timeline_agents(&self, host: &str) -> Vec<String> {
         let mut agents = (self.links.get(host))
-            .map(|link| link.watched.clone())
+            .map(|link| link.sync.watched.clone())
             .unwrap_or_default();
         if self.record.following()
             && let Some(host) = self.fleet.host(&host_id(host))
@@ -54,7 +86,9 @@ impl Upstream {
     }
 
     /// A host's agent list is complete: follow them all, and read those
-    /// that changed while Reef was away.
+    /// that changed while Reef was away. Agents a sink has a cursor for and
+    /// the host no longer lists were archived or deleted while Reef was not
+    /// looking: the daemon is asked which.
     pub(super) fn record_host_ready(&mut self, host: &str) {
         if !self.record.following() {
             return;
@@ -65,17 +99,27 @@ impl Upstream {
         let agents: Vec<(String, Option<String>)> = (listed.directory.agents.values())
             .map(|agent| (agent.id.clone(), agent.updated_at.clone()))
             .collect();
+        let missing: Vec<Key> = if listed.directory.agents_hydrated {
+            (self.record.followed(host).into_iter())
+                .filter(|key| !listed.directory.agents.contains_key(&key.1))
+                .collect()
+        } else {
+            Vec::new()
+        };
         for (agent, updated) in agents {
             let key = (host.to_string(), agent);
             if self.record.stale(&key, updated.as_deref()) {
                 self.record.touch(key, false);
             }
         }
+        for key in missing {
+            self.record.suspect(key, false);
+        }
     }
 
     fn record_read(&mut self, host: &str, agent: &str, read: Read) {
         let key = (host.to_string(), agent.to_string());
-        let Some(link) = self.links.get(host).filter(|link| link.online) else {
+        let Some(link) = self.links.get(host).filter(|link| link.sync.online()) else {
             self.record.unread(&key);
             return;
         };

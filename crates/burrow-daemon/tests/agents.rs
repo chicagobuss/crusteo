@@ -704,6 +704,13 @@ async fn cancel_failure_archive_and_refresh() {
         system["payload"]["event"]["item"]["text"],
         "[System Error] boom\n\ncode: echo_failure"
     );
+    // A message of its own, so a timeline does not run it on from the reply.
+    assert!(
+        system["payload"]["event"]["item"]["messageId"]
+            .as_str()
+            .is_some_and(|id| id.ends_with(":error")),
+        "{system}"
+    );
     let failed = h
         .request(json!({"type": "fetch_agent_request", "agentId": agent}))
         .await;
@@ -836,6 +843,49 @@ async fn an_agent_resumes_after_a_restart_with_its_timeline_intact() {
         .request(json!({"type": "fetch_agent_request", "agentId": agent}))
         .await;
     assert_eq!(resumed["agent"]["persistence"]["sessionId"], session);
+    h.stop().await;
+    std::fs::remove_dir_all(&home).unwrap();
+}
+
+async fn snapshot_of(h: &Harness, agent: &str) -> Value {
+    h.request(json!({"type": "fetch_agent_request", "agentId": agent}))
+        .await["agent"]
+        .clone()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_agent_carries_its_last_reply_and_an_older_one_gets_it_at_startup() {
+    let home = scratch("home");
+    let cwd = scratch("cwd");
+    let server_id = burrow_daemon::ids::server_id();
+
+    let h = harness_at(Some(&home), cwd.clone(), &server_id).await;
+    let agent = h.create().await;
+    assert!(
+        snapshot_of(&h, &agent).await["lastReplyPreview"].is_null(),
+        "no reply yet"
+    );
+    h.send(&agent, "**one** more", "m-1", None).await;
+    h.until("the turn", |m| stream_event(m, "turn_completed"))
+        .await;
+    let snapshot = snapshot_of(&h, &agent).await;
+    // As a notification previews it: markdown stripped.
+    assert_eq!(snapshot["lastReplyPreview"], "echo: one more", "{snapshot}");
+    h.stop().await;
+
+    // As a Burrow from before previews kept it: none saved.
+    let file = home.join("agents").join(format!("{agent}.json"));
+    let mut saved: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+    saved.as_object_mut().unwrap().remove("lastReplyPreview");
+    std::fs::write(&file, saved.to_string()).unwrap();
+
+    let h = harness_at(Some(&home), cwd, &server_id).await;
+    let restored = snapshot_of(&h, &agent).await;
+    assert_eq!(restored["lastReplyPreview"], "echo: one more", "{restored}");
+    assert_eq!(
+        restored["updatedAt"], saved["updatedAt"],
+        "filled in without counting as a change"
+    );
     h.stop().await;
     std::fs::remove_dir_all(&home).unwrap();
 }
@@ -1240,6 +1290,20 @@ impl burrow_provider::Provider for Install {
         info
     }
 
+    fn cli(&self) -> Option<burrow_provider::CliInfo> {
+        Some(burrow_provider::CliInfo {
+            version: Some(
+                if self.models.len() == 1 {
+                    "1.0.0"
+                } else {
+                    "1.1.0"
+                }
+                .into(),
+            ),
+            install_kind: burrow_provider::InstallKind::Native,
+        })
+    }
+
     fn start(
         &self,
         spec: burrow_provider::SessionSpec,
@@ -1331,6 +1395,8 @@ async fn an_upgraded_cli_is_offered_without_a_restart() {
         }),
     };
     burrow_daemon::discovery::start(&h.daemon, vec![discovery]).await;
+    // The first look has pushed what it found before this client subscribes.
+    h.daemon.agents.until_discovered().await;
     h.request(json!({"type": "session.events.set_subscription.request",
         "events": ["providers_snapshot_update"]}))
         .await;
@@ -1363,6 +1429,24 @@ async fn an_upgraded_cli_is_offered_without_a_restart() {
         models_of(&seen.last().unwrap()["payload"], "upgraded"),
         ["m-1", "m-2"]
     );
+    // The snapshot says which CLI the models came from.
+    let snapshot = h
+        .request(json!({"type": "get_providers_snapshot_request"}))
+        .await;
+    let entry = snapshot["compactSnapshot"]["entries"]
+        .as_array()
+        .and_then(|e| e.iter().find(|e| e["provider"] == "upgraded"))
+        .unwrap()
+        .clone();
+    assert_eq!(entry["version"], "1.1.0");
+    assert_eq!(entry["installKind"], "native");
+    // The agent's process still runs the old one, and says there is a newer.
+    let cli = |h: &Harness| {
+        h.daemon
+            .read(|store| store.agents.get(&agent).and_then(|a| a.cli.clone()))
+            .map(|c| (c.version, c.newer_installed))
+    };
+    assert_eq!(cli(&h), Some((Some("1.0.0".into()), true)));
 
     h.send(&agent, "two", "m-2", None).await;
     let seen = h
@@ -1371,6 +1455,7 @@ async fn an_upgraded_cli_is_offered_without_a_restart() {
     assert!(seen.iter().any(|m| stream_event(m, "turn_completed")));
     assert_eq!(old_starts.load(Ordering::SeqCst), 1);
     assert_eq!(new_starts.load(Ordering::SeqCst), 1);
+    assert_eq!(cli(&h), Some((Some("1.1.0".into()), false)));
     assert!(
         !overlapped.load(Ordering::SeqCst),
         "the new CLI started while the old one still had the session"
@@ -1386,6 +1471,83 @@ async fn an_upgraded_cli_is_offered_without_a_restart() {
     })
     .await;
     assert_eq!(finds.load(Ordering::SeqCst), 3);
+    h.stop().await;
+}
+
+/// Burrow answers before its providers are found: `daemon.get_status` says
+/// a provider is not looked for yet, a create that names it waits until it
+/// is found, and subscribers are pushed the snapshot that has it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_provider_still_being_found_is_waited_for() {
+    use std::sync::atomic::AtomicBool;
+
+    let h = harness().await;
+    h.request(json!({"type": "session.events.set_subscription.request",
+        "events": ["providers_snapshot_update"]}))
+        .await;
+    let (release, gate) = std::sync::mpsc::channel::<()>();
+    let gate = std::sync::Mutex::new(gate);
+    let discovery = burrow_provider::Discovery {
+        id: "upgraded".into(),
+        program: None,
+        stamp: Box::new(|| Some("1.0.0".into())),
+        find: Box::new(move || {
+            // As a CLI slow to list its models.
+            let _ = gate.lock().unwrap().recv();
+            Some(Arc::new(Install {
+                models: vec!["m-1"],
+                starts: Arc::default(),
+                ended: Arc::new(AtomicBool::new(false)),
+                after: None,
+                overlapped: Arc::default(),
+            }) as Arc<dyn burrow_provider::Provider>)
+        }),
+    };
+    burrow_daemon::discovery::start(&h.daemon, vec![discovery]).await;
+    assert!(h.daemon.agents.discovering());
+
+    let status = h
+        .request(json!({"type": "daemon.get_status.request"}))
+        .await;
+    let entry = (status["providers"].as_array().into_iter().flatten())
+        .find(|p| p["provider"] == "upgraded")
+        .cloned()
+        .unwrap_or_else(|| panic!("{status}"));
+    assert_eq!(entry["available"], false, "{entry}");
+    assert!(
+        entry["error"]
+            .as_str()
+            .unwrap()
+            .contains("not looked for yet"),
+        "{entry}"
+    );
+
+    let released = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(300));
+        let _ = release.send(());
+    });
+    let reply = h
+        .request(json!({"type": "agent.create.request", "labels": {},
+            "config": {"provider": "upgraded", "cwd": h.cwd.to_string_lossy()}}))
+        .await;
+    assert!(reply["error"].is_null(), "{reply}");
+    assert_eq!(reply["agent"]["provider"], "upgraded", "{reply}");
+    released.join().unwrap();
+
+    let seen = h
+        .until("providers update", |m| {
+            m["type"] == "providers_snapshot_update"
+                && fleet::providers::parse(&m["payload"])
+                    .iter()
+                    .any(|p| p.id == "upgraded")
+        })
+        .await;
+    assert_eq!(
+        models_of(&seen.last().unwrap()["payload"], "upgraded"),
+        ["m-1"]
+    );
+    h.daemon.agents.until_discovered().await;
+    assert!(!h.daemon.agents.discovering());
     h.stop().await;
 }
 

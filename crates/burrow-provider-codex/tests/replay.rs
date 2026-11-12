@@ -196,7 +196,8 @@ async fn play(fixture: &str, resume: Option<&str>) -> Vec<ProviderEvent> {
             current
                 .server
                 .send(Output::Exited {
-                    status: Some(1),
+                    code: Some(1),
+                    signal: None,
                     stderr: stderr.as_str().unwrap_or_default().into(),
                 })
                 .unwrap();

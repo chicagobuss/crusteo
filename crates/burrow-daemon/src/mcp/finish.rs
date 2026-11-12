@@ -31,6 +31,10 @@ struct Subscription {
     id: String,
     caller_agent_id: String,
     child_agent_id: String,
+    /// The turn whose end is the news (Burrow's): not one that starts
+    /// straight after it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    turn_id: Option<String>,
 }
 
 /// The subscriptions waiting on a child.
@@ -83,13 +87,22 @@ impl Finish {
     }
 }
 
-/// `caller` is to be told how `child`'s work ends. Register once the work
-/// has started: a child that is idle now counts as finished.
-pub fn register(daemon: &Arc<Daemon>, caller: &str, child: &str) {
+/// `caller` is to be told how `child`'s work ends: `turn`, or the turn it
+/// runs now. Register once the work has started: a child that is idle now
+/// counts as finished.
+pub fn register(daemon: &Arc<Daemon>, caller: &str, child: &str, turn: Option<String>) {
+    let turn = turn.or_else(|| {
+        daemon.read(|store| {
+            (store.agents.get(child))
+                .and_then(|agent| agent.active_turn.as_ref())
+                .map(|turn| turn.turn_id.clone())
+        })
+    });
     let subscription = Subscription {
         id: uuid::Uuid::new_v4().to_string(),
         caller_agent_id: caller.to_string(),
         child_agent_id: child.to_string(),
+        turn_id: turn,
     };
     {
         let mut all = daemon.finish.lock();
@@ -113,6 +126,7 @@ async fn watch(daemon: Arc<Daemon>, subscription: Subscription) {
         id,
         caller_agent_id: caller,
         child_agent_id: child,
+        turn_id: turn,
     } = &subscription;
     // Permission requests already told of, so each is told once.
     let mut told: BTreeSet<String> = BTreeSet::new();
@@ -124,7 +138,7 @@ async fn watch(daemon: Arc<Daemon>, subscription: Subscription) {
             daemon.finish.remove(id);
             return;
         }
-        let answer = agents::wait_for_finish(&daemon, child, None).await;
+        let answer = agents::wait_for_turn(&daemon, child, turn.as_deref(), None).await;
         if !daemon.finish.current(id) {
             return;
         }
@@ -222,6 +236,75 @@ async fn tell(
     if let Err(error) = agents::send_notice(daemon, caller, child, event(reason), &body).await {
         warn!(caller, child, %error, "finish notice not delivered");
     }
+}
+
+/// A Reef's notice about a prompt it routed to another host
+/// ([`burrow_protocol::routing::FINISHED`]): told to the caller in the same
+/// words as a local child's, with the child's host, once however often the
+/// Reef sends it. The answer goes out when the caller has it, or is gone.
+pub fn routed(daemon: &Arc<Daemon>, message: &Value, late: &crate::agent_requests::Late) -> bool {
+    let text = |key: &str| message[key].as_str().map(str::to_string);
+    let (Some(request_id), Some(notice_id), Some(caller), Some(child)) = (
+        text("requestId"),
+        text("noticeId"),
+        text("callerAgentId"),
+        text("agentId"),
+    ) else {
+        return false;
+    };
+    let reason = match message["reason"].as_str() {
+        Some(
+            reason
+            @ ("finished" | "errored" | "needs permission" | "was closed" | "is unavailable"),
+        ) => reason.to_string(),
+        _ => return false,
+    };
+    let (daemon, late, message) = (daemon.clone(), late.clone(), message.clone());
+    tokio::spawn(async move {
+        let reason = reason.as_str();
+        if !daemon.read(|store| store.agents.get(&caller).is_some()) {
+            let _ = late.send(crate::router::finished_answer(
+                &request_id,
+                false,
+                true,
+                None,
+            ));
+            return;
+        }
+        let title = (message["title"].as_str())
+            .filter(|t| !t.trim().is_empty())
+            .unwrap_or(&child);
+        let server = message["serverId"].as_str().unwrap_or_default();
+        let permission = Some(&message["permission"]).filter(|p| p.is_object());
+        let mut text = body(
+            &child,
+            server,
+            title,
+            reason,
+            message["lastMessage"].as_str(),
+            permission,
+        );
+        if let Some(host) = message["host"].as_str().filter(|h| !h.is_empty()) {
+            text = text.replacen(
+                &format!("Server: {server}"),
+                &format!("Server: {server}\nHost: {host}"),
+                1,
+            );
+        }
+        let sent =
+            agents::send_notice_once(&daemon, &caller, &child, event(reason), &text, notice_id)
+                .await;
+        let answer = match sent {
+            Ok(_) => crate::router::finished_answer(&request_id, true, false, None),
+            Err(error) => {
+                warn!(caller, child, %error, "a routed finish notice was not delivered");
+                let gone = !daemon.read(|store| store.agents.get(&caller).is_some());
+                crate::router::finished_answer(&request_id, false, gone, Some(error))
+            }
+        };
+        let _ = late.send(answer);
+    });
+    true
 }
 
 /// Paseo's `formatFinishNotificationBody`, for a local child.

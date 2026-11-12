@@ -79,7 +79,49 @@ pub trait ToolbarItem {
     fn shrinks(&self) -> bool {
         false
     }
+    /// What right-clicking it offers, above the bar's own entries
+    /// (customizing the bars), such as an extension's "… settings". Asked at the
+    /// click.
+    fn menu(&self) -> Vec<MenuEntry> {
+        Vec::new()
+    }
     fn render(&self, window: &mut Window, cx: &mut App) -> Option<AnyElement>;
+}
+
+/// One entry in a toolbar item's right-click menu.
+#[derive(Clone)]
+pub struct MenuEntry {
+    pub label: SharedString,
+    pub run: MenuRun,
+}
+
+/// What a [`MenuEntry`] does when chosen.
+pub type MenuRun = Rc<dyn Fn(&mut Window, &mut App)>;
+
+/// What right-clicking a bar opens: its menu, from the shell. Its items
+/// open it too, after saying which of them was clicked.
+pub type BarMenu = Rc<dyn Fn(&gpui_kit::gpui::MouseDownEvent, &mut Window, &mut App)>;
+
+/// The item a right-click just landed on, and where: the bar's menu, opened
+/// for the same click, shows the item's entries. A click elsewhere in the
+/// bar, at another position, finds none.
+pub(crate) struct ClickedItem {
+    pub item: Rc<dyn ToolbarItem>,
+    pub at: gpui_kit::gpui::Point<gpui_kit::gpui::Pixels>,
+}
+
+impl gpui_kit::gpui::Global for ClickedItem {}
+
+/// The item under a right-click at `at`, if one was just clicked there.
+pub(crate) fn take_clicked(
+    at: gpui_kit::gpui::Point<gpui_kit::gpui::Pixels>,
+    cx: &mut App,
+) -> Option<Rc<dyn ToolbarItem>> {
+    if !cx.has_global::<ClickedItem>() {
+        return None;
+    }
+    let clicked = cx.remove_global::<ClickedItem>();
+    (clicked.at == at).then_some(clicked.item)
 }
 
 /// Every toolbar item there is, by id.
@@ -358,6 +400,7 @@ pub fn bar_contents(
     left: Vec<Slot>,
     right: Vec<Slot>,
     occlude: bool,
+    menu: BarMenu,
     window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
@@ -374,8 +417,20 @@ pub fn bar_contents(
                     let shrinks = item.shrinks();
                     let element = item.render(window, cx)?;
                     grew |= grows;
+                    let (clicked, menu) = (item.clone(), menu.clone());
                     let wrapper = div()
                         .id(SharedString::from(format!("toolbar-{}", item.id())))
+                        // The bar's menu, with this item's entries first.
+                        .on_mouse_down(
+                            gpui_kit::gpui::MouseButton::Right,
+                            move |event, window, cx| {
+                                cx.set_global(ClickedItem {
+                                    item: clicked.clone(),
+                                    at: event.position,
+                                });
+                                menu(event, window, cx);
+                            },
+                        )
                         .flex()
                         .items_center()
                         .min_w(px(0.))

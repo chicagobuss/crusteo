@@ -5,10 +5,18 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
+# A stand-in for ssh in the tests (testing/fake_ssh.rs); not for use.
+[[bin]]
+name = "fake-ssh"
+path = "testing/fake_ssh.rs"
+test = false
+doc = false
+
 [dependencies]
+burrow-protocol.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "sync", "macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "sync", "macros", "process", "io-util"] }
 tokio-tungstenite = "0.28"
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 async-channel = "2"

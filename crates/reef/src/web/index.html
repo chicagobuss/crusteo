@@ -78,7 +78,7 @@ select, input, textarea { font: inherit; color: inherit; background: var(--surfa
 .band.tinted .name { color: color-mix(in srgb, var(--c) 70%, var(--text)); }
 .mlane .lanehead .bandbtn { font-size: 12.5px; font-weight: 500; padding: 3px 9px; border-radius: 12px; border: 1px solid var(--border);
   background: var(--surface); color: var(--text); }
-.mlane .lanehead .bandbtns { margin-left: auto; display: flex; gap: 6px; }
+.mlane .lanehead .bandbtns { margin-left: auto; display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
 .block .badge { position: absolute; right: 4px; top: 2px; min-width: 20px; height: 20px; border-radius: 10px; padding: 0 6px;
   background: var(--warn); color: #111; font-weight: 700; font-size: 12px; display: grid; place-items: center; }
 /* Idle is a muted blue, not grey, so it stays apart from the grey of age. */
@@ -175,10 +175,12 @@ select, input, textarea { font: inherit; color: inherit; background: var(--surfa
 @media (max-width: 420px) {
   .top { gap: 4px; padding-left: 8px; padding-right: 6px; }
   .views button { padding: 4px 8px; }
-  .top .dots { gap: 3px; padding: 6px 2px; }
+  .top .dots { gap: 3px; padding: 4px 2px; }
   .top .dots i { width: 7px; height: 7px; }
 }
-.dots { display: flex; gap: 4px; align-items: center; background: none; border: none; padding: 6px; min-width: 0; overflow: hidden; }
+.dots { display: flex; gap: 4px; align-items: center; background: none; border: none; padding: 4px 6px; min-width: 0; overflow: hidden; }
+.top .dots { display: grid; grid-auto-flow: column; align-content: center; }
+.top .dots.two { grid-template-rows: repeat(2, auto); }
 .dots i { flex-shrink: 0; width: 8px; height: 8px; border-radius: 50%; display: block; background: var(--faint); }
 .dots i.online { background: var(--run); } .dots i.connecting { background: var(--warn); }
 .dots i.offline, .dots i.refused { background: var(--bad); }
@@ -294,7 +296,7 @@ select, input, textarea { font: inherit; color: inherit; background: var(--surfa
 .edge { position: absolute; z-index: 4; right: 0; top: 50%; transform: translateY(-50%); width: 16px; height: 64px; padding: 0;
   border-radius: 8px 0 0 8px; border-right: none; background: color-mix(in srgb, var(--surface) 85%, transparent);
   display: grid; place-items: center; color: var(--muted); touch-action: none; }
-#mappane.leftward { position: relative; z-index: 6; background: var(--bg); }
+#mappane.leftward, #mappane.over { position: relative; z-index: 6; background: var(--bg); }
 /* The next re-sort: a line that fills while the order waits, and stops
    while you touch the list. Its room is kept, so nothing jumps. */
 .resort { flex-shrink: 0; display: block; width: 100%; height: 12px; margin: 0; padding: 4px 12px; border: none;
@@ -310,6 +312,27 @@ select, input, textarea { font: inherit; color: inherit; background: var(--surfa
 .ugauge.stale { opacity: .45; }
 .sev-critical { color: var(--bad); } .sev-warn { color: var(--warn); } .sev-on_pace { color: var(--pace); }
 .sev-surplus { color: var(--run); } .sev-unknown { color: var(--muted); }
+/* The micro dials: up to four accounts in a 2x2 block, the rim in the
+   account's colour, the centre in the colour of what is left, the needle
+   (its pace) in the text's. */
+/* 40px tall in a bar 32px inside its padding: it reaches into the
+   padding rather than making the bar taller. */
+.ugauge.micro { padding: 0 4px; margin: -4px 0; color: var(--text); }
+.ugauge.micro svg { overflow: visible; }
+.pool .who .dialbtn { align-self: center; flex-shrink: 0; margin: -4px -4px -4px 2px; padding: 3px; line-height: 0;
+  background: none; border: none; color: var(--faint); }
+.pool .who .dialbtn.open { background: var(--surface2); border-radius: 6px; }
+.dialset { margin: 6px 0 2px; padding: 8px 10px; border-radius: 10px; background: var(--surface2); overflow: hidden; }
+.dialset.fresh { animation: dialin .18s ease-out; }
+@keyframes dialin { from { opacity: 0; max-height: 0; padding-top: 0; padding-bottom: 0; } to { opacity: 1; max-height: 160px; } }
+.dialset .dl { display: flex; align-items: center; gap: 10px; font-size: 13px; }
+.dialset .dl .name { flex: 1; min-width: 0; color: var(--muted); }
+.dialset button.up { background: none; border: none; padding: 2px 6px; color: var(--muted); font-size: 16px; line-height: 1; }
+.dialset button.up:disabled { opacity: .3; }
+.dialset .pal { display: flex; flex-wrap: wrap; gap: 8px; padding-top: 8px; }
+.dialset button.sw { flex-shrink: 0; width: 22px; height: 22px; padding: 0; border: none; border-radius: 50%; }
+.dialset button.sw.on { box-shadow: 0 0 0 2px var(--surface2), 0 0 0 3.5px var(--text); }
+.dialset .note { padding-top: 6px; font-size: 13px; color: var(--bad); }
 .drawerback { position: fixed; inset: 0; z-index: 11; background: rgba(0,0,0,.35); opacity: 0; transition: opacity .2s; }
 .drawerback.open { opacity: 1; }
 .drawer { position: fixed; top: 0; right: 0; bottom: 0; z-index: 12; width: min(380px, 88vw); background: var(--bg);
@@ -412,11 +435,30 @@ select, input, textarea { font: inherit; color: inherit; background: var(--surfa
 /* Overlays */
 .toasts { position: fixed; top: calc(env(safe-area-inset-top) + 8px); left: 8px; right: 8px; z-index: 10;
   display: flex; flex-direction: column; gap: 6px; align-items: center; pointer-events: none; }
-.toast { pointer-events: auto; width: 100%; max-width: 480px; background: var(--surface); border: 1px solid var(--border);
-  border-left: 4px solid var(--run); border-radius: 10px; padding: 8px 12px; box-shadow: 0 4px 16px rgba(0,0,0,.25); cursor: pointer; }
+/* A notification card: tap to open its agent; pin keeps it; x or a
+   sideways swipe dismisses it. The line along its top drains as its time
+   runs out, and waits while a finger is on it. */
+.toast { position: relative; overflow: hidden; pointer-events: auto; width: 100%; max-width: 480px; box-sizing: border-box;
+  background: var(--surface); border: 1px solid var(--border); border-left: 4px solid var(--run); border-radius: 10px;
+  padding: 8px 6px 8px 12px; box-shadow: 0 4px 16px rgba(0,0,0,.25); cursor: pointer; touch-action: none;
+  transition: transform .2s ease, opacity .2s ease; }
+.toast.dragging { transition: none; }
 .toast.failed { border-left-color: var(--bad); }
+.toast.info { border-left-color: var(--accent); }
+.toast .thead { display: flex; align-items: center; gap: 2px; }
+.toast b { flex: 1; min-width: 0; }
 .toast b, .toast span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.toast span { font-size: 13px; color: var(--muted); }
+.toast span { font-size: 13px; color: var(--muted); padding-right: 6px; }
+.toast .thead button { flex-shrink: 0; width: 30px; height: 26px; margin: -4px 0; padding: 0; display: grid; place-items: center;
+  background: none; border: none; color: var(--faint); line-height: 0; border-radius: 6px; }
+.toast .thead button:active { background: var(--surface2); }
+.toast.pinned .tpin { color: var(--accent); }
+.toast .tbar { position: absolute; left: 0; right: 0; top: 0; height: 2px; background: var(--muted); opacity: .6;
+  transform-origin: left; animation: tdrain var(--tms, 7000ms) linear forwards; }
+.toast.failed .tbar { background: var(--bad); }
+.toast.paused .tbar { animation-play-state: paused; }
+.toast.pinned .tbar { display: none; }
+@keyframes tdrain { from { transform: scaleX(1); } to { transform: scaleX(0); } }
 .sheet { position: fixed; inset: 0; z-index: 9; background: rgba(0,0,0,.35); display: flex; align-items: flex-start; justify-content: center;
   padding: calc(env(safe-area-inset-top) + 48px) 12px 12px; }
 .sheet .box { background: var(--bg); border: 1px solid var(--border); border-radius: 12px; padding: 12px 14px; width: 100%; max-width: 440px;
@@ -430,6 +472,10 @@ select, input, textarea { font: inherit; color: inherit; background: var(--surfa
 .hostline { display: flex; gap: 8px; align-items: baseline; padding: 6px 0; border-bottom: 1px solid var(--border); }
 .hostline .dots { padding: 0; }
 .hostline .name { font-weight: 600; } .hostline .why { color: var(--muted); font-size: 12px; }
+.hostline.hasprov { border-bottom: none; padding-bottom: 2px; }
+.hostprov { display: flex; flex-wrap: wrap; gap: 2px 12px; padding: 0 0 6px 18px; border-bottom: 1px solid var(--border);
+  font-size: 12px; color: var(--muted); }
+.hostprov .behind { color: var(--warn); }
 .sheet h4 { margin: 14px 0 2px; font-size: 14px; }
 .hostedit { display: flex; gap: 8px; align-items: center; padding: 6px 0; border-bottom: 1px solid var(--border); }
 .hostedit .body { flex: 1; min-width: 0; }
@@ -451,6 +497,8 @@ select, input, textarea { font: inherit; color: inherit; background: var(--surfa
 }
 .panel .phead { flex-shrink: 0; display: flex; align-items: center; gap: 8px; padding: 10px 14px; border-bottom: 1px solid var(--border); }
 .panel .phead h3 { flex: 1; min-width: 0; margin: 0; font-size: 16px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.panel .phead h3.renaming { display: flex; align-items: center; }
+.panel .phead h3.renaming input { flex: 1; min-width: 0; font-size: 16px; font-weight: 600; padding: 4px 8px; }
 .panel .pbody { flex: 1; min-height: 0; overflow-y: auto; padding: 4px 14px 14px; -webkit-overflow-scrolling: touch; }
 .panel .pfoot { flex-shrink: 0; display: flex; gap: 8px; align-items: center; padding: 10px 14px; border-top: 1px solid var(--border); }
 .panel .pfoot .error { flex: 1; min-width: 0; margin: 0; }
@@ -608,6 +656,8 @@ const busy = {};           // action key -> true while it runs
 const failed = {};         // action key -> what went wrong
 const forms = {};          // ask id -> {selected, other}
 let ws = null, open = null, backoff = 1000, nextReq = 0, hosts = [], settings = {}, labelColors = {};
+// The conversation last opened: the middle of the views' round (currentAgent).
+let lastAgent = null;
 // The Reef this page talks to: its version and commit, for About.
 let reefInfo = {};
 // Turns the open conversation shows, asked for again on a reconnect, and
@@ -617,6 +667,9 @@ let convTurns = 3, following = true;
 const STATES = { needs_input: "Needs input", failed: "Failed", running: "Working", done: "Done" };
 const GROUPS = { none: "No groups", state: "By state", host: "By host", label: "By label", combination: "By combination",
   workspace: "By workspace" };
+// The groupings that have bands: by label, and by combination, where the
+// raised labels an agent has are one band together, as in crusteo's Lanes.
+const BANDED = new Set(["label", "combination"]);
 // How the list is looked at, and what it is empty of.
 const MODES = {
   unseen: { sort: "needs", attention: "unseen", empty: "Nothing new: you've seen every finished turn." },
@@ -650,6 +703,15 @@ prefs.tab = "map";
 for (const old of ["sort", "collapsed", "more"]) delete prefs[old];
 if (!MODES[prefs.listMode]) prefs.listMode = "unseen";
 function savePrefs() { try { localStorage.setItem("skiff-prefs", JSON.stringify(prefs)); } catch (e) {} }
+// The top bar's usage: ?usage=micro turns on the micro dials on this
+// device, ?usage=dial goes back to the one dial. Which accounts they show
+// and in what colours is this device's too (`dials`).
+{
+  const usage = new URLSearchParams(location.search).get("usage");
+  if (usage === "micro" || usage === "dial") { prefs.usageMode = usage === "micro" ? "micro" : ""; savePrefs(); }
+  if (!prefs.dials || typeof prefs.dials !== "object") prefs.dials = { shown: null, colors: {} };
+  if (!prefs.dials.colors) prefs.dials.colors = {};
+}
 // Whether lists show agents of Paseo's background workspaces: this
 // device's choice, else Reef's.
 function showsBackground() { return prefs.background ? prefs.background === "shown" : settings.show_background !== false; }
@@ -747,7 +809,7 @@ function receive(m) {
       // Usage is one small view Reef keeps current itself.
       send({ type: "subscribe", id: "usage", view: "usage" });
       return drawAll();
-    case "hosts": hosts = m.hosts; labelColors = m.labels || labelColors; fillSelects(); drawChrome(); drawMap(); drawRecent();
+    case "hosts": hosts = m.hosts; labelColors = m.labels || labelColors; fillSelects(); drawChrome(); drawMap(); drawRecent(); if (sheet === "hosts") drawSheet();
       // Not under a finger that is typing: rebuilding would close the keyboard.
       if (panel && panel.kind === "create" && !composing()) drawPanel();
       return sheet && !composing() && drawSheet();
@@ -842,7 +904,7 @@ function subscribeList() {
   mapState.focusSent = "";
   // The labels this device raised to bands; only a label map has them.
   send({ type: "subscribe", id: "map", view: "map", group: prefs.group, filter: listFilter(), focus: [],
-    bands: prefs.group === "label" ? prefs.bands : [] });
+    bands: BANDED.has(prefs.group) ? prefs.bands : [] });
 }
 
 // A filter changed: the map and, if it is up, the list.
@@ -865,6 +927,7 @@ function openAgent(agent) {
   $("draft").value = ""; sizeDraft();
   attached = []; drawAttached();
   open = agent; firstDraw = true;
+  if (agent) lastAgent = { host: agent.host, id: agent.id, title: agent.title };
   // A selection in the last conversation would hold this one's first draw.
   try { if (selectingIn($("convbody"))) window.getSelection().removeAllRanges(); } catch (e) {}
   // The details are the last agent's.
@@ -907,23 +970,135 @@ function notify(n) {
   const seen = n.id + "@" + n.at;
   if (noticed.has(seen)) return;
   noticed.add(seen);
-  for (const old of document.querySelectorAll("#toasts .toast")) if (old.dataset.key === n.key) old.remove();
+  if (n.kind === "cli_update" || n.kind === "models") return notifyUpdate(n);
+  // A newer notice for the agent takes its card's place, pinned if it was.
+  let pinned = false;
+  for (const old of document.querySelectorAll("#toasts .toast")) {
+    if (n.key && old.dataset.key === n.key) { pinned = pinned || old.classList.contains("pinned"); dropToast(old); }
+  }
   try { if (navigator.vibrate) navigator.vibrate([60, 40, 60]); } catch (e) {}
   const target = { host: n.host, id: n.agent, title: n.title };
-  const toast = el("div", "toast" + (n.state === "failed" ? " failed" : ""));
-  toast.dataset.key = n.key || "";
-  toast.append(el("b", "", (n.state === "failed" ? "Failed: " : "") + n.title), el("span", "", [n.host, n.body].filter(Boolean).join(" · ")));
-  toast.onclick = () => { toast.remove(); if (prefs.tab === "map") flyTo(n.host, n.agent); else openAgent(target); };
-  const stack = $("toasts");
-  stack.prepend(toast);
-  while (stack.children.length > 4) stack.lastChild.remove();
-  setTimeout(() => toast.remove(), 7000);
+  showToast({
+    title: (n.state === "failed" ? "Failed: " : "") + n.title,
+    text: [n.host, n.body].filter(Boolean).join(" · "),
+    failed: n.state === "failed", key: n.key, pinned,
+    open: () => { if (prefs.tab === "map") flyTo(n.host, n.agent); else openAgent(target); },
+  });
   try {
     if (document.hidden && "Notification" in window && allowed()) {
       const system = new Notification(n.title, { body: [n.host, n.body].filter(Boolean).join(" · "), tag: n.key });
       system.onclick = () => { try { window.focus(); } catch (e) {} system.close(); if (prefs.tab === "map") flyTo(n.host, n.agent); else openAgent(target); };
     }
   } catch (e) {}
+}
+
+// A coding-agent CLI upgraded, or a model came or went: one card per
+// version, which the same id replaces as more hosts catch up. Tapping it
+// opens the hosts, which show who is behind.
+function notifyUpdate(n) {
+  for (const old of document.querySelectorAll("#toasts .toast")) {
+    if (old.dataset.key === n.id) dropToast(old);
+  }
+  try { if (navigator.vibrate) navigator.vibrate(40); } catch (e) {}
+  showToast({ title: n.title, text: n.body, info: true, key: n.id,
+    open: () => { sheet = "hosts"; drawSheet(); } });
+  try {
+    if (document.hidden && "Notification" in window && allowed()) {
+      new Notification(n.title, { body: n.body, tag: n.id });
+    }
+  } catch (e) {}
+}
+
+// ---- notification cards -----------------------------------------------------------
+//
+// A card shows for TOAST_MS, its time a line draining along its top. A
+// finger on it stops the time; pinning keeps it until it is dismissed.
+// Tapping it opens what it is about; its x, or a sideways swipe, dismisses
+// it. At most four show: the oldest unpinned one goes first.
+
+const TOAST_MS = 7000, TOAST_MAX = 4, SWIPE_AWAY = 90;
+
+function showToast(o) {
+  const toast = el("div", "toast" + (o.failed ? " failed" : o.info ? " info" : "") + (o.pinned ? " pinned" : ""));
+  toast.dataset.key = o.key || "";
+  toast.style.setProperty("--tms", TOAST_MS + "ms");
+  const head = el("div", "thead");
+  const pin = el("button", "tpin"); pin.innerHTML = icon("pin", 16); pin.setAttribute("aria-label", o.pinned ? "Unpin" : "Pin");
+  const close = el("button", "tclose"); close.innerHTML = icon("close", 16); close.setAttribute("aria-label", "Dismiss");
+  head.append(el("b", "", o.title), pin, close);
+  toast.append(el("i", "tbar"), head, el("span", "", o.text || ""));
+  toast.left = TOAST_MS;
+  pin.onclick = (e) => {
+    e.stopPropagation();
+    const now = !toast.classList.contains("pinned");
+    toast.classList.toggle("pinned", now);
+    pin.setAttribute("aria-label", now ? "Unpin" : "Pin");
+    if (now) { clearTimeout(toast.timer); toast.timer = null; }
+    else { toast.left = TOAST_MS; toast.querySelector(".tbar").replaceWith(el("i", "tbar")); runToast(toast); }
+  };
+  close.onclick = (e) => { e.stopPropagation(); dropToast(toast); };
+  toast.onclick = () => { if (toast.swiped) return; dropToast(toast); if (o.open) o.open(); };
+  swipeable(toast);
+  const stack = $("toasts");
+  stack.prepend(toast);
+  const cards = [...stack.children];
+  for (let i = cards.length - 1; cards.length > TOAST_MAX && i >= 0; i--) {
+    if (!cards[i].classList.contains("pinned")) { dropToast(cards[i]); cards.splice(i, 1); }
+  }
+  if (!o.pinned) runToast(toast);
+  return toast;
+}
+// The card's time runs, from what is left of it.
+function runToast(toast) {
+  if (toast.classList.contains("pinned") || toast.timer) return;
+  toast.classList.remove("paused");
+  toast.started = Date.now();
+  toast.timer = setTimeout(() => dropToast(toast), toast.left);
+}
+function pauseToast(toast) {
+  if (!toast.timer) return;
+  clearTimeout(toast.timer); toast.timer = null;
+  toast.left = Math.max(0, toast.left - (Date.now() - toast.started));
+  toast.classList.add("paused");
+}
+function dropToast(toast) {
+  clearTimeout(toast.timer); toast.timer = null;
+  toast.remove();
+}
+// Sideways drags move the card; far enough, or flicked, and it goes.
+function swipeable(toast) {
+  let x0 = 0, y0 = 0, t0 = 0, dx = 0, id = null, sideways = false;
+  toast.addEventListener("pointerdown", (e) => {
+    if (e.target.closest("button")) return;
+    id = e.pointerId; x0 = e.clientX; y0 = e.clientY; t0 = Date.now(); dx = 0; sideways = false; toast.swiped = false;
+    pauseToast(toast);
+  });
+  toast.addEventListener("pointermove", (e) => {
+    if (e.pointerId !== id) return;
+    dx = e.clientX - x0;
+    if (!sideways && Math.abs(dx) > 8 && Math.abs(dx) > Math.abs(e.clientY - y0)) {
+      sideways = true; toast.swiped = true; toast.classList.add("dragging");
+      try { toast.setPointerCapture(id); } catch (err) {}
+    }
+    if (sideways) { toast.style.transform = "translateX(" + dx + "px)"; toast.style.opacity = String(Math.max(0.2, 1 - Math.abs(dx) / 240)); }
+  });
+  const end = (e) => {
+    if (e.pointerId !== id) return;
+    id = null;
+    toast.classList.remove("dragging");
+    const fast = Math.abs(dx) / Math.max(1, Date.now() - t0) > 0.6;
+    if (sideways && (Math.abs(dx) > SWIPE_AWAY || (fast && Math.abs(dx) > 30))) {
+      toast.style.transform = "translateX(" + (dx > 0 ? 120 : -120) + "%)"; toast.style.opacity = "0";
+      setTimeout(() => dropToast(toast), 200);
+      return;
+    }
+    toast.style.transform = ""; toast.style.opacity = "";
+    runToast(toast);
+    // A tap that was a swipe opens nothing; the next one may.
+    setTimeout(() => { toast.swiped = false; }, 0);
+  };
+  toast.addEventListener("pointerup", end);
+  toast.addEventListener("pointercancel", end);
 }
 
 // ---- drawing helpers -----------------------------------------------------------
@@ -976,6 +1151,7 @@ const ICON = {
   gear: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>',
   arrow: '<path d="M12 19V5"/><path d="m5 12 7-7 7 7"/>',
   close: '<path d="M18 6 6 18"/><path d="m6 6 12 12"/>',
+  pin: '<path d="M12 17v5"/><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"/>',
   help: '<circle cx="12" cy="12" r="10"/><path d="M9.1 9a3 3 0 0 1 5.8 1c0 2-3 3-3 3"/><path d="M12 17h.01"/>',
   back: '<path d="m15 18-6-6 6-6"/>',
   more: '<path d="m6 9 6 6 6-6"/>',
@@ -1024,11 +1200,17 @@ function toggleNotify(row) {
 }
 
 // A tap must not land on a button a delta just replaced, and typing in a
-// form must not be wiped: such redraws wait.
-let pressing = false, owed = new Set();
+// form must not be wiped: such redraws wait. Touch is tracked separately
+// from pointerdown: once a touch starts scrolling, the browser cancels
+// the pointer while the finger is still down.
+// A touch holds redraws for at most TOUCH_CAP_MS, should its lift never be
+// heard.
+const TOUCH_CAP_MS = 60000;
+let pressing = false, touching = false, touchedAt = 0, owed = new Set();
 function held(pane) {
   const active = document.activeElement;
-  return pressing || (active && pane.contains(active) && /INPUT|TEXTAREA|SELECT/.test(active.tagName) && !active.closest(".controls, .composer"));
+  return pressing || (touching && Date.now() - touchedAt < TOUCH_CAP_MS) ||
+    (active && pane.contains(active) && /INPUT|TEXTAREA|SELECT/.test(active.tagName) && !active.closest(".controls, .composer"));
 }
 function later(what) { owed.add(what); }
 // Whether text inside `elm` is selected, as when copying from a conversation.
@@ -1060,16 +1242,19 @@ function drawChrome() {
   $("view-list").className = list || recent.under ? "on" : "";
   // The map's own options go while the list is up.
   $("group").hidden = list;
-  $("bands").hidden = list || prefs.group !== "label";
+  $("bands").hidden = list || !BANDED.has(prefs.group);
   $("keytoggle").hidden = list;
   $("keytoggle").className = prefs.ageKeyHidden ? "" : "on";
-  $("controls").hidden = !prefs.filters;
+  // The map's and list's filters mean nothing to one conversation: put
+  // away while it is open, back with the map or the list.
+  $("controls").hidden = !prefs.filters || mapState.level === "near";
   $("options").classList.toggle("on", !!prefs.filters);
   const active = ["host", "label", "state", "query"].filter((k) => prefs[k]).length + (prefs.background ? 1 : 0);
   $("options").innerHTML = icon("sliders") + (active ? '<span class="n">' + active + "</span>" : "");
   $("options").title = "Filters, grouping and the key" + (active ? " (" + active + " filter" + (active > 1 ? "s" : "") + " on)" : "");
   drawCounts();
   const dots = $("dots");
+  dots.classList.toggle("two", hosts.length > 3);
   dots.innerHTML = "";
   for (const h of hosts) { const i = el("i", h.state); i.title = h.name; dots.append(i); }
   // Only a host down for a while is named.
@@ -1575,19 +1760,32 @@ function drawConv() {
   const v = views.conv;
   const agent = (v && v.fields.agent) || open;
   // Its state as a dot before its name, as on the map and in the list; a
-  // subagent's ↳ before its host (whose it is, the details say).
+  // subagent's ↳ before its host (whose it is, the details say). Kept in
+  // place across deltas so a running dot's pulse does not restart.
   const title = $("title");
-  title.innerHTML = "";
-  const dot = el("span", "dot s-" + (agent.state || ""));
+  let dot = title.querySelector(".dot"), name = title.querySelector(".tname");
+  if (!dot || !name) {
+    title.innerHTML = "";
+    dot = el("span", "dot"); name = el("span", "tname");
+    title.append(dot, name);
+  }
+  const dotCls = "dot s-" + (agent.state || "");
+  if (dot.className !== dotCls) dot.className = dotCls;
   dot.title = STATES[agent.state] || "";
-  title.append(dot, agent.title || "Conversation");
+  const titleText = agent.title || "Conversation";
+  if (name.textContent !== titleText) name.textContent = titleText;
   $("convmeta").textContent = (agent.parent ? "↳ " : "") + [agent.host || open.host, agent.workspace].filter(Boolean).join(" · ");
-  $("bell").innerHTML = bellFor(agent, 20);
+  const nextBell = bellFor(agent, 20);
+  if ($("bell").innerHTML !== nextBell) $("bell").innerHTML = nextBell;
   $("bell").className = "icon" + (agent.notify === false ? " off" : "");
   const labelBox = $("convlabels");
-  labelBox.hidden = !(agent.labels && agent.labels.length);
-  labelBox.innerHTML = "";
-  labelBox.append(...chips(agent.labels).children);
+  const labelNames = (agent.labels || []).join("\u0000");
+  if (labelBox.dataset.labels !== labelNames) {
+    labelBox.dataset.labels = labelNames;
+    labelBox.hidden = !(agent.labels && agent.labels.length);
+    labelBox.innerHTML = "";
+    labelBox.append(...chips(agent.labels).children);
+  }
   drawSpec();
   drawComposer();
   const scroller = $("convscroll");
@@ -1781,8 +1979,103 @@ function lastUpdated(row) {
   return "Last updated " + (a === "now" ? "just now" : a + " ago");
 }
 
+// ---- micro dials ----
+// Each account's colour by provider, the first account of a provider in
+// the strong shade and the next in the light one, unless this device chose.
+const DIAL_SWATCHES = ["#D85A30", "#E8A07F", "#1D9E75", "#5DCAA5", "#378ADD", "#85B7EB", "#7F77DD", "#D4537E", "#C9A227", "#888780"];
+const PROVIDER_SHADES = [[/claude|anthropic/i, ["#D85A30", "#E8A07F"]], [/codex|openai|gpt/i, ["#1D9E75", "#5DCAA5"]],
+  [/gemini|antigravity|google/i, ["#378ADD", "#85B7EB"]], [/cursor/i, ["#7F77DD", "#AFA9EC"]]];
+function dialColor(row, rows) {
+  const chosen = prefs.dials.colors[row.key];
+  if (chosen) return chosen;
+  const shades = (PROVIDER_SHADES.find(([re]) => re.test(row.provider || "")) || [null, ["#888780", "#B4B2A9"]])[1];
+  const nth = rows.filter((r) => r.provider === row.provider).indexOf(row);
+  return shades[Math.max(0, nth) % shades.length];
+}
+// Two numbers per dial: the needle is how fast it is burning (pace), the
+// centre's colour how much is left in the window the needle reads. Blue
+// when full, then green, yellow, orange and red to dark red when spent;
+// indigo when nothing in the window is used yet.
+const LEFT_RAMP = [[0, "#8B0F14"], [15, "#E5383B"], [30, "#F28C28"], [50, "#EFCB1F"], [75, "#2FB344"], [100, "#2D7FF9"]];
+const LEFT_UNUSED = "#5B3FD9";
+function leftColor(remaining) {
+  const hex = (h) => [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16));
+  if (remaining <= LEFT_RAMP[0][0]) return LEFT_RAMP[0][1];
+  for (let i = 1; i < LEFT_RAMP.length; i++) {
+    const [b, cb] = LEFT_RAMP[i];
+    if (remaining > b) continue;
+    const [a, ca] = LEFT_RAMP[i - 1], t = (remaining - a) / (b - a), x = hex(ca), y = hex(cb);
+    return "rgb(" + x.map((v, k) => Math.round(v + (y[k] - v) * t)).join(",") + ")";
+  }
+  return LEFT_RAMP[LEFT_RAMP.length - 1][1];
+}
+function unusedYet(row) { const w = bindingWindow(row); return !!w && w.used === 0; }
+// The micro dials' needle, from Reef's: as many degrees for ten times the
+// room as for ten times too fast. Reef's needle (crusteo's desktop gauge)
+// spreads the room side out to 99 times, which at this size leaves an
+// account barely used sitting near the top.
+function microNeedle(row) {
+  const n = row.needle;
+  if (n === null || n === undefined) return null;
+  if (n >= 0) return n;
+  const room = Math.pow(99, -n / 90);
+  return -Math.min(1, Math.log10(room)) * 90;
+}
+// The accounts the micro dials show, in order: this device's choice, else
+// the first four.
+function dialRows() {
+  const rows = usageRows(), shown = prefs.dials.shown;
+  if (!Array.isArray(shown)) return rows.slice(0, 4);
+  return shown.map((key) => rows.find((r) => r.key === key)).filter(Boolean).slice(0, 4);
+}
+// One dial in a 30x30 cell of a 64-unit block: a 270-degree rim, from low
+// on the left round to low on the right, the colour of what is left solid to 40% of
+// the way out and fading before the rim, and the needle reaching past it.
+// A window without a pace has no needle or colour.
+const DIAL_HALF = 135;
+function microDial(row, color, ix) {
+  const cx = 15, cy = 16, r = 12, inner = 10;
+  const at = (deg, rad) => { const t = deg * Math.PI / 180; return (cx + rad * Math.sin(t)).toFixed(2) + " " + (cy - rad * Math.cos(t)).toFixed(2); };
+  const needle = microNeedle(row), known = needle !== null;
+  let s = "";
+  if (known) {
+    const w = bindingWindow(row);
+    const c = unusedYet(row) ? LEFT_UNUSED : leftColor(w ? w.remaining : 100), id = "udial" + ix;
+    s += '<defs><radialGradient id="' + id + '" cx="' + cx + '" cy="' + cy + '" r="' + inner + '" gradientUnits="userSpaceOnUse">' +
+      '<stop offset="0" stop-color="' + c + '"/><stop offset=".4" stop-color="' + c + '"/><stop offset="1" stop-color="' + c + '" stop-opacity="0"/>' +
+      '</radialGradient></defs><circle cx="' + cx + '" cy="' + cy + '" r="' + inner + '" fill="url(#' + id + ')"/>';
+  }
+  s += '<path d="M' + at(-DIAL_HALF, r) + " A" + r + " " + r + " 0 1 1 " + at(DIAL_HALF, r) + '" stroke="' + color + '" stroke-width="4" fill="none" stroke-linecap="round"' +
+    (known ? "" : ' opacity=".35"') + "/>";
+  if (known) {
+    const tip = at(needle * DIAL_HALF / 90, 15.5);
+    s += '<path d="M' + cx + " " + cy + " L" + tip + '" style="stroke: var(--bg)" stroke-width="4" stroke-linecap="round"/>' +
+      '<path d="M' + cx + " " + cy + " L" + tip + '" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/>' +
+      '<circle cx="' + cx + '" cy="' + cy + '" r="2.6" fill="currentColor" style="stroke: var(--bg)" stroke-width="1"/>';
+  }
+  return '<g transform="translate(' + (ix % 2) * 34 + "," + Math.floor(ix / 2) * 34 + ')"' + (row.stale ? ' opacity=".45"' : "") + ">" + s + "</g>";
+}
+function dialTip(row) {
+  const w = bindingWindow(row);
+  return [(row.provider + " " + (row.account || row.label || "")).trim() + ": " + row.slack,
+    w ? (w.short || w.name) + " " + Math.round(w.remaining) + "% left, " + resetsIn(w.resets_at, row.retained) + (w.pace ? ", " + w.pace : "") : "",
+    row.retained ? failureText(row) : ""].filter(Boolean).join("\n");
+}
+function drawMicro(g) {
+  const rows = usageRows(), shown = dialRows();
+  g.hidden = !shown.length;
+  if (!shown.length) return;
+  // One or two dials take one row: half the height.
+  const tall = shown.length > 2, size = 40;
+  g.className = "ugauge micro";
+  g.innerHTML = '<svg width="' + size + '" height="' + (tall ? size : size * 30 / 64) + '" viewBox="0 0 64 ' + (tall ? 64 : 30) + '" aria-hidden="true">' +
+    shown.map((row, ix) => microDial(row, dialColor(row, rows), ix)).join("") + "</svg>";
+  g.title = shown.map(dialTip).join("\n\n");
+}
+
 function drawUsage() {
   const rows = usageRows(), top = rows.find((r) => r.tightest), g = $("usage");
+  if (prefs.usageMode === "micro") { drawMicro(g); drawUsageDrawer(); return; }
   g.hidden = !top;
   if (top) {
     const w = bindingWindow(top);
@@ -1831,7 +2124,10 @@ function drawUsageDrawer() {
     who.append(el("span", "", p.provider), el("span", "acct", [p.label, p.plan].filter(Boolean).join(" · ")));
     if (p.retained) who.append(el("span", "fail " + (p.failure.status === "error" ? "error" : "unavailable")));
     who.append(el("span", "pace sev-" + p.severity, p.slack));
+    const micro = prefs.usageMode === "micro";
+    if (micro) who.append(dialButton(p, rows));
     box.append(who);
+    if (micro && dialOpen === p.key) box.append(dialSettings(p, rows));
     if (p.retained) {
       box.append(el("div", "why failed", failureText(p)), el("div", "why last", lastUpdated(p)));
     } else if (p.status && p.status !== "ok") box.append(el("div", "why", p.status));
@@ -1855,6 +2151,61 @@ function drawUsageDrawer() {
     body.append(box);
   }
   if (rows.length) body.prepend(windowLine(null));
+}
+// The micro dials' settings, this device's, in each account's own row: a
+// button at the end of its heading, in the dial's colour while it shows,
+// slides in whether it shows (four at most), where, and in what colour.
+let dialOpen = null, dialFresh = false, dialNote = "";
+const DIAL_ICON = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">' +
+  '<rect x="4" y="3" width="16" height="18" rx="2.5"/><path d="M8 8h8M8 12h8M8 16h8"/></svg>';
+function dialButton(row, rows) {
+  const on = dialRows().some((r) => r.key === row.key);
+  const b = el("button", "dialbtn" + (on ? " on" : "") + (dialOpen === row.key ? " open" : ""));
+  b.innerHTML = DIAL_ICON;
+  b.style.color = on ? dialColor(row, rows) : "";
+  b.setAttribute("aria-label", "Top bar dial for " + row.provider);
+  b.setAttribute("aria-expanded", dialOpen === row.key ? "true" : "false");
+  b.onclick = () => { dialNote = ""; dialFresh = dialOpen !== row.key; dialOpen = dialFresh ? row.key : null; drawUsageDrawer(); };
+  return b;
+}
+function dialSettings(row, rows) {
+  const shownKeys = () => dialRows().map((r) => r.key);
+  const keep = (keys) => { prefs.dials.shown = keys; savePrefs(); drawUsage(); };
+  const keys = shownKeys(), at = keys.indexOf(row.key), on = at >= 0, color = dialColor(row, rows);
+  const box = el("div", "dialset" + (dialFresh ? " fresh" : ""));
+  dialFresh = false;
+  const line = el("div", "dl");
+  const sw = el("button", "switch" + (on ? " on" : ""));
+  sw.setAttribute("aria-label", on ? "Hide from the top bar" : "Show in the top bar");
+  sw.onclick = () => {
+    const now = shownKeys();
+    dialNote = "";
+    if (on) now.splice(at, 1);
+    else if (now.length >= 4) { dialNote = "Four fit in the top bar. Turn one off first."; return drawUsageDrawer(); }
+    else now.push(row.key);
+    keep(now);
+  };
+  line.append(sw, el("span", "name", on ? "In the top bar, " + ["top left", "top right", "bottom left", "bottom right"][at] : "Not in the top bar"));
+  if (on) {
+    const move = (by) => { const now = shownKeys(), to = at + by; [now[at], now[to]] = [now[to], now[at]]; keep(now); };
+    const back = el("button", "up", "←"), fwd = el("button", "up", "→");
+    back.setAttribute("aria-label", "Earlier"); fwd.setAttribute("aria-label", "Later");
+    back.disabled = at === 0; fwd.disabled = at === keys.length - 1;
+    back.onclick = () => move(-1); fwd.onclick = () => move(1);
+    line.append(back, fwd);
+  }
+  box.append(line);
+  const pal = el("div", "pal");
+  for (const c of DIAL_SWATCHES) {
+    const b = el("button", "sw" + (c === color ? " on" : ""));
+    b.style.background = c;
+    b.setAttribute("aria-label", "Colour " + c);
+    b.onclick = () => { prefs.dials.colors[row.key] = c; savePrefs(); drawUsage(); };
+    pal.append(b);
+  }
+  box.append(pal);
+  if (dialNote) box.append(el("div", "note", dialNote));
+  return box;
 }
 // One window's line in the usage drawer, or with none the column heads.
 function windowLine(w, retained) {
@@ -1914,11 +2265,14 @@ function renderItem(item) {
       if (item.summary) b.append(el("span", "sum" + (a ? " prose" : ""), item.summary));
       wrap.append(b);
       const key = detailKey(item);
-      const fetchDetail = () => ask({ type: "detail", id: "conv", item: item.id }, (r) => {
-        // Kept only if the same agent's conversation is still open.
-        if (r.ok && detailKey(item) === key) details[key] = Object.assign(r.detail, { chars: item.chars });
-        drawConv();
-      });
+      const fetchDetail = () => {
+        const askedChars = item.chars;
+        ask({ type: "detail", id: "conv", item: item.id }, (r) => {
+          // Kept only if the same agent's conversation is still open.
+          if (r.ok && detailKey(item) === key) details[key] = Object.assign(r.detail, { chars: askedChars });
+          drawConv();
+        });
+      };
       const shown = details[key];
       // A thought that has grown since it was read (it was streaming) is read again.
       if (shown && item.kind === "thought" && shown.chars !== item.chars && !shown.stale) { shown.stale = true; fetchDetail(); }
@@ -2118,8 +2472,8 @@ function hostEditor(box) {
     form.append(i);
   };
   field("name", "Name");
-  field("endpoint", "Address");
-  field("password", "Password (optional)", "password");
+  field("endpoint", "Address: host:port, or ssh://user@host");
+  field("password", "Daemon password (optional)", "password");
   const add = () => act("host_add", { action: "host_add", name: hostForm.name, endpoint: hostForm.endpoint, password: hostForm.password }, (r) => {
     if (r.ok) { hostForm.name = hostForm.endpoint = hostForm.password = ""; adding = false; }
     drawSheet();
@@ -2130,6 +2484,16 @@ function hostEditor(box) {
   form.append(row);
   box.append(form);
   if (failed.host_add) box.append(el("div", "error", failed.host_add));
+}
+// The newest version of a provider's CLI any host runs.
+function newestVersion(id) {
+  let best = null;
+  const num = (v) => String(v).split(/[^0-9]+/).filter(Boolean).map(Number);
+  const less = (a, b) => { const x = num(a), y = num(b); for (let i = 0; i < Math.max(x.length, y.length); i++) { if ((x[i] || 0) !== (y[i] || 0)) return (x[i] || 0) < (y[i] || 0); } return false; };
+  for (const h of hosts) for (const p of h.providers || []) {
+    if (p.id === id && p.version && (best === null || less(best, p.version))) best = p.version;
+  }
+  return best;
 }
 function drawSheet() {
   document.querySelectorAll(".sheet").forEach((s) => s.remove());
@@ -2145,6 +2509,18 @@ function drawSheet() {
       const since = h.since ? (h.state === "online" ? "up " : h.state + " ") + ago(h.since) : h.state;
       line.append(el("span", "why", [since, h.agents + " agents", h.version, h.reason].filter(Boolean).join(" · ")));
       box.append(line);
+      // The CLIs the host runs; one behind the fleet's newest is marked.
+      if (h.providers && h.providers.length) {
+        line.classList.add("hasprov");
+        const provs = el("div", "hostprov");
+        for (const p of h.providers) {
+          const newest = newestVersion(p.id);
+          const text = p.label + " " + (p.version || "?") + (p.install && p.install !== "unknown" ? " · " + p.install : "");
+          const one = el("span", p.behind ? "behind" : "", p.behind ? text + " · behind" + (newest ? " (" + newest + ")" : "") : text);
+          provs.append(one);
+        }
+        box.append(provs);
+      }
     }
   } else {
     const s = el("div", "setting");
@@ -2158,6 +2534,21 @@ function drawSheet() {
     bg.append(toggle("Show background workspaces", settings.show_background !== false, "settings-bg",
       () => act("settings-bg", { action: "settings", show_background: settings.show_background === false }, drawSheet)));
     box.append(bg);
+    // Told once for the fleet, as hosts catch up.
+    const up = el("div", "setting");
+    up.append(el("div", "", "Notify on CLI updates and new models"));
+    up.append(toggle("Notify on CLI updates and new models", settings.notify_updates !== false, "settings-up",
+      () => act("settings-up", { action: "settings", notify_updates: settings.notify_updates === false }, drawSheet)));
+    box.append(up);
+    // Off unless the owner turns it on, for the whole fleet.
+    const route = el("div", "setting");
+    route.append(el("div", "", "Agents can message agents on other hosts"));
+    route.append(toggle("Agents can message agents on other hosts", settings.agent_routing === true, "settings-route",
+      () => act("settings-route", { action: "settings", agent_routing: settings.agent_routing !== true }, drawSheet)));
+    box.append(route);
+    box.append(el("div", "small", "Through Reef, for the whole fleet. Not a lock: anything that reaches a host can still prompt its agents."));
+    if (failed["settings-route"]) box.append(el("div", "error", failed["settings-route"]));
+    if (failed["settings-up"]) box.append(el("div", "error", failed["settings-up"]));
     if (failed["settings-bg"]) box.append(el("div", "error", failed["settings-bg"]));
     if (failed.settings) box.append(el("div", "error", failed.settings));
     const sys = el("div", "setting");
@@ -2540,13 +2931,49 @@ function agentLink(a, host) {
   return link;
 }
 
+// Renames the details panel's agent; its new name shows everywhere as soon
+// as Reef has sent it.
+function saveRename() {
+  const name = (panel && panel.renaming || "").trim();
+  if (!name || busy.rename) return;
+  const { host, id } = panel;
+  act("rename", { action: "rename", host, agent: id, name }, (r) => {
+    if (r.ok && panel && panel.kind === "details" && panel.id === id) { delete panel.renaming; drawPanel(); }
+  });
+}
+
 function drawDetails(head, body) {
   const v = views.conv, agent = (v && v.fields.agent) || open || {};
   const d = (v && v.fields.details) || {};
   const h = el("h3", "");
-  h.append(el("span", "dot s-" + (agent.state || "")), agent.title || "Agent");
-  head.append(h);
+  h.append(el("span", "dot s-" + (agent.state || "")));
+  if (panel.renaming !== undefined) {
+    // The name in place, editable: Enter or Save renames, Esc keeps it.
+    const input = textField("input", "rename", panel.renaming, "Agent name", (val) => { panel.renaming = val; });
+    input.maxLength = 200; input.autocapitalize = "sentences";
+    input.onkeydown = (e) => {
+      if (e.key === "Enter") { e.preventDefault(); saveRename(); }
+      else if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); delete panel.renaming; delete failed.rename; drawPanel(); }
+    };
+    h.classList.add("renaming");
+    h.append(input);
+    const save = el("button", "small primary", busy.rename ? "Saving…" : "Save");
+    save.disabled = !!busy.rename || !panel.renaming.trim();
+    save.onclick = saveRename;
+    head.append(h, save);
+    // Focused, with the old name selected, once; later redraws keep focus.
+    if (!panel.focusedRename) {
+      panel.focusedRename = true;
+      requestAnimationFrame(() => { input.focus(); input.select(); });
+    }
+  } else {
+    h.append(agent.title || "Agent");
+    const rename = el("button", "small", "Rename");
+    rename.onclick = () => { panel.renaming = agent.title || ""; panel.focusedRename = false; delete failed.rename; drawPanel(); };
+    head.append(h, rename);
+  }
   body.classList.add("details");
+  if (failed.rename) body.append(el("div", "error", failed.rename));
   body.append(el("div", "lead small", [STATES[agent.state], agent.unseen ? "unseen" : ""].filter(Boolean).join(", ")));
 
   const names = specOf(agent, d.mode);
@@ -2641,7 +3068,7 @@ function drawAbout(head, body) {
   const keys = section(body, "Keys and gestures");
   fact(keys, "L", "The list, in or out");
   fact(keys, "Esc", "Back: a conversation, a lane, the list");
-  fact(keys, "Swipe", "Left for the list, right to go back; a trackpad's two fingers too");
+  fact(keys, "Swipe", "Round the map, the current conversation and the list: left goes on, right goes back round (in a lane, right goes back); a trackpad's two fingers too");
   fact(keys, "Enter", coarse.matches ? "A new line; the arrow sends" : "Sends; Shift+Enter is a new line");
 }
 
@@ -2691,11 +3118,7 @@ function closeConv() {
 
 // A banner of the page's own, styled as a notification.
 function flash(title, text) {
-  const toast = el("div", "toast failed");
-  toast.append(el("b", "", title), el("span", "", text));
-  toast.onclick = () => toast.remove();
-  $("toasts").prepend(toast);
-  setTimeout(() => toast.remove(), 7000);
+  showToast({ title, text, failed: true });
 }
 
 // ---- the map ------------------------------------------------------------------------------
@@ -2740,10 +3163,11 @@ function bandChoices() {
   return Object.entries(labelColors).map(([id, l]) => ["label:" + id, l.name]).sort((a, b) => a[1].localeCompare(b[1]));
 }
 
-// Raises a label group to a band on this device's map, or lowers it.
+// Raises a label group to a band on this device's map, or lowers it (a
+// combined band lowers all its labels: `key` may be a list).
 function setBand(key, raised) {
   const bands = new Set(prefs.bands || []);
-  if (raised) bands.add(key); else bands.delete(key);
+  for (const one of [].concat(key)) { if (raised) bands.add(one); else bands.delete(one); }
   prefs.bands = [...bands]; savePrefs();
   if (mapState.level === "mid") leaveMid();
   fillSelects(); subscribeList();
@@ -2866,7 +3290,7 @@ function packMap() {
   });
   const blocks = placed.map(({ lane, r }) => {
     const b = { key: lane.key, label: lane.label, x: r.x + pad + 3, y: r.y + pad + 3, w: Math.max(r.w - 6, 10), h: Math.max(r.h - 6, 10),
-      tiles: byLane.get(lane.key), band: lane.band || null, group: lane.group || null };
+      tiles: byLane.get(lane.key), band: lane.band || null, group: lane.group || null, labels: lane.labels || [] };
     // The name's strip takes two lines when one cannot hold it.
     const waiting = b.tiles.some(waits);
     const room = b.w - 8 - 12 - (waiting ? 26 : 0);
@@ -3038,19 +3462,19 @@ function drawMid() {
   }
   const title = block ? (block.band ? block.band.label + " › " + block.label : block.label) : "";
   head.append(back, el("span", "", title), el("span", "n", String(tiles.length)));
-  // A label's lane can be raised to a band, on this device; a band's lane
-  // lowers its band, or raises the label it holds.
-  if (block && prefs.group === "label") {
+  // A lane's labels can be raised to bands, on this device (a combination's
+  // each by name); a band's lane lowers its band, every label of it.
+  if (block && BANDED.has(prefs.group)) {
     const bandButton = (text, key, raised) => {
       const b = el("button", "bandbtn", text);
       b.onclick = () => setBand(key, raised);
       return b;
     };
-    const isLabel = (key) => key && key.startsWith("label:") && key.length > 6;
     const box = el("span", "bandbtns");
-    if (block.band) box.append(bandButton("Lower band", block.band.key, false));
-    const inner = block.band ? block.group : block.key;
-    if (isLabel(inner)) box.append(bandButton("Raise to band", inner, true));
+    if (block.band) box.append(bandButton("Lower band", block.band.labels || block.band.key, false));
+    const raisable = block.labels || [];
+    if (raisable.length === 1) box.append(bandButton("Raise to band", raisable[0].key, true));
+    else for (const l of raisable) box.append(bandButton("Raise " + l.label, l.key, true));
     if (box.childElementCount) head.append(box);
   }
   head.append(line);
@@ -3224,12 +3648,46 @@ function leaveNear() {
   }, 260);
 }
 
-// A swipe right from an open card goes all the way out, to the whole map,
-// and the agent's tile pulses to show where it was; opened from the list,
-// it goes back to the list.
+// The three views go round: the map, the current conversation (the one
+// last opened, from the map or the list), the list, and the map again. A
+// swipe left goes on round, a swipe right back round. With no current
+// conversation it is the map and the list.
+function currentAgent() {
+  if (!lastAgent) return null;
+  const key = lastAgent.host + "/" + lastAgent.id;
+  // Gone from the map (archived, deleted, filtered out): no middle stop.
+  // The map's tiles are every agent; its cards only a lane's.
+  const v = mapView(), there = (v && v.parts.some((t) => t.agent === key)) || mapCards().has(key);
+  return there ? Object.assign({ key }, lastAgent) : null;
+}
+// Open it as the next stop round, coming in from `side` (1 the right, -1
+// the left). From the list it opens over the list, as a row does, so its
+// back button goes back there.
+function enterCurrent(side, fromList) {
+  const a = currentAgent();
+  if (!a) return false;
+  if (fromList) { recent.open = false; recent.under = true; $("recentpane").classList.add("under"); mapState.fromList = true; }
+  const near = $("near");
+  near.hidden = false;
+  near.append($("convpane"));
+  Object.assign(near.style, { left: "0px", top: "0px", width: "100%", height: "100%", transition: "none", transform: "translateX(" + side * 100 + "%)" });
+  near.classList.add("full");
+  mapState.level = "near"; mapState.near = a.key;
+  openAgent({ host: a.host, id: a.id, title: a.title });
+  void near.offsetWidth;
+  near.style.transition = "transform .2s ease-out";
+  near.style.transform = "";
+  setTimeout(() => { near.style.transition = ""; }, 220);
+  drawMinimap(); drawChrome();
+  return true;
+}
+
+// A swipe right from an open card goes round to the whole map, from the
+// list too, and the agent's tile pulses to show where it was. (Its back
+// button still goes back to where it was opened from.)
 function nearToMap() {
   if (mapState.level !== "near") return;
-  if (mapState.fromList) return nearToList();
+  if (mapState.fromList || recent.under) closeRecent();
   const agent = mapState.near, lane = $("lane");
   $("near").hidden = true;
   $("app").insertBefore($("convpane"), $("mappane"));
@@ -3348,7 +3806,11 @@ $("map").addEventListener("wheel", (e) => {
   if (composing()) return;
   // The whole map, or a lane's boxes: nowhere to pan sideways, so it is
   // the list's swipe.
-  if (mapState.level !== "near" && mapState.cam.s <= 1.01 && sideways(e, 1, openRecent)) { e.preventDefault(); return; }
+  // Round, as a swipe: left on to the current conversation (else the list),
+  // and on the whole map right back round to the list.
+  const way = mapState.level === "far" ? Math.sign(e.deltaX) || 1 : 1;
+  const round = () => { if (way < 0 || !enterCurrent(1, false)) openRecent(); };
+  if (mapState.level !== "near" && mapState.cam.s <= 1.01 && sideways(e, way, round)) { e.preventDefault(); return; }
   // Trackpad pinch arrives as a wheel with Ctrl held.
   if (mapState.level === "far") {
     e.preventDefault();
@@ -3367,9 +3829,11 @@ $("map").addEventListener("wheel", (e) => {
     if (card) enterNear(card.dataset.agent, card);
   } else if (mapState.level === "near" && wheelZoom > 60) { wheelZoom = 0; leaveNear(); }
 }, { passive: false });
-// And from the list, the swipe the other way goes back to the map.
+// And from the list, left on round to the map, right back to the current
+// conversation (else the map).
 $("recentpane").addEventListener("wheel", (e) => {
-  if (recent.open && sideways(e, -1, closeRecent)) e.preventDefault();
+  const way = Math.sign(e.deltaX) || -1;
+  if (recent.open && sideways(e, way, () => { if (way > 0 || !enterCurrent(-1, true)) closeRecent(); })) e.preventDefault();
 }, { passive: false });
 // The edge handle: a click, or a drag of it to the left, brings the list in.
 $("edge").addEventListener("pointerdown", (e) => {
@@ -3411,7 +3875,8 @@ document.addEventListener("keydown", (e) => { if (e.key === "Escape" && (panel |
 // being left follows the finger: the conversation, a lane's cards, Recent
 // or a picture slides away showing what is under it. From an open card it
 // goes all the way out, to the whole map. A swipe left from a
-// conversation brings in Recent. Let go past a third of the screen, or
+// conversation brings in Recent. The whole map and the list go round:
+// either way from one brings in the other. Let go past a third of the screen, or
 // flick, and it goes; short of that it springs back. Touch events, not
 // pointers: the browser cancels pointers once it starts scrolling.
 let swipe = null;
@@ -3428,12 +3893,16 @@ function swipeTarget() {
   const shown = document.querySelector(".lightbox");
   if (shown) return shown;
   if (recent.open) return $("recentpane");
-  return mapState.level === "near" ? $("near") : mapState.level === "mid" ? $("lane") : null;
+  if (mapState.level === "near") return $("near");
+  if (mapState.level === "mid") return $("lane");
+  // The whole map has no back: right goes round to the list, from the left.
+  return mapState.cam.s <= 1.01 ? $("mappane") : null;
 }
-// What a swipe left moves, to bring in the list: a conversation, or the
-// map itself where it has nowhere to pan.
+// What a swipe left moves: the list, round to the map; else, to bring in
+// the list, a conversation, or the map itself where it has nowhere to pan.
 function swipeLeftTarget() {
-  if (panel || usageOpen() || recent.open || document.querySelector(".lightbox")) return null;
+  if (panel || usageOpen() || document.querySelector(".lightbox")) return null;
+  if (recent.open) return $("recentpane");
   if (mapState.level === "near") return $("near");
   return mapState.cam.s <= 1.01 ? $("mappane") : null;
 }
@@ -3444,7 +3913,8 @@ function slide(target, x, animate) {
 document.addEventListener("touchstart", (e) => {
   const t = e.touches[0];
   const free = e.touches.length === 1 && !/INPUT|TEXTAREA|SELECT/.test(e.target.tagName) && !sideScrolls(e.target) &&
-    !(e.target.closest && e.target.closest(".edge, .controls, .top"));
+    // The usage drawer is not excluded: a swipe right on it closes it.
+    !(e.target.closest && e.target.closest(".edge, .controls, .top, .toasts, .sheet, .panel"));
   const right = free && swipeTarget(), left = free && swipeLeftTarget();
   swipe = right || left ? { x: t.clientX, y: t.clientY, at: Date.now(), right, left, target: null, dir: 0, dragging: false,
     last: { x: t.clientX, at: Date.now() }, v: 0 } : null;
@@ -3466,7 +3936,12 @@ document.addEventListener("touchmove", (e) => {
     swipe.dragging = true;
     swipe.x = t.clientX - dir;
     swipe.target.classList.add("swiping");
-    if (dir < 0) { swipe.target.classList.add("leftward"); showRecent(true); }
+    const list = $("recentpane");
+    // Left from the map goes on to the current conversation when there is
+    // one, so the list is not shown under it.
+    const toConv = swipe.target === $("mappane") && currentAgent();
+    if (dir < 0) { swipe.target.classList.add("leftward"); if (swipe.target !== list && !toConv) showRecent(true); }
+    else if (swipe.target === $("mappane")) { swipe.target.classList.add("over"); showRecent(true); }
   }
   e.preventDefault();
   const now = Date.now(), moved = t.clientX - swipe.x;
@@ -3485,8 +3960,17 @@ document.addEventListener("touchend", (e) => {
   slide(target, dir * (target.getBoundingClientRect().width || window.innerWidth), true);
   setTimeout(() => {
     // Left, the list; from a conversation the list opened, back to it.
-    if (dir < 0) { if (mapState.fromList && target === $("near")) nearToList(); else openRecent(); }
-    else if (target === $("near")) nearToMap(); else goBack();
+    // Round: the map, the current conversation, the list, the map again.
+    if (dir < 0) {
+      if (target === $("recentpane")) closeRecent();
+      else if (target === $("mappane")) { if (!enterCurrent(1, false)) openRecent(); }
+      // On from a conversation, wherever it was opened: it closes and the
+      // list comes in, so the list's own swipes go on round to the map.
+      else if (target === $("near")) nearToList(); else openRecent();
+    } else if (target === $("near")) nearToMap();
+    else if (target === $("mappane")) openRecent();
+    else if (target === $("recentpane")) { if (!enterCurrent(-1, true)) closeRecent(); }
+    else goBack();
     // Put it back once what it was showing has gone.
     setTimeout(() => settle(target, true), 320);
   }, 200);
@@ -3496,7 +3980,7 @@ document.addEventListener("touchcancel", cancelSwipe, { passive: true });
 function settle(target, gone) {
   slide(target, 0, !gone);
   setTimeout(() => {
-    target.classList.remove("swiping", "leftward");
+    target.classList.remove("swiping", "leftward", "over");
     target.style.transition = "";
     // The list came in under a swipe that sprang back, and is not kept
     // under a conversation.
@@ -3611,7 +4095,24 @@ $("draft").addEventListener("paste", (e) => {
 $("steer").onclick = () => sendAs("steer");
 document.addEventListener("pointerdown", () => { pressing = true; }, true);
 for (const end of ["pointerup", "pointercancel"]) {
-  document.addEventListener(end, () => { pressing = false; setTimeout(payOwed, 0); }, true);
+  document.addEventListener(end, () => { pressing = false; if (!touching) setTimeout(payOwed, 0); }, true);
+}
+// A touch's lift goes to the element it started on. Once that element has
+// left the page (a toast pushed out by a fifth, a sheet redrawn), the lift
+// no longer reaches the document, so it is heard on the element too.
+function touchLifted(e) {
+  touching = !!(e.touches && e.touches.length);
+  if (!touching && !pressing) setTimeout(payOwed, 0);
+}
+document.addEventListener("touchstart", (e) => {
+  touching = true; touchedAt = Date.now();
+  const on = e.target;
+  if (on && on.addEventListener && on !== document) {
+    for (const end of ["touchend", "touchcancel"]) on.addEventListener(end, touchLifted, { once: true, passive: true });
+  }
+}, { capture: true, passive: true });
+for (const end of ["touchend", "touchcancel"]) {
+  document.addEventListener(end, touchLifted, { capture: true, passive: true });
 }
 document.addEventListener("focusout", () => setTimeout(payOwed, 0));
 // A conversation held for a selection catches up once it is let go.

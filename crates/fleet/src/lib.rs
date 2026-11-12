@@ -5,6 +5,7 @@
 //! That keeps the reducers testable against captured frames.
 
 pub mod agent_messages;
+pub mod cli_watch;
 pub mod clock;
 pub mod creation;
 pub mod directory;
@@ -22,6 +23,7 @@ pub mod requests;
 pub mod sidebar;
 pub mod state_list;
 pub mod subagents;
+pub mod sync;
 pub mod timeline;
 pub mod workspace_archive;
 

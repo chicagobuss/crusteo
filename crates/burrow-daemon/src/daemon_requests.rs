@@ -20,7 +20,19 @@ pub const KINDS: &[&str] = &[
     "daemon.get_pairing_offer.request",
     "list_provider_models_request",
     "provider_diagnostic_request",
+    "restart_server_request",
 ];
+
+/// How long a restart waits after answering, so the answer goes out first.
+const RESTART_AFTER: std::time::Duration = std::time::Duration::from_millis(250);
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Restart {
+    request_id: String,
+    #[serde(default)]
+    reason: Option<String>,
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -86,6 +98,33 @@ pub fn handle(
                 )
             }))
         }
+        // Paseo's `restart_requested`, then the program stops as it does on
+        // SIGTERM and starts again in the same process: see `main`. Running
+        // turns are interrupted; terminals close (Burrow does not advertise
+        // `terminalsSurviveRestart`, so `killTerminals` changes nothing).
+        "restart_server_request" => {
+            let request: Restart = parse(message)?;
+            if !cfg!(unix) {
+                return Some(vec![burrow_protocol::envelope::rpc_error(
+                    &request.request_id,
+                    Some(kind),
+                    "This host's Burrow cannot restart itself: restart its service instead.",
+                    burrow_protocol::codes::rpc::HANDLER_ERROR,
+                )]);
+            }
+            let reason = request.reason.clone().filter(|r| !r.trim().is_empty());
+            tracing::warn!(reason = ?reason, "restart requested by a client");
+            let mut payload = json!({"status": "restart_requested", "clientId": "",
+                                     "requestId": request.request_id});
+            if let Some(reason) = reason {
+                payload["reason"] = reason.into();
+            }
+            tokio::spawn(async move {
+                tokio::time::sleep(RESTART_AFTER).await;
+                daemon.restart.notify_one();
+            });
+            Some(vec![session("status", payload)])
+        }
         _ => None,
     }
 }
@@ -103,13 +142,14 @@ async fn status(daemon: &Daemon, request_id: &str) -> Value {
         .iter()
         .map(|id| json!({"provider": id, "available": true, "error": null}))
         .collect();
-    for (id, _, stamp) in crate::discovery::watched(daemon).await {
-        if !offered.contains(&id) {
-            let error = match stamp {
-                None => "its CLI was not found",
-                Some(_) => "its CLI runs but could not be set up",
+    for watched in crate::discovery::watched(daemon).await {
+        if !offered.contains(&watched.id) {
+            let error = match (watched.looked, watched.stamp) {
+                (false, _) => "not looked for yet: Burrow is still starting",
+                (true, None) => "its CLI was not found",
+                (true, Some(_)) => "its CLI runs but could not be set up",
             };
-            providers.push(json!({"provider": id, "available": false, "error": error}));
+            providers.push(json!({"provider": watched.id, "available": false, "error": error}));
         }
     }
     let program = std::env::current_exe()
@@ -146,6 +186,10 @@ fn models(daemon: &Daemon, request: &ProviderRequest) -> Value {
             entry.get("models").cloned().unwrap_or_else(|| json!([])),
             Value::Null,
         ),
+        None if daemon.agents.discovering() => (
+            Value::Null,
+            json!(format!("{} is still being looked for", request.provider)),
+        ),
         None => (
             Value::Null,
             json!(format!("Provider {} is not available", request.provider)),
@@ -163,14 +207,18 @@ fn models(daemon: &Daemon, request: &ProviderRequest) -> Value {
 /// provider, as lines of text.
 async fn diagnostic(daemon: &Daemon, provider: &str) -> String {
     let watched = crate::discovery::watched(daemon).await;
-    let found = watched.iter().find(|(id, ..)| id == provider);
+    let found = watched.iter().find(|w| w.id == provider);
     let info = daemon
         .agents
         .provider(provider)
         .map(|p| (p.info(), p.loading()));
     let mut lines = vec![format!("Provider: {provider}")];
     match found {
-        Some((_, program, stamp)) => {
+        Some(w) if !w.looked => {
+            lines.push("Not looked for yet: Burrow is still starting".into());
+        }
+        Some(w) => {
+            let (program, stamp) = (&w.program, &w.stamp);
             if let Some(program) = program {
                 lines.push(format!("Command: {}", program.display()));
                 let resolved = resolve(program, std::env::var_os("PATH"));

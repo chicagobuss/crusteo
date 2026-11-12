@@ -1644,6 +1644,249 @@ impl LaneModel {
     }
 }
 
+// ---- arrangement ----------------------------------------------------------
+//
+// How a view orders what a lane holds: who started whom, which workspaces
+// sit together, and where lanes and cards go as the user relabels and
+// hides. Pure over lanes, so the board can stay a projection.
+
+/// A workspace as pins, tabs and card order name it: its host's id, then the
+/// workspace's. Hosts saved before ids existed have their old name as id, so
+/// keys saved then still match.
+pub fn workspace_key(host: &HostId, workspace: &str) -> String {
+    format!("{host}:{workspace}")
+}
+
+/// The workspace a card belongs to, if it has one.
+pub fn card_workspace(card: &LaneCard) -> Option<(&HostId, &str)> {
+    Some((&card.host, card.workspace_id.as_deref()?))
+}
+
+/// Who started whom among a lane's cards. A card's parent is the card of
+/// the agent that started it, when that card is in the lane in the same
+/// workspace; a card without one is a root.
+pub struct Family {
+    pub parent: Vec<Option<usize>>,
+    pub root: Vec<bool>,
+}
+
+impl Family {
+    pub fn of(lane: &Lane) -> Self {
+        let cards = &lane.cards;
+        let index: HashMap<(&HostId, &str), usize> = cards
+            .iter()
+            .enumerate()
+            .map(|(ix, card)| ((&card.host, card.agent_id.as_str()), ix))
+            .collect();
+        let parent: Vec<Option<usize>> = cards
+            .iter()
+            .enumerate()
+            .map(|(ix, card)| {
+                let workspace = card_workspace(card)?;
+                let parent = *index.get(&(&card.host, card.parent.as_deref()?))?;
+                (parent != ix && card_workspace(&cards[parent]) == Some(workspace))
+                    .then_some(parent)
+            })
+            .collect();
+        // A card is a root unless following its parents ends at one, so a
+        // cycle cannot hide cards.
+        let root = (0..cards.len())
+            .map(|ix| {
+                let mut at = ix;
+                for _ in 0..cards.len() {
+                    match parent[at] {
+                        Some(next) if next == ix => return true,
+                        Some(next) => at = next,
+                        None => return at == ix,
+                    }
+                }
+                true
+            })
+            .collect();
+        Self { parent, root }
+    }
+
+    /// The root a card descends from.
+    pub fn root_of(&self, mut ix: usize) -> usize {
+        while !self.root[ix] {
+            match self.parent[ix] {
+                Some(parent) => ix = parent,
+                None => break,
+            }
+        }
+        ix
+    }
+
+    /// How many parents up a card's root is.
+    pub fn depth(&self, mut ix: usize) -> usize {
+        let mut depth = 0;
+        while !self.root[ix]
+            && let Some(parent) = self.parent[ix]
+        {
+            ix = parent;
+            depth += 1;
+        }
+        depth
+    }
+}
+
+/// `lane` with each workspace's cards together, since labels belong to the
+/// workspace and relabeling moves them all, and each subagent right under
+/// the agent that started it. A workspace sits where its most urgent, then
+/// most recent, card sorts, and an agent where the most urgent of it and its
+/// subagents sorts. None when the cards already are in that order.
+pub fn group_workspaces(lane: &Lane, placement: &Placement) -> Option<Lane> {
+    let cards = &lane.cards;
+    let family = Family::of(lane);
+    let mut first: HashMap<(&HostId, &str), usize> = HashMap::new();
+    let workspace_rank: Vec<usize> = cards
+        .iter()
+        .enumerate()
+        .map(|(ix, card)| card_workspace(card).map_or(ix, |key| *first.entry(key).or_insert(ix)))
+        .collect();
+    let mut rank: Vec<usize> = (0..cards.len()).collect();
+    let mut children: Vec<Vec<usize>> = vec![Vec::new(); cards.len()];
+    for ix in 0..cards.len() {
+        let root = family.root_of(ix);
+        rank[root] = rank[root].min(ix);
+        if !family.root[ix]
+            && let Some(parent) = family.parent[ix]
+        {
+            children[parent].push(ix);
+        }
+    }
+    let mut roots: Vec<usize> = (0..cards.len()).filter(|&ix| family.root[ix]).collect();
+    // Pinned workspaces first; inside a workspace, the order the user gave,
+    // then the rest as they sort.
+    let key = |ix: usize| card_workspace(&cards[ix]).map(|(host, ws)| workspace_key(host, ws));
+    let pinned: Vec<bool> = (0..cards.len())
+        .map(|ix| key(ix).is_some_and(|key| placement.pinned.contains(&key)))
+        .collect();
+    let given: Vec<usize> = (0..cards.len())
+        .map(|ix| {
+            key(ix)
+                .and_then(|key| placement.order.get(&key))
+                .and_then(|order| order.iter().position(|id| *id == cards[ix].agent_id))
+                .unwrap_or(usize::MAX)
+        })
+        .collect();
+    roots.sort_by_key(|&ix| (!pinned[ix], workspace_rank[ix], given[ix], rank[ix], ix));
+    let mut order = Vec::with_capacity(cards.len());
+    let mut stack = Vec::new();
+    for root in roots {
+        stack.push(root);
+        while let Some(ix) = stack.pop() {
+            order.push(ix);
+            // Children were pushed in card order; pop them in it.
+            stack.extend(children[ix].iter().rev());
+        }
+    }
+    if order.iter().enumerate().all(|(at, &ix)| at == ix) {
+        return None;
+    }
+    Some(Lane {
+        cards: order.into_iter().map(|ix| cards[ix].clone()).collect(),
+        ..lane.clone()
+    })
+}
+
+/// What the user said about where cards go: workspaces pinned to the top
+/// of their lane, and the card order given inside a workspace's box.
+pub struct Placement<'a> {
+    pub pinned: &'a BTreeSet<String>,
+    pub order: &'a BTreeMap<String, Vec<String>>,
+}
+
+/// Whether a card needs the user, so folding never hides it.
+pub fn needs_user(card: &LaneCard) -> bool {
+    matches!(card.bucket, Bucket::NeedsInput | Bucket::Failed)
+}
+
+/// The board order after a relabel: `known` (the order before it) less
+/// lanes that are gone, with lanes `current` has that `known` lacks placed
+/// right after `source`, or where it stood if it is gone. None when no lane
+/// is new.
+pub fn order_with_new_lanes(
+    known: &[String],
+    source: &str,
+    current: &[String],
+) -> Option<Vec<String>> {
+    let new: Vec<&String> = current.iter().filter(|key| !known.contains(key)).collect();
+    if new.is_empty() {
+        return None;
+    }
+    let at = known
+        .iter()
+        .position(|key| key == source)
+        .map_or(known.len(), |ix| ix + 1);
+    Some(
+        known[..at]
+            .iter()
+            .chain(new)
+            .chain(&known[at..])
+            .filter(|key| current.contains(key))
+            .cloned()
+            .collect(),
+    )
+}
+
+/// In reef mode, the labels an agent made from `lane` takes so it lands in
+/// that lane: a label lane's, none from Unlabelled. None elsewhere: it
+/// takes its workspace's default.
+pub fn lane_label_ids(lane: &Lane, fleet: &Fleet) -> Option<Vec<LabelId>> {
+    fleet.labels.as_ref()?;
+    match lane.kind {
+        LaneKind::Label | LaneKind::Combination => {
+            Some(lane.label_keys.iter().map(LabelId::new).collect())
+        }
+        LaneKind::Unlabelled => Some(Vec::new()),
+        _ => None,
+    }
+}
+
+/// The cards of `lane` other than `open`, as the list under an open card
+/// shows them: those needing the user (a permission, a question, an error)
+/// first, then running ones, then the rest, each group in the lane's own
+/// order (most recent first).
+pub fn open_lane_order(lane: &Lane, open: &(HostId, String)) -> Vec<usize> {
+    use Bucket;
+    let group = |bucket: Bucket| match bucket {
+        Bucket::NeedsInput | Bucket::Failed => 0,
+        Bucket::Running => 1,
+        Bucket::Attention | Bucket::Done => 2,
+    };
+    let mut order: Vec<usize> = (0..lane.cards.len())
+        .filter(|&ix| {
+            let card = &lane.cards[ix];
+            !(card.host == open.0 && card.agent_id == open.1)
+        })
+        .collect();
+    order.sort_by_key(|&ix| group(lane.cards[ix].bucket));
+    order
+}
+
+/// Hiding the focused lane prefers the next displayed neighbour, then the
+/// previous one. It never transfers focus to another collapsed tab.
+pub fn next_visible_lane(lanes: &[Rc<Lane>], hidden_index: usize) -> Option<String> {
+    lanes[hidden_index + 1..]
+        .iter()
+        .chain(lanes[..hidden_index].iter().rev())
+        .find(|lane| !lane.collapsed)
+        .map(|lane| lane.key.clone())
+}
+
+pub fn visible_focus_lane(lanes: &[Rc<Lane>], focused: Option<&str>) -> Option<String> {
+    let key = focused?;
+    match lanes.iter().position(|lane| lane.key == key) {
+        Some(index) if lanes[index].collapsed => next_visible_lane(lanes, index),
+        Some(_) => Some(key.to_string()),
+        None => lanes
+            .iter()
+            .find(|lane| !lane.collapsed)
+            .map(|lane| lane.key.clone()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2542,6 +2785,250 @@ mod tests {
         assert_eq!(
             lanes.iter().map(|lane| &lane.key).collect::<Vec<_>>(),
             again.iter().map(|lane| &lane.key).collect::<Vec<_>>()
+        );
+    }
+}
+
+#[cfg(test)]
+mod arrangement_tests {
+    use super::*;
+
+    fn keys(keys: &[&str]) -> Vec<String> {
+        keys.iter().map(|key| key.to_string()).collect()
+    }
+
+    fn card(agent: &str, bucket: Bucket) -> LaneCard {
+        LaneCard {
+            host: HostId::new("h"),
+            agent_id: agent.into(),
+            workspace_id: Some("w".into()),
+            workspace_name: "w".into(),
+            title: agent.into(),
+            provider: "claude".into(),
+            model: None,
+            updated_at: None,
+            bucket,
+            attention_reason: None,
+            parent: None,
+        }
+    }
+
+    fn lane_of(cards: Vec<LaneCard>) -> Lane {
+        Lane {
+            key: "l".into(),
+            kind: LaneKind::Other,
+            title: "l".into(),
+            color: None,
+            label_keys: Vec::new(),
+            hosts: vec![HostId::new("h")],
+            cards,
+            workspaces: Vec::new(),
+            collapsed: false,
+            band: None,
+        }
+    }
+
+    fn lane(key: &str, collapsed: bool) -> Rc<Lane> {
+        Rc::new(Lane {
+            key: key.into(),
+            collapsed,
+            ..lane_of(Vec::new())
+        })
+    }
+
+    #[test]
+    fn a_new_lane_goes_right_after_the_one_relabeled_from() {
+        let known = keys(&["a", "b", "c", "d"]);
+        // The model sorted the new lane to the end, as it does today.
+        let current = keys(&["a", "b", "c", "d", "new"]);
+        assert_eq!(
+            order_with_new_lanes(&known, "b", &current),
+            Some(keys(&["a", "b", "new", "c", "d"]))
+        );
+    }
+
+    #[test]
+    fn from_the_last_lane_it_goes_last() {
+        let known = keys(&["a", "b"]);
+        let current = keys(&["new", "a", "b"]);
+        assert_eq!(
+            order_with_new_lanes(&known, "b", &current),
+            Some(keys(&["a", "b", "new"]))
+        );
+    }
+
+    #[test]
+    fn several_new_lanes_keep_their_order_and_gone_lanes_drop_out() {
+        // Moving off the only card of "b" emptied it.
+        let known = keys(&["a", "b", "c"]);
+        let current = keys(&["a", "x", "c", "y"]);
+        assert_eq!(
+            order_with_new_lanes(&known, "b", &current),
+            Some(keys(&["a", "x", "y", "c"]))
+        );
+    }
+
+    #[test]
+    fn no_new_lane_leaves_the_order_alone() {
+        let known = keys(&["a", "b", "c"]);
+        assert_eq!(
+            order_with_new_lanes(&known, "b", &keys(&["c", "a", "b"])),
+            None
+        );
+    }
+
+    #[test]
+    fn under_an_open_card_those_needing_you_come_first_then_running_then_the_rest() {
+        let cards = vec![
+            card("done", Bucket::Done),
+            card("running", Bucket::Running),
+            card("open", Bucket::Attention),
+            card("failed", Bucket::Failed),
+            card("asking", Bucket::NeedsInput),
+        ];
+        let open = (HostId::new("h"), "open".to_string());
+        let lane = lane_of(cards);
+        // The lane's own order holds inside each group; the open card is not listed.
+        assert_eq!(open_lane_order(&lane, &open), [3, 4, 1, 0]);
+    }
+
+    #[test]
+    fn only_a_question_or_a_failure_needs_the_user() {
+        assert!(needs_user(&card("a", Bucket::NeedsInput)));
+        assert!(needs_user(&card("a", Bucket::Failed)));
+        for bucket in [Bucket::Running, Bucket::Attention, Bucket::Done] {
+            assert!(!needs_user(&card("a", bucket)), "{bucket:?}");
+        }
+    }
+
+    #[test]
+    fn a_subagent_descends_from_its_root_only_inside_its_workspace() {
+        let mut child = card("child", Bucket::Done);
+        child.parent = Some("root".into());
+        let mut grandchild = card("grandchild", Bucket::Done);
+        grandchild.parent = Some("child".into());
+        let mut stranger = card("stranger", Bucket::Done);
+        stranger.parent = Some("root".into());
+        stranger.workspace_id = Some("elsewhere".into());
+        let lane = lane_of(vec![
+            card("root", Bucket::Done),
+            child,
+            grandchild,
+            stranger,
+        ]);
+        let family = Family::of(&lane);
+        assert_eq!(family.root, [true, false, false, true]);
+        assert_eq!(family.root_of(2), 0);
+        assert_eq!(family.depth(0), 0);
+        assert_eq!(family.depth(2), 2);
+        // Another workspace's card is its own root, whoever started it.
+        assert_eq!(family.root_of(3), 3);
+    }
+
+    #[test]
+    fn a_cycle_of_parents_hides_no_card() {
+        let mut a = card("a", Bucket::Done);
+        a.parent = Some("b".into());
+        let mut b = card("b", Bucket::Done);
+        b.parent = Some("a".into());
+        let family = Family::of(&lane_of(vec![a, b]));
+        assert!(family.root.iter().any(|root| *root));
+    }
+
+    #[test]
+    fn a_pinned_workspace_goes_first_and_cards_keep_the_given_order() {
+        let mut a = card("a", Bucket::Done);
+        a.workspace_id = Some("w1".into());
+        let mut b = card("b", Bucket::Done);
+        b.workspace_id = Some("w2".into());
+        let mut c = card("c", Bucket::Done);
+        c.workspace_id = Some("w2".into());
+        let lane = lane_of(vec![a, b, c]);
+        let nothing = BTreeSet::new();
+        assert!(
+            group_workspaces(
+                &lane,
+                &Placement {
+                    pinned: &nothing,
+                    order: &BTreeMap::new()
+                }
+            )
+            .is_none(),
+            "already together, in sort order"
+        );
+        let pinned = BTreeSet::from([workspace_key(&HostId::new("h"), "w2")]);
+        let order = BTreeMap::from([(workspace_key(&HostId::new("h"), "w2"), keys(&["c", "b"]))]);
+        let grouped = group_workspaces(
+            &lane,
+            &Placement {
+                pinned: &pinned,
+                order: &order,
+            },
+        )
+        .expect("moved");
+        let ids: Vec<&str> = grouped.cards.iter().map(|c| c.agent_id.as_str()).collect();
+        assert_eq!(ids, ["c", "b", "a"]);
+    }
+
+    #[test]
+    fn reactive_focus_resolves_hidden_targets_without_revealing_them() {
+        let mut lanes = vec![lane("a", false), lane("hidden", true), lane("b", false)];
+        assert_eq!(
+            visible_focus_lane(&lanes, Some("hidden")).as_deref(),
+            Some("b")
+        );
+        assert_eq!(visible_focus_lane(&lanes, Some("a")).as_deref(), Some("a"));
+        assert_eq!(
+            visible_focus_lane(&lanes, Some("missing")).as_deref(),
+            Some("a")
+        );
+        assert_eq!(visible_focus_lane(&lanes, None), None);
+        Rc::make_mut(&mut lanes[2]).collapsed = true;
+        assert_eq!(
+            visible_focus_lane(&lanes, Some("hidden")).as_deref(),
+            Some("a")
+        );
+        Rc::make_mut(&mut lanes[0]).collapsed = true;
+        assert_eq!(visible_focus_lane(&lanes, Some("hidden")), None);
+        assert!(lanes[1].collapsed);
+    }
+
+    #[test]
+    fn hide_focus_prefers_next_visible_then_previous_and_handles_all_hidden() {
+        let mut lanes = vec![
+            lane("a", false),
+            lane("hidden", true),
+            lane("b", false),
+            lane("c", false),
+        ];
+        assert_eq!(next_visible_lane(&lanes, 0).as_deref(), Some("b"));
+        assert_eq!(next_visible_lane(&lanes, 3).as_deref(), Some("b"));
+        Rc::make_mut(&mut lanes[2]).collapsed = true;
+        Rc::make_mut(&mut lanes[3]).collapsed = true;
+        assert_eq!(next_visible_lane(&lanes, 3).as_deref(), Some("a"));
+        assert_eq!(next_visible_lane(&lanes, 0), None);
+    }
+
+    #[test]
+    fn an_agent_made_from_a_label_lane_takes_that_lanes_labels() {
+        let fleet = Fleet {
+            labels: Some(Catalog::default()),
+            ..Fleet::default()
+        };
+        let mut lane = lane_of(Vec::new());
+        assert_eq!(lane_label_ids(&lane, &fleet), None, "an Other lane");
+        lane.kind = LaneKind::Unlabelled;
+        assert_eq!(lane_label_ids(&lane, &fleet), Some(Vec::new()));
+        lane.kind = LaneKind::Label;
+        lane.label_keys = keys(&["lbl_a"]);
+        assert_eq!(
+            lane_label_ids(&lane, &fleet),
+            Some(vec![LabelId::new("lbl_a")])
+        );
+        assert_eq!(
+            lane_label_ids(&lane, &Fleet::default()),
+            None,
+            "outside reef mode labels belong to workspaces"
         );
     }
 }

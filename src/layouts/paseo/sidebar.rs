@@ -602,7 +602,7 @@ impl Sidebar {
                                     "chevron-down"
                                 },
                                 14.,
-                                gpui_kit::gpui::rgb(0x9ca3af),
+                                crate::theme::palette().muted,
                             )),
                     )
                     .when(collapsed && aggregate != Bucket::Done, |slot| {
@@ -1339,10 +1339,11 @@ fn footer(core: &Core, cx: &mut Context<Sidebar>) -> impl IntoElement {
                 .hover(|s| s.bg(p.sidebar_hover).text_color(p.foreground))
                 .child(ui::icon("server", 14., p.muted))
                 .child(format!("{online}/{total} hosts online"))
-                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                    this.core
-                        .nav
-                        .update(cx, |nav, cx| nav.show(Screen::Hosts, cx));
+                .on_click(cx.listener(|this, event: &ClickEvent, window, cx| {
+                    let side = crate::pane::side_at(event.position().x, window);
+                    this.core.nav.update(cx, |nav, cx| {
+                        nav.set_pane(Some((crate::app::Pane::Hosts, side)), cx)
+                    });
                 })),
         )
         .child(

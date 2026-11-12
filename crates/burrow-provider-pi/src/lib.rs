@@ -19,9 +19,8 @@ pub mod process;
 pub mod session;
 pub mod tools;
 
-use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use burrow_provider::{
@@ -31,7 +30,6 @@ use burrow_provider::{
 use serde_json::{Map, Value, json};
 use tokio::sync::mpsc;
 
-use crate::process::{JsonProcess, Output};
 use crate::session::{Launcher, Session, Settings, Transport};
 
 /// How long reading pi's model catalog may take.
@@ -125,7 +123,7 @@ impl PiProvider {
         command
             .args(["--mode", "rpc", "--no-session"])
             .current_dir(home);
-        let mut process = JsonProcess::spawn(command).map_err(|e| e.to_string())?;
+        let mut process = process::spawn(command, None).map_err(|e| e.to_string())?;
         for (id, kind) in [("models", "get_available_models"), ("state", "get_state")] {
             let _ = process.input.send(json!({"id": id, "type": kind}));
         }
@@ -133,7 +131,7 @@ impl PiProvider {
             let (mut available, mut current) = (None, None::<Option<String>>);
             while available.is_none() || current.is_none() {
                 match process.output.recv().await {
-                    Some(Output::Message(frame)) if frame["type"] == "response" => {
+                    Some(process::Output::Message(frame)) if frame["type"] == "response" => {
                         if frame["success"] != true {
                             return Err(format!(
                                 "pi refused {}: {}",
@@ -150,7 +148,7 @@ impl PiProvider {
                             _ => {}
                         }
                     }
-                    Some(Output::Exited { stderr, .. }) => {
+                    Some(process::Output::Exited { stderr, .. }) => {
                         return Err(format!("pi exited: {}", stderr.trim()));
                     }
                     None => return Err("pi exited".into()),
@@ -315,58 +313,11 @@ impl Launcher for CliLauncher {
         for (key, value) in &self.env {
             command.env(key, value);
         }
-        let process = JsonProcess::spawn(command)?;
-        Ok(match &self.trace {
-            Some(path) => tee(process, path),
-            None => Transport {
-                input: process.input,
-                output: process.output,
-            },
+        let process = process::spawn(command, self.trace.as_deref())?;
+        Ok(Transport {
+            input: process.input,
+            output: process.output,
         })
-    }
-}
-
-/// The process's channels, also writing every frame to `path`.
-fn tee(process: JsonProcess, path: &Path) -> Transport {
-    let file = std::fs::File::create(path)
-        .ok()
-        .map(|f| Arc::new(Mutex::new(f)));
-    let record = move |file: &Option<Arc<Mutex<std::fs::File>>>, dir: &str, frame: &Value| {
-        if let Some(file) = file
-            && let Ok(mut file) = file.lock()
-        {
-            let _ = writeln!(file, "{}", json!({"dir": dir, "frame": frame}));
-        }
-    };
-    let JsonProcess {
-        input: process_input,
-        mut output,
-    } = process;
-    let (input_tx, mut input_rx) = mpsc::unbounded_channel::<Value>();
-    let (output_tx, output_rx) = mpsc::unbounded_channel();
-    let in_file = file.clone();
-    tokio::spawn(async move {
-        while let Some(frame) = input_rx.recv().await {
-            record(&in_file, "in", &frame);
-            if process_input.send(frame).is_err() {
-                break;
-            }
-        }
-    });
-    tokio::spawn(async move {
-        while let Some(message) = output.recv().await {
-            if let Output::Message(frame) = &message {
-                record(&file, "out", frame);
-            }
-            let done = matches!(message, Output::Exited { .. });
-            if output_tx.send(message).is_err() || done {
-                break;
-            }
-        }
-    });
-    Transport {
-        input: input_tx,
-        output: output_rx,
     }
 }
 

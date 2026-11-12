@@ -76,7 +76,7 @@ impl Upstream {
         timeout: Duration,
         done: impl FnOnce(&mut Upstream, Result<Value, String>) + Send + 'static,
     ) {
-        let Some(link) = self.links.get(host).filter(|link| link.online) else {
+        let Some(link) = self.links.get(host).filter(|link| link.sync.online()) else {
             done(self, Err("The host is offline".into()));
             return;
         };
@@ -365,6 +365,26 @@ impl Upstream {
     }
 
     /// Archives the agent.
+    /// Renames the agent, as crusteo's rename does. Shown at once; the
+    /// host's update confirms it.
+    pub fn rename(&mut self, host: &str, agent: &str, name: String, reply: Reply) {
+        if self.fleet.agent(&host_id(host), agent).is_none() {
+            return self.refuse(&reply, crate::proto::code::NOT_FOUND, "no such agent");
+        }
+        let message = fleet::requests::rename_agent(agent, &name);
+        let (host_name, id) = (host.to_string(), agent.to_string());
+        self.write(host, message, WRITE_TIMEOUT, move |up, result| {
+            if result.is_ok()
+                && let Some(found) = (up.fleet.host_mut(&host_id(&host_name)))
+                    .and_then(|h| h.directory.agents.get_mut(&id))
+            {
+                found.title = Some(name);
+                up.dirty_fleet = true;
+            }
+            up.answer(&reply, result.map(|_| json!({})));
+        });
+    }
+
     pub fn archive(&mut self, host: &str, agent: &str, reply: Reply) {
         let message = json!({ "type": "archive_agent_request", "agentId": agent });
         let key = (host.to_string(), agent.to_string());
@@ -423,7 +443,7 @@ impl Upstream {
             self.notice(host, agent, title, failed, text.or(error));
             return;
         }
-        let Some(link) = self.links.get(host).filter(|link| link.online) else {
+        let Some(link) = self.links.get(host).filter(|link| link.sync.online()) else {
             self.notice(host, agent, title, failed, error);
             return;
         };

@@ -80,7 +80,6 @@ pub enum Screen {
         host: Option<HostId>,
         project: Option<String>,
     },
-    Hosts,
     History,
 }
 
@@ -93,6 +92,8 @@ pub enum Pane {
     /// Every agent, the latest change first, from the History button.
     History,
     Settings,
+    /// The fleet's hosts: their state, Reconnect and Restart.
+    Hosts,
 }
 
 impl Pane {
@@ -101,7 +102,7 @@ impl Pane {
         match self {
             Pane::State(state) => Some(Some(state)),
             Pane::History => Some(None),
-            Pane::Settings => None,
+            Pane::Settings | Pane::Hosts => None,
         }
     }
 }
@@ -230,12 +231,9 @@ fn place_as_shown(keys: &[String], shown: &[String], key: &str) -> Option<Vec<St
     (order != keys).then_some(order)
 }
 
-/// A workspace as pins, tabs and card order name it: its host's id, then the
-/// workspace's. Hosts saved before ids existed have their old name as id, so
-/// keys saved then still match.
-pub fn workspace_key(host: &HostId, workspace: &str) -> String {
-    format!("{host}:{workspace}")
-}
+// A workspace as pins, tabs and card order name it; Lanes' card grouping
+// needs the same key, so it is `fleet`'s.
+pub use fleet::lanes::workspace_key;
 
 /// An agent's key in saved per-agent state, as [workspace_key] makes a
 /// workspace's.
@@ -288,6 +286,8 @@ pub struct Nav {
     pub history_docked: bool,
     /// The docked History's width.
     pub history_width: f32,
+    /// How the docked History is ordered.
+    pub history_sort: fleet::state_list::Sort,
     pub grouping: Grouping,
     pub collapsed: BTreeSet<String>,
     pub collapsed_pinned: bool,
@@ -326,6 +326,8 @@ pub struct Nav {
     pub box_single_workspaces: bool,
     /// Window zoom, 1 for 100%.
     pub zoom: f32,
+    /// Light, dark, or the system's.
+    pub appearance: crate::theme::Appearance,
     /// Where each toolbar item sits.
     pub toolbars: crate::toolbars::Arrangement,
     pub lane_filter: LaneFilter,
@@ -420,6 +422,7 @@ impl Nav {
                 .unwrap_or(crate::theme::size::SIDEBAR_WIDTH),
             history_docked: ui.history_docked,
             history_width: ui.history_width.unwrap_or(crate::state_list::WIDTH),
+            history_sort: ui.history_sort,
             grouping: if ui.group_by_status {
                 Grouping::Status
             } else {
@@ -464,6 +467,7 @@ impl Nav {
             recency_headers: ui.recency_headers.unwrap_or(true),
             box_single_workspaces: ui.box_single_workspaces.unwrap_or(true),
             zoom: ui.zoom.unwrap_or(1.).clamp(0.25, 5.),
+            appearance: crate::theme::Appearance::parse(&ui.appearance),
             toolbars: ui.toolbars,
             lane_filter: ui.lane_filter,
             pinned_workspaces: ui.pinned_workspaces.into_iter().collect(),
@@ -544,6 +548,7 @@ impl Nav {
             sidebar_open: Some(self.sidebar_open),
             history_docked: self.history_docked,
             history_width: Some(self.history_width),
+            history_sort: self.history_sort,
             group_by_status: self.grouping == Grouping::Status,
             collapsed: self.collapsed.iter().cloned().collect(),
             collapsed_pinned: self.collapsed_pinned,
@@ -585,6 +590,7 @@ impl Nav {
             recency_headers: Some(self.recency_headers),
             box_single_workspaces: Some(self.box_single_workspaces),
             zoom: (self.zoom != 1.).then_some(self.zoom),
+            appearance: self.appearance.as_str().to_string(),
             toolbars: self.toolbars.clone(),
             lane_filter: self.lane_filter.clone(),
             pinned_workspaces: self.pinned_workspaces.iter().cloned().collect(),
@@ -1125,6 +1131,15 @@ impl Nav {
         cx.notify();
     }
 
+    /// Orders the docked History, kept across restarts.
+    pub fn set_history_sort(&mut self, sort: fleet::state_list::Sort, cx: &mut Context<Self>) {
+        if self.history_sort != sort {
+            self.history_sort = sort;
+            self.save();
+            cx.notify();
+        }
+    }
+
     /// Reef mode: what Lanes saved by label name (lane order, collapsed
     /// lanes, colour choices, the label filter) keyed by the catalog's
     /// label ids instead, as its lanes are. Keys already ids, and names the
@@ -1191,6 +1206,14 @@ impl Nav {
         }
         self.toolbars = toolbars;
         self.save();
+        cx.notify();
+    }
+
+    /// Picks light, dark or the system's theme, and shows it now.
+    pub fn set_appearance(&mut self, appearance: crate::theme::Appearance, cx: &mut Context<Self>) {
+        self.appearance = appearance;
+        self.save();
+        crate::theme::show(appearance, None, cx);
         cx.notify();
     }
 

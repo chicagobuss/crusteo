@@ -18,13 +18,10 @@ gpui_kit::actions!(
     [About, Quit, Hide, HideOthers, ShowAll, Minimize, ZoomWindow]
 );
 
-/// The version, and on a build from a checkout the commit it was built at,
-/// since every build so far is 0.1.0.
+/// The version with the commit it was built at: `0.2.0 (<commit>)` for a
+/// release, `0.2.0-internal-<commit>` between releases (build.rs).
 pub fn version() -> String {
-    match option_env!("CRUSTEO_COMMIT") {
-        Some(commit) => format!("{} ({commit})", env!("CARGO_PKG_VERSION")),
-        None => env!("CARGO_PKG_VERSION").to_string(),
-    }
+    env!("CRUSTEO_VERSION").to_string()
 }
 
 /// The version, the Paseo protocol spoken, and each host's daemon version

@@ -3,28 +3,29 @@
 //! without GPUI: the same bootstrap order, the same held-push replay, the
 //! same timeline catch-up and seq gate (those live in `fleet`).
 //!
-//! Every request goes through [`guarded`], which refuses any type not in
-//! [`READ_REQUESTS`] or [`WRITE_REQUESTS`]. The writes are the phone's
-//! actions (`actions.rs`, and `agents.rs` for creating, deleting and
-//! relabelling), each added on purpose. `clear_agent_attention` is one:
-//! opening an agent in Skiff marks it seen, on its host, so a desktop sees
-//! it seen too, as one opened there clears it for Skiff. Never on the
-//! list: anything about terminals, and workspace changes other than
-//! assigning a label.
+//! Every request goes through [`guarded`] (`guard.rs`), Reef's allowlist.
+//! The state machines it shares with crusteo are `fleet::sync`'s.
 
 mod actions;
 mod agents;
+mod guard;
 mod recording;
 mod replies;
+mod routing;
 
 pub use actions::{QUEUE_MAX, Queued, Reply};
 pub use agents::NewAgent;
+pub use guard::{
+    NAME_MAX, READ_REQUESTS, WRITE_REQUESTS, guarded, guarded_until, guarded_with_timeout,
+    labels_write, name_write,
+};
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+use fleet::sync::{Bootstrap, Fetch, HostSync, Loaded, Page, Step};
 use fleet::timeline::{Follow, Timeline};
 use fleet::{Connection, Fleet, HostConfig, requests};
 use paseo_client::{Client, Config, ConnState, Event};
@@ -33,143 +34,22 @@ use tokio::sync::mpsc;
 
 use crate::config::host_id;
 
-/// The requests Reef sends a daemon to keep its picture current.
-pub const READ_REQUESTS: &[&str] = &[
-    "session.events.set_subscription.request",
-    "project.list.request",
-    "fetch_workspaces_request",
-    "fetch_agents_request",
-    "workspace.label.list.request",
-    "agent.timeline.set_subscription.request",
-    "fetch_agent_timeline_request",
-    "subscription.release.request",
-    // Each account's usage, for the `usage` view.
-    usage_source::reports::REPORTS_REQUEST,
-    // Providers, models and modes, for a phone's new-agent form; asked
-    // only when a phone opens one.
-    "get_providers_snapshot_request",
-    // An image a conversation Reef holds keeps in a file: one a prompt
-    // lists or a reply's Markdown names, never a path a phone gives
-    // (`Upstream::read_image`).
-    "file_explorer_request",
-];
-
 /// Work to do on the upstream state, sent back by request tasks.
 pub type Apply = Box<dyn FnOnce(&mut Upstream) + Send>;
 
 /// An event from one host's connection: host, link generation, event.
 pub type HostEvent = (String, u64, Event);
 
-/// A conversation timeline page, at most this many entries.
-const PAGE: u32 = 40;
-
-/// The only writes: what the phone's actions send, and nothing else.
-pub const WRITE_REQUESTS: &[&str] = &[
-    // Allow or deny a permission; answer or dismiss a question.
-    "agent_permission_response",
-    // Stop the running turn.
-    "cancel_agent_request",
-    // Send a message: to an idle agent, from the queue, or steering.
-    "send_agent_message_request",
-    // Archive an agent; the page asks first.
-    "archive_agent_request",
-    // Create an agent, in a workspace or a directory.
-    "agent.create.request",
-    // Delete an agent for good; the page asks first.
-    "delete_agent_request",
-    // Mark an agent seen: its "ready to review" goes, everywhere.
-    "clear_agent_attention",
-    // Put a label on an agent's workspace, or take it off: the labels a
-    // row shows are its workspace's, as in crusteo.
-    "workspace.label.assignment.set.request",
-];
-
-/// Sends `message` if it is a known read or one of the phone's writes;
-/// anything else is refused here.
-/// The one `update_agent_request` Reef may send: an agent's labels and
-/// nothing else ([`fleet::labels::set_request`]), checked field by field, so
-/// a name, or any other label key, never rides along.
-pub fn labels_write(message: &Value) -> bool {
-    let Some(fields) = message.as_object() else {
-        return false;
-    };
-    let only_labels = (message["labels"].as_object()).is_some_and(|labels| {
-        labels.len() == 1 && labels.get(fleet::labels::KEY).is_some_and(Value::is_string)
-    });
-    message["type"] == "update_agent_request"
-        && message["agentId"].is_string()
-        && only_labels
-        && (fields.keys())
-            .all(|key| matches!(key.as_str(), "type" | "agentId" | "labels" | "requestId"))
-}
-
-pub fn guarded(
-    client: &Client,
-    message: Value,
-) -> impl std::future::Future<Output = Result<Value, String>> + Send + 'static {
-    guarded_with_timeout(client, message, paseo_client::DEFAULT_TIMEOUT)
-}
-
-/// [`guarded`] for a read the daemon answers in several messages, the last
-/// of type `until`: the earlier messages' payloads, and the last's.
-pub fn guarded_until(
-    client: &Client,
-    message: Value,
-    until: &str,
-) -> impl std::future::Future<Output = Result<(Vec<Value>, Value), String>> + Send + 'static {
-    let kind = message["type"].as_str().unwrap_or_default().to_string();
-    let allowed = READ_REQUESTS.contains(&kind.as_str());
-    let reply =
-        allowed.then(|| client.request_until(message, until, paseo_client::DEFAULT_TIMEOUT));
-    async move {
-        match reply {
-            Some(reply) => reply.await.map_err(|err| err.to_string()),
-            None => {
-                eprintln!("reef: refused to send {kind:?}: not on Reef's list");
-                Err(format!("{kind} is not on Reef's list"))
-            }
-        }
-    }
-}
-
-pub fn guarded_with_timeout(
-    client: &Client,
-    message: Value,
-    timeout: Duration,
-) -> impl std::future::Future<Output = Result<Value, String>> + Send + 'static {
-    let kind = message["type"].as_str().unwrap_or_default().to_string();
-    let allowed = READ_REQUESTS.contains(&kind.as_str())
-        || WRITE_REQUESTS.contains(&kind.as_str())
-        || labels_write(&message);
-    let reply = allowed.then(|| client.request_with_timeout(message, timeout));
-    async move {
-        match reply {
-            Some(reply) => reply.await.map_err(|err| err.to_string()),
-            None => {
-                eprintln!("reef: refused to send {kind:?}: not on Reef's list");
-                Err(format!("{kind} is not on Reef's list"))
-            }
-        }
-    }
-}
-
 struct Link {
     client: Client,
-    /// Which `connect` made this link; events from a replaced one drop.
-    generation: u64,
     /// A fresh value, from one counter for every link, on each connect,
     /// disconnect and removal. Bootstrap work from an older connection
     /// stops at its next step, even when the host was removed and added
-    /// again under the same name.
+    /// again under the same name. The task reads it without a round trip
+    /// through Reef; `sync` holds the same value for the work Reef applies.
     epoch: Arc<AtomicU64>,
-    online: bool,
-    /// Agents whose timelines we stream on this host.
-    watched: BTreeSet<String>,
-    timeline_subscription: Option<String>,
-    /// Directory pushes that arrived while the bootstrap replies were in
-    /// flight; replayed after them so a snapshot never erases newer pushes.
-    bootstrapping: bool,
-    held: Vec<Value>,
+    /// Link generation, epoch, held pushes and timeline subscription.
+    sync: HostSync,
 }
 
 /// One open conversation.
@@ -181,15 +61,14 @@ pub struct Session {
     /// Pages that landed or failed, so a phone waiting for older history
     /// knows when to look again.
     pub pages: u64,
-    fetching: bool,
-    reload_pending: bool,
+    fetch: Fetch,
     viewers: usize,
     idle_since: Option<Instant>,
 }
 
 impl Session {
     pub fn fetching(&self) -> bool {
-        self.fetching
+        self.fetch.in_flight()
     }
 }
 
@@ -239,8 +118,13 @@ pub struct Upstream {
     pub usage_every: Duration,
     /// Each host's providers, read when a phone opens a new-agent form.
     providers: HashMap<String, agents::Providers>,
+    /// What each host's coding-agent CLIs and models were, to tell when they
+    /// change ([fleet::cli_watch]).
+    pub cli: fleet::cli_watch::Watch,
     /// The fleet's recorder ([`crate::record`]), idle until configured.
     pub record: crate::record::Recorder,
+    /// Whether Reef routes prompts between hosts, and the routes under way.
+    routes: routing::Routes,
 }
 
 impl Upstream {
@@ -277,6 +161,8 @@ impl Upstream {
             usage_asked: HashMap::new(),
             usage_every: usage_source::reports::ASK_EVERY,
             providers: HashMap::new(),
+            cli: fleet::cli_watch::Watch::default(),
+            routes: routing::Routes::default(),
         }
     }
 
@@ -300,11 +186,11 @@ impl Upstream {
             .filter(|name| (self.usage_asked.get(name)).is_none_or(|at| at.elapsed() >= every))
             .collect();
         for name in due {
-            let Some(link) = self.links.get(&name).filter(|link| link.online) else {
+            let Some(link) = self.links.get(&name).filter(|link| link.sync.online()) else {
                 continue;
             };
             self.usage_asked.insert(name.clone(), Instant::now());
-            let generation = link.generation;
+            let generation = link.sync.generation();
             let reply = guarded_until(
                 &link.client,
                 json!({ "type": REPORTS_REQUEST }),
@@ -324,7 +210,7 @@ impl Upstream {
                     if up
                         .links
                         .get(&name)
-                        .is_some_and(|l| l.generation == generation)
+                        .is_some_and(|l| l.sync.accepts(generation))
                     {
                         up.set_usage(&crate::usage::host_key(&name), reading);
                     }
@@ -342,8 +228,17 @@ impl Upstream {
                     && self
                         .links
                         .get(host.name())
-                        .is_some_and(|link| link.online && !link.bootstrapping)
+                        .is_some_and(|link| link.sync.settled())
             })
+    }
+
+    /// Whether every host connected now has its whole agent list. Hosts that
+    /// are down do not count: one that is asleep will not answer in time.
+    pub fn connected_synced(&self) -> bool {
+        self.fleet.hosts.iter().all(|host| {
+            (self.links.get(host.name()))
+                .is_none_or(|link| link.sync.settled() && host.directory.agents_hydrated)
+        })
     }
 
     /// Whether the agent is in a turn now, as the directory says.
@@ -444,6 +339,7 @@ impl Upstream {
         self.host_since.remove(name);
         self.usage_asked.remove(name);
         self.forget_providers(name);
+        self.cli.forget_host(name);
         self.set_usage(&crate::usage::host_key(name), None);
         self.forget_host(name);
         self.record.forget_host(name);
@@ -478,13 +374,8 @@ impl Upstream {
             name.to_string(),
             Link {
                 client,
-                generation,
                 epoch: Arc::new(AtomicU64::new(epoch)),
-                online: false,
-                watched: BTreeSet::new(),
-                timeline_subscription: None,
-                bootstrapping: false,
-                held: Vec::new(),
+                sync: HostSync::new(generation),
             },
         );
         // Drain the connection on its own task, as the client asks, so a
@@ -511,7 +402,7 @@ impl Upstream {
         if !self
             .links
             .get(name)
-            .is_some_and(|link| link.generation == generation)
+            .is_some_and(|link| link.sync.accepts(generation))
         {
             return;
         }
@@ -535,15 +426,14 @@ impl Upstream {
                 let Some(link) = self.links.get_mut(name) else {
                     return;
                 };
-                link.online = true;
-                link.timeline_subscription = None;
-                link.bootstrapping = true;
-                link.held.clear();
+                link.sync.connected(epoch);
                 // The daemon may have restarted with other providers.
                 self.forget_providers(name);
+                self.watch_providers(name);
                 self.bootstrap(name, epoch);
                 self.resubscribe_timelines(name, true);
                 self.ask_usage();
+                self.announce_routing(name);
                 self.dirty_fleet = true;
             }
             Event::State(ConnState::Disconnected { reason, auth }) => {
@@ -557,8 +447,7 @@ impl Upstream {
                 }
                 self.bump_epoch(name);
                 if let Some(link) = self.links.get_mut(name) {
-                    link.online = false;
-                    link.timeline_subscription = None;
+                    link.sync.disconnected();
                 }
                 self.dirty_fleet = true;
             }
@@ -654,14 +543,24 @@ impl Upstream {
             // goes with it already moves the agent into needs-you.
             "agent_attention_required" => {}
             // Read again the next time a phone asks, not kept ten minutes.
-            "providers_snapshot_update" => self.forget_providers(name),
+            "providers_snapshot_update" => {
+                self.forget_providers(name);
+                self.watch_providers(name);
+            }
+            // A Burrow asks Reef to route a prompt to another host.
+            kind if kind == paseo_client::routing::REQUEST => {
+                let payload = payload.clone();
+                self.on_fleet_request(name, &payload);
+            }
             _ => {
-                if let Some(link) = self.links.get_mut(name)
-                    && link.bootstrapping
-                {
-                    link.held.push(message);
-                    return;
-                }
+                let message = match self.links.get_mut(name) {
+                    Some(link) => match link.sync.hold(message) {
+                        Some(message) => message,
+                        None => return,
+                    },
+                    None => message,
+                };
+                let payload = &message["payload"];
                 let agent_id = payload["agent"]["id"]
                     .as_str()
                     .or(payload["agentId"].as_str())
@@ -685,7 +584,11 @@ impl Upstream {
                     if gone {
                         // Archived or removed: nothing kept for it stays.
                         self.forget_agent(name, &agent_id);
-                        self.record.forget(&(name.to_string(), agent_id.clone()));
+                        let key = (name.to_string(), agent_id.clone());
+                        self.record.forget(&key);
+                        // The daemon says the same of both, so recording
+                        // asks it which: only a deleted agent is forgotten.
+                        self.record.suspect(key, true);
                     } else {
                         let ended = was && !self.running(name, &agent_id);
                         self.record
@@ -744,12 +647,12 @@ impl Upstream {
     fn is_current(&self, name: &str, epoch: u64) -> bool {
         self.links
             .get(name)
-            .is_some_and(|link| link.online && link.epoch.load(Ordering::SeqCst) == epoch)
+            .is_some_and(|link| link.sync.is_current(epoch))
     }
 
-    /// Subscribes to everything the views need, in order, then replays the
-    /// pushes that arrived meanwhile. A failed step reconnects after a
-    /// pause, so it is retried.
+    /// Reads the host in [`Bootstrap`]'s order, then replays the pushes
+    /// that arrived meanwhile. A failed step reconnects after a pause, so
+    /// it is retried.
     fn bootstrap(&mut self, name: &str, epoch: u64) {
         let (Some(link), Some(host)) = (self.links.get(name), self.fleet.host(&host_id(name)))
         else {
@@ -757,14 +660,8 @@ impl Upstream {
         };
         let client = link.client.clone();
         let current = link.epoch.clone();
-        let read = requests::DirectoryRead::for_host(host);
-        let sync = read.sync;
-        let project_list = host.has("projectList");
-        let labels = host.has("workspaceLabels");
-        let dir = &host.directory;
-        let workspace_cursor = dir.workspace_cursor.clone();
-        let agent_cursor = dir.agent_cursor.clone();
-        let project_cursor = dir.project_cursor.clone();
+        // Reef streams no provider subagents.
+        let mut plan = Bootstrap::for_host(host, false);
         let apply = self.apply.clone();
         let name = name.to_string();
 
@@ -774,180 +671,66 @@ impl Upstream {
             let send = |f: Apply| {
                 let _ = apply.send(f);
             };
-            let mut failed = false;
-
-            let events = [
-                "project.update",
-                "script_status_update",
-                "agent_permission_request",
-                "agent_permission_resolved",
-                "agent_attention_required",
-                // A host's tools or models changed (a CLI upgraded under
-                // its Burrow): the phones' new-agent form reads them again.
-                "providers_snapshot_update",
-            ];
-            match guarded(&client, requests::session_events(&events)).await {
-                Ok(payload) => {
-                    let name = name.clone();
-                    send(Box::new(move |up| {
-                        if up.is_current(&name, epoch)
-                            && let Some(host) = up.fleet.host_mut(&host_id(&name))
-                        {
-                            host.directory.subscriptions.events =
-                                payload["subscriptionId"].as_str().map(str::to_string);
-                        }
-                    }));
-                }
-                Err(err) => {
-                    log(&name, "session events", &err);
-                    failed = true;
-                }
-            }
-
-            if live() && project_list {
-                match guarded(
-                    &client,
-                    requests::list_projects(sync, project_cursor.as_ref()),
-                )
-                .await
-                {
-                    Ok(payload) => {
+            while live() {
+                match plan.step() {
+                    Step::Done => break,
+                    Step::ProjectsFromWorkspaces => {
                         let name = name.clone();
                         send(Box::new(move |up| {
                             if up.is_current(&name, epoch)
                                 && let Some(host) = up.fleet.host_mut(&host_id(&name))
                             {
-                                host.directory.apply_projects_reply(&payload);
-                                up.dirty_fleet = true;
+                                host.directory.projects_from_workspaces = true;
                             }
                         }));
                     }
-                    Err(err) => {
-                        log(&name, "projects", &err);
-                        failed = true;
-                    }
-                }
-            } else if live() {
-                let name = name.clone();
-                send(Box::new(move |up| {
-                    if up.is_current(&name, epoch)
-                        && let Some(host) = up.fleet.host_mut(&host_id(&name))
-                    {
-                        host.directory.projects_from_workspaces = true;
-                    }
-                }));
-            }
-
-            // Workspaces, then every following page when not syncing.
-            let mut request = requests::fetch_workspaces(read, workspace_cursor.as_ref());
-            let mut first = true;
-            while live() {
-                match guarded(&client, request).await {
-                    Ok(payload) => {
-                        let next = next_page(&payload);
-                        let page_first = first;
-                        let name = name.clone();
-                        send(Box::new(move |up| {
-                            if up.is_current(&name, epoch)
-                                && let Some(host) = up.fleet.host_mut(&host_id(&name))
-                            {
-                                host.directory.apply_workspaces_reply(&payload, page_first);
-                                up.dirty_fleet = true;
-                            }
-                        }));
-                        match next {
-                            Some(cursor) => {
-                                request = requests::fetch_workspaces_page(read, &cursor);
-                                first = false;
-                            }
-                            None => break,
+                    Step::Send(request) => {
+                        let result = guarded(&client, request).await;
+                        if let Err(err) = &result {
+                            log(&name, plan.what(), err);
                         }
-                    }
-                    Err(err) => {
-                        log(&name, "workspaces", &err);
-                        failed = true;
-                        break;
-                    }
-                }
-            }
-
-            let mut request = requests::fetch_agents(read, agent_cursor.as_ref());
-            let mut first = true;
-            let mut agents_complete = false;
-            while live() {
-                match guarded(&client, request).await {
-                    Ok(payload) => {
-                        let next = next_page(&payload);
-                        let page_first = first;
+                        let Some(loaded) = plan.reply(result) else {
+                            continue;
+                        };
                         let name = name.clone();
                         send(Box::new(move |up| {
                             if !up.is_current(&name, epoch) {
                                 return;
                             }
-                            // Turns that ended while Reef was away
-                            // count as ended now.
-                            let before = up.running_on(&name);
+                            // Turns that ended while Reef was away count as
+                            // ended now.
+                            let before = matches!(loaded, Loaded::Agents { .. })
+                                .then(|| up.running_on(&name));
                             if let Some(host) = up.fleet.host_mut(&host_id(&name)) {
-                                host.directory.apply_agents_reply(&payload, page_first);
+                                loaded.apply(&mut host.directory);
                             }
-                            for entry in payload["entries"].as_array().into_iter().flatten() {
-                                up.on_agent_snapshot(&name, &entry["agent"]);
+                            for agent in loaded.agent_snapshots() {
+                                up.on_agent_snapshot(&name, agent);
                             }
-                            up.turn_edges(&name, &before);
-                            up.dirty_fleet = true;
+                            if let Some(before) = before {
+                                up.turn_edges(&name, &before);
+                            }
+                            // The events subscription shows nowhere.
+                            up.dirty_fleet |= !matches!(loaded, Loaded::Events { .. });
                         }));
-                        match next {
-                            Some(cursor) => {
-                                request = requests::fetch_agents_page(read, &cursor);
-                                first = false;
-                            }
-                            None => {
-                                agents_complete = true;
-                                break;
-                            }
-                        }
-                    }
-                    Err(err) => {
-                        log(&name, "agents", &err);
-                        failed = true;
-                        break;
                     }
                 }
             }
 
-            if live() && labels {
-                match guarded(&client, requests::list_labels()).await {
-                    Ok(payload) => {
-                        let name = name.clone();
-                        send(Box::new(move |up| {
-                            if up.is_current(&name, epoch)
-                                && let Some(host) = up.fleet.host_mut(&host_id(&name))
-                            {
-                                host.directory.apply_labels_reply(&payload);
-                                up.dirty_fleet = true;
-                            }
-                        }));
-                    }
-                    Err(err) => log(&name, "labels", &err),
-                }
-            }
-
+            let complete = plan.agents_complete();
+            let failed = plan.failed();
             {
                 let name = name.clone();
                 send(Box::new(move |up| {
                     if !up.is_current(&name, epoch) {
                         return;
                     }
-                    if let Some(host) = up.fleet.host_mut(&host_id(&name)) {
-                        host.directory.agents_hydrated = agents_complete;
-                        host.directory.journal.clear();
-                    }
-                    let held = match up.links.get_mut(&name) {
-                        Some(link) => {
-                            link.bootstrapping = false;
-                            std::mem::take(&mut link.held)
+                    let held = match (up.links.get_mut(&name), up.fleet.host_mut(&host_id(&name))) {
+                        (Some(link), Some(host)) => {
+                            host.directory.journal.clear();
+                            link.sync.finish_bootstrap(&mut host.directory, complete)
                         }
-                        None => Vec::new(),
+                        _ => Vec::new(),
                     };
                     for message in held {
                         up.on_push(&name, message);
@@ -991,10 +774,10 @@ impl Upstream {
         self.sessions.insert(key.clone(), session);
         self.dirty_sessions.insert(key);
         if let Some(link) = self.links.get_mut(host) {
-            link.watched.insert(agent.to_string());
+            link.sync.watched.insert(agent.to_string());
         }
         self.resubscribe_timelines(host, false);
-        self.fetch_tail(host, agent);
+        self.fetch(host, agent, Page::Tail);
     }
 
     /// A phone closed it. It keeps streaming a while in case it reopens.
@@ -1021,7 +804,7 @@ impl Upstream {
         for (host, agent) in stale {
             self.sessions.remove(&(host.clone(), agent.clone()));
             if let Some(link) = self.links.get_mut(&host) {
-                link.watched.remove(&agent);
+                link.sync.watched.remove(&agent);
             }
             hosts.insert(host);
         }
@@ -1036,19 +819,13 @@ impl Upstream {
         let Some(session) = self.sessions.get(&(host.to_string(), agent.to_string())) else {
             return false;
         };
-        let (Some(cursor), true) = (session.timeline.cursor.clone(), session.timeline.has_older)
-        else {
+        let Some(page) = Page::older(&session.timeline, fleet::sync::PAGE) else {
             return false;
         };
-        if session.fetching {
+        if session.fetch.in_flight() {
             return false;
         }
-        let message = json!({
-            "type": "fetch_agent_timeline_request", "agentId": agent, "direction": "before",
-            "cursor": { "epoch": cursor.epoch, "seq": cursor.start_seq }, "limit": PAGE,
-            "projection": "projected",
-        });
-        self.fetch_page(host, agent, false, message);
+        self.fetch(host, agent, page);
         true
     }
 
@@ -1056,14 +833,14 @@ impl Upstream {
         let Some(link) = self.links.get(host) else {
             return;
         };
-        if !link.online {
+        if !link.sync.online() {
             return;
         }
         let epoch = link.epoch.load(Ordering::SeqCst);
         let agents = self.timeline_agents(host);
         let reply = guarded(
             &link.client,
-            json!({ "type": "agent.timeline.set_subscription.request", "agentIds": agents }),
+            HostSync::timeline_subscription_request(&agents),
         );
         let apply = self.apply.clone();
         let host = host.to_string();
@@ -1081,11 +858,11 @@ impl Upstream {
                 let Some(link) = up.links.get_mut(&host) else {
                     return;
                 };
-                if let Some(previous) = std::mem::replace(&mut link.timeline_subscription, id) {
+                if let Some(previous) = link.sync.swap_timeline_subscription(id) {
                     tokio::spawn(guarded(&link.client, requests::release(&previous)));
                 }
                 if catch_up {
-                    let agents: Vec<String> = link.watched.iter().cloned().collect();
+                    let agents: Vec<String> = link.sync.watched.iter().cloned().collect();
                     for agent in agents {
                         up.catch_up(&host, &agent);
                     }
@@ -1098,36 +875,14 @@ impl Upstream {
         let Some(session) = self.sessions.get(&(host.to_string(), agent.to_string())) else {
             return;
         };
-        match session.timeline.cursor.clone() {
-            Some(cursor) if session.timeline.baseline => {
-                self.fetch_after(host, agent, &cursor.epoch, cursor.end_seq)
-            }
-            _ => self.fetch_tail(host, agent),
-        }
+        let page = Page::catch_up(&session.timeline);
+        self.fetch(host, agent, page);
     }
 
     fn follow(&mut self, host: &str, agent: &str, follow: Follow) {
-        match follow {
-            Follow::Nothing => {}
-            Follow::Reload => self.fetch_tail(host, agent),
-            Follow::CatchUp { epoch, seq } => self.fetch_after(host, agent, &epoch, seq),
+        if let Some(page) = Page::following(follow) {
+            self.fetch(host, agent, page);
         }
-    }
-
-    fn fetch_tail(&mut self, host: &str, agent: &str) {
-        let message = json!({
-            "type": "fetch_agent_timeline_request", "agentId": agent, "direction": "tail",
-            "limit": PAGE, "projection": "projected",
-        });
-        self.fetch_page(host, agent, true, message);
-    }
-
-    fn fetch_after(&mut self, host: &str, agent: &str, epoch: &str, seq: u64) {
-        let message = json!({
-            "type": "fetch_agent_timeline_request", "agentId": agent, "direction": "after",
-            "cursor": { "epoch": epoch, "seq": seq }, "limit": PAGE, "projection": "projected",
-        });
-        self.fetch_page(host, agent, false, message);
     }
 
     /// Reads an image `host` keeps in `file`, as crusteo does; `None` when
@@ -1140,33 +895,31 @@ impl Upstream {
     ) -> Option<
         impl std::future::Future<Output = Result<fleet::prompt::ImageAttachment, String>> + Send + use<>,
     > {
-        let link = self.links.get(host).filter(|link| link.online)?;
+        let link = self.links.get(host).filter(|link| link.sync.online())?;
         // Boxed: `guarded`'s future is 'static, but its type names the link.
         let reply: std::pin::Pin<Box<dyn std::future::Future<Output = _> + Send>> =
             Box::pin(guarded(&link.client, file.request()));
         Some(async move { fleet::images::image_from_reply(&reply.await?) })
     }
 
-    /// One timeline fetch per conversation at a time. A reload asked for
-    /// meanwhile runs when the current fetch lands; a catch-up asked for
-    /// meanwhile is redundant (the held frames drain with that page).
-    fn fetch_page(&mut self, host: &str, agent: &str, reload: bool, message: Value) {
+    /// Reads `page` of an open conversation ([`Fetch`] allows one read at a
+    /// time).
+    fn fetch(&mut self, host: &str, agent: &str, page: Page) {
         let key = (host.to_string(), agent.to_string());
         let Some(session) = self.sessions.get_mut(&key) else {
             return;
         };
-        if session.fetching {
-            session.reload_pending |= reload;
+        if !session.fetch.begin(&page) {
             return;
         }
-        let Some(link) = self.links.get(host).filter(|link| link.online) else {
+        let Some(link) = self.links.get(host).filter(|link| link.sync.online()) else {
+            session.fetch.abandon();
             session.loading = false;
             session.error = Some("The host is offline".into());
             self.dirty_sessions.insert(key);
             return;
         };
-        session.fetching = true;
-        let reply = guarded(&link.client, message);
+        let reply = guarded(&link.client, page.request(agent));
         let apply = self.apply.clone();
         tokio::spawn(async move {
             let result = reply
@@ -1184,39 +937,14 @@ impl Upstream {
             return;
         };
         session.loading = false;
-        session.fetching = false;
         session.pages += 1;
-        let reload = std::mem::take(&mut session.reload_pending);
-        let follow = match &result {
-            Ok(payload) => {
-                session.error = None;
-                if payload["agent"].is_object() {
-                    session.timeline.sync_snapshot(&payload["agent"]);
-                }
-                session.timeline.apply_page(payload)
-            }
-            Err(error) => {
-                session.error = Some(error.clone());
-                Follow::Nothing
-            }
-        };
+        let landed = session.fetch.land(&mut session.timeline, &result);
+        session.error = landed.error;
         self.dirty_sessions.insert(key.clone());
-        let (host, agent) = key;
-        if reload {
-            self.fetch_tail(&host, &agent);
-        } else {
-            self.follow(&host, &agent, follow);
+        if let Some(page) = landed.next {
+            self.fetch(&key.0, &key.1, page);
         }
     }
-}
-
-fn next_page(payload: &Value) -> Option<String> {
-    let more =
-        payload["pageInfo"]["hasMore"].as_bool().unwrap_or(false) && payload["sync"].is_null();
-    payload["pageInfo"]["nextCursor"]
-        .as_str()
-        .map(str::to_string)
-        .filter(|_| more)
 }
 
 fn log(host: &str, what: &str, err: &str) {
@@ -1241,7 +969,7 @@ mod tests {
         // Connected once: bootstrap work holds this epoch and its handle.
         assert!(up.add_host(host()));
         let old = up.bump_epoch("example-a").unwrap();
-        up.links.get_mut("example-a").unwrap().online = true;
+        up.links.get_mut("example-a").unwrap().sync.connected(old);
         let held = up.links["example-a"].epoch.clone();
         assert!(up.is_current("example-a", old));
         // Removed: that work sees it is stale at once.
@@ -1250,7 +978,7 @@ mod tests {
         // Added again and connected: the old epoch still does not match.
         assert!(up.add_host(host()));
         let new = up.bump_epoch("example-a").unwrap();
-        up.links.get_mut("example-a").unwrap().online = true;
+        up.links.get_mut("example-a").unwrap().sync.connected(new);
         assert!(!up.is_current("example-a", old));
         assert!(up.is_current("example-a", new));
     }
@@ -1277,56 +1005,6 @@ mod tests {
                 Some(("example-a".into(), agent.into(), failed)),
                 "{event}"
             );
-        }
-    }
-
-    #[test]
-    fn the_one_usage_read_is_on_the_list() {
-        // Reports, not the older provider usage or anything that sets up
-        // or changes a usage source.
-        let usage: Vec<&&str> = (READ_REQUESTS.iter())
-            .filter(|kind| kind.contains("usage"))
-            .collect();
-        assert_eq!(usage, [&"usage.list_reports.request"]);
-        let client = Client::connect(Config::new("127.0.0.1:9", "cid_test"));
-        let older = json!({"type": "provider.usage.list.request"});
-        let result = paseo_client::block_on(guarded_until(&client, older, "x"));
-        assert!(result.unwrap_err().contains("not on Reef's list"));
-    }
-
-    #[test]
-    fn the_only_agent_update_is_its_labels_key() {
-        let id = fleet::labels::LabelId::new("lbl_a");
-        assert!(labels_write(&fleet::labels::set_request("a", &[id])));
-        for refused in [
-            json!({"type": "update_agent_request", "agentId": "a", "name": "x",
-                   "labels": {fleet::labels::KEY: "v1:"}}),
-            json!({"type": "update_agent_request", "agentId": "a",
-                   "labels": {fleet::labels::KEY: "v1:", "paseo.parent-agent-id": "b"}}),
-            json!({"type": "update_agent_request", "agentId": "a", "labels": {"other": "x"}}),
-            json!({"type": "update_agent_request", "agentId": "a", "labels": {fleet::labels::KEY: 1}}),
-            json!({"type": "send_agent_message_request", "agentId": "a",
-                   "labels": {fleet::labels::KEY: "v1:"}}),
-        ] {
-            assert!(!labels_write(&refused), "{refused}");
-        }
-    }
-
-    #[test]
-    fn writes_off_the_list_are_refused_before_they_leave() {
-        // A client that never connects: a refused request must fail at
-        // once, without being queued for the socket.
-        let client = Client::connect(Config::new("127.0.0.1:9", "cid_test"));
-        for write in [
-            json!({"type": "workspace.clear_attention.request", "workspaceId": "w"}),
-            json!({"type": "update_agent_request", "agentId": "a", "name": "x"}),
-            json!({"type": "create_terminal_request", "cwd": "/"}),
-            json!({"type": "create_agent_request", "config": {}}),
-            json!({"type": "workspace.label.delete.request", "name": "x"}),
-            json!({"type": "archive_workspace_request", "workspaceId": "w"}),
-        ] {
-            let result = paseo_client::block_on(guarded(&client, write));
-            assert!(result.unwrap_err().contains("not on Reef's list"));
         }
     }
 }

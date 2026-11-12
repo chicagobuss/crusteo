@@ -371,6 +371,30 @@ pub struct ListOut {
 /// The groups an agent falls in, as (key, label, order). An agent with
 /// several labels is in several groups, but for by combination, where it
 /// is in one: its labels together, as crusteo's Lanes combine them.
+/// One group of several label groups together, as "By combination" has it:
+/// `combo:<keys>`, named "a + b", sorted just after its first label's own
+/// group so a label's combinations follow it. One group is itself.
+fn combine(labels: &[(String, String, String)]) -> (String, String, String) {
+    if let [one] = labels {
+        return one.clone();
+    }
+    let mut labels = labels.to_vec();
+    labels.sort_by(|a, b| a.2.cmp(&b.2));
+    let keys: Vec<&str> = labels.iter().map(|(key, ..)| key.as_str()).collect();
+    let names: Vec<&str> = labels.iter().map(|(_, name, _)| name.as_str()).collect();
+    let orders: Vec<&str> = labels.iter().map(|(.., order)| order.as_str()).collect();
+    (
+        format!("combo:{}", keys.join("+")),
+        names.join(" + "),
+        orders.join("\u{1}"),
+    )
+}
+
+/// Whether a group key is one label's (`label:<id>`), which can be raised.
+fn is_label_group(key: &str) -> bool {
+    key.strip_prefix("label:").is_some_and(|id| !id.is_empty())
+}
+
 fn groups_of(
     fleet: &Fleet,
     host: &Host,
@@ -380,21 +404,11 @@ fn groups_of(
     match grouping {
         Grouping::None => Vec::new(),
         Grouping::Combination => {
-            let mut labels = groups_of(fleet, host, agent, Grouping::Label);
-            if labels.len() < 2 {
+            let labels = groups_of(fleet, host, agent, Grouping::Label);
+            if labels.is_empty() {
                 return labels;
             }
-            labels.sort_by(|a, b| a.2.cmp(&b.2));
-            let keys: Vec<&str> = labels.iter().map(|(key, ..)| key.as_str()).collect();
-            let names: Vec<&str> = labels.iter().map(|(_, name, _)| name.as_str()).collect();
-            let orders: Vec<&str> = labels.iter().map(|(.., order)| order.as_str()).collect();
-            // Just after its first label's own group, so a label's
-            // combinations follow it.
-            vec![(
-                format!("combo:{}", keys.join("+")),
-                names.join(" + "),
-                orders.join("\u{1}"),
-            )]
+            vec![combine(&labels)]
         }
         Grouping::State => {
             let bucket = state(agent);
@@ -612,31 +626,36 @@ pub fn map_view(fleet: &Fleet, spec: &ListSpec, focus: &[String], cx: &Context) 
             .then_with(|| a.id.cmp(&b.id))
     });
     struct Lane<'a> {
-        label: String,
-        order: String,
-        band: Option<(String, String)>,
-        group: Option<String>,
+        slot: MapSlot,
         members: Vec<(&'a Host, &'a Agent)>,
     }
-    let bands = if spec.group == Grouping::Label {
-        &spec.bands[..]
-    } else {
-        &[]
+    let bands = match spec.group {
+        Grouping::Label | Grouping::Combination => &spec.bands[..],
+        _ => &[],
     };
     let mut lanes: BTreeMap<String, Lane> = BTreeMap::new();
     for &(host, agent) in &agents {
-        let groups = match spec.group {
-            Grouping::None => vec![("all".to_string(), "All agents".to_string(), String::new())],
-            grouping => groups_of(fleet, host, agent, grouping),
+        let slots = match spec.group {
+            Grouping::None => vec![MapSlot::plain((
+                "all".to_string(),
+                "All agents".to_string(),
+                String::new(),
+            ))],
+            Grouping::Combination => {
+                let labels = groups_of(fleet, host, agent, Grouping::Label);
+                if labels.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![combined(labels, bands)]
+                }
+            }
+            grouping => banded(groups_of(fleet, host, agent, grouping), bands),
         };
-        for slot in banded(groups, bands) {
+        for slot in slots {
             lanes
-                .entry(slot.key)
+                .entry(slot.key.clone())
                 .or_insert_with(|| Lane {
-                    label: slot.label,
-                    order: slot.order,
-                    band: slot.band,
-                    group: slot.group,
+                    slot,
                     members: Vec::new(),
                 })
                 .members
@@ -644,17 +663,26 @@ pub fn map_view(fleet: &Fleet, spec: &ListSpec, focus: &[String], cx: &Context) 
         }
     }
     let mut ordered: Vec<(String, Lane)> = lanes.into_iter().collect();
-    ordered.sort_by(|(ka, a), (kb, b)| a.order.cmp(&b.order).then_with(|| ka.cmp(kb)));
+    ordered.sort_by(|(ka, a), (kb, b)| (a.slot.order.cmp(&b.slot.order)).then_with(|| ka.cmp(kb)));
     let mut out = MapOut::default();
     for (lane, group) in ordered {
+        let slot = &group.slot;
         let mut value = json!({
-            "key": lane, "label": group.label, "total": group.members.len(),
+            "key": lane, "label": slot.label, "total": group.members.len(),
         });
-        if let Some((key, label)) = &group.band {
-            value["band"] = json!({"key": key, "label": label});
+        if let Some(band) = &slot.band {
+            value["band"] = json!({"key": band.key, "label": band.name, "labels": band.labels});
         }
-        if let Some(inner) = &group.group {
+        if let Some(inner) = &slot.group {
             value["group"] = json!(inner);
+        }
+        // The labels a lane's header offers to raise, by label and by
+        // combination alike.
+        if !slot.raisable.is_empty() {
+            let raisable: Vec<Value> = (slot.raisable.iter())
+                .map(|(key, name)| json!({"key": key, "label": name}))
+                .collect();
+            value["labels"] = json!(raisable);
         }
         out.lanes.push(value);
         for (host, agent) in group.members {
@@ -689,57 +717,141 @@ pub fn map_view(fleet: &Fleet, spec: &ListSpec, focus: &[String], cx: &Context) 
 }
 
 /// One lane an agent is in on the map.
+#[derive(Debug, Clone)]
 struct MapSlot {
     key: String,
     label: String,
     order: String,
-    /// The band it sits under: the raised label's group key and name.
-    band: Option<(String, String)>,
-    /// Under a band, the label group it holds (`None` for "just" the band's).
+    /// The band it sits under.
+    band: Option<Band>,
+    /// Under a band, the group it holds (`None` for "just" the band's).
     group: Option<String>,
+    /// The single labels in the group it holds, which its header offers to
+    /// raise: `(label:<id>, name)`.
+    raisable: Vec<(String, String)>,
 }
 
-/// An agent's lanes with `bands` raised, as crusteo's Lanes does it: each
-/// raised label it has is a band, holding a lane for each of its other
-/// labels, or one "just <label>" lane when it has none. Its other labels'
-/// own lanes go: its card is under the band. Band lanes sort with their
-/// band's label, the "just" lane first, so a band's lanes come together.
+/// A band: one raised label, or by combination several raised together.
+#[derive(Debug, Clone, PartialEq)]
+struct Band {
+    key: String,
+    name: String,
+    /// Its labels' group keys, which lowering it lowers.
+    labels: Vec<String>,
+}
+
+impl MapSlot {
+    fn plain((key, label, order): (String, String, String)) -> Self {
+        let raisable = if is_label_group(&key) {
+            vec![(key.clone(), label.clone())]
+        } else {
+            Vec::new()
+        };
+        MapSlot {
+            key,
+            label,
+            order,
+            band: None,
+            group: None,
+            raisable,
+        }
+    }
+}
+
+/// The single labels among `groups`, in their groups' order (by name).
+fn single_labels(groups: &[(String, String, String)]) -> Vec<(String, String)> {
+    let mut labels: Vec<&(String, String, String)> = (groups.iter())
+        .filter(|(key, ..)| is_label_group(key))
+        .collect();
+    labels.sort_by(|a, b| a.2.cmp(&b.2));
+    (labels.into_iter())
+        .map(|(key, name, _)| (key.clone(), name.clone()))
+        .collect()
+}
+
+/// An agent's lanes with `bands` raised, as crusteo's Lanes does it by
+/// label: each raised label it has is a band, holding a lane for each of
+/// its other labels, or one "just <label>" lane when it has none. Its other
+/// labels' own lanes go: its card is under the band. Band lanes sort with
+/// their band's label, the "just" lane first, so a band's lanes come
+/// together.
 fn banded(groups: Vec<(String, String, String)>, bands: &[String]) -> Vec<MapSlot> {
-    let plain = |(key, label, order): (String, String, String)| MapSlot {
-        key,
-        label,
-        order,
-        band: None,
-        group: None,
-    };
     let (raised, rest): (Vec<_>, Vec<_>) = groups
         .into_iter()
         .partition(|(key, ..)| bands.contains(key));
     if raised.is_empty() {
-        return rest.into_iter().map(plain).collect();
+        return rest.into_iter().map(MapSlot::plain).collect();
     }
     let mut slots = Vec::new();
     for (band, name, order) in raised {
+        let band = Band {
+            labels: vec![band.clone()],
+            key: band,
+            name,
+        };
         if rest.is_empty() {
             slots.push(MapSlot {
-                key: format!("band:{band}>"),
-                label: format!("just {name}"),
+                key: format!("band:{}>", band.key),
+                label: format!("just {}", band.name),
                 order: format!("{order}\u{0}"),
-                band: Some((band.clone(), name.clone())),
+                band: Some(band.clone()),
                 group: None,
+                raisable: Vec::new(),
             });
         }
-        for (key, label, inner) in &rest {
+        for group in &rest {
+            let (key, label, inner) = group;
             slots.push(MapSlot {
-                key: format!("band:{band}>{key}"),
+                key: format!("band:{}>{key}", band.key),
                 label: label.clone(),
                 order: format!("{order}\u{0}{inner}"),
-                band: Some((band.clone(), name.clone())),
+                band: Some(band.clone()),
                 group: Some(key.clone()),
+                raisable: single_labels(std::slice::from_ref(group)),
             });
         }
     }
     slots
+}
+
+/// An agent's one lane by combination with `bands` raised, as crusteo's
+/// Lanes does it: the raised labels it has, together, are its band (one
+/// label's, or a combination's), holding one lane of the combination of
+/// its other labels, or "just <band>" when it has none.
+fn combined(labels: Vec<(String, String, String)>, bands: &[String]) -> MapSlot {
+    let (raised, rest): (Vec<_>, Vec<_>) = labels
+        .into_iter()
+        .partition(|(key, ..)| bands.contains(key));
+    if raised.is_empty() {
+        let mut slot = MapSlot::plain(combine(&rest));
+        slot.raisable = single_labels(&rest);
+        return slot;
+    }
+    let (key, name, order) = combine(&raised);
+    let band = Band {
+        key,
+        name,
+        labels: raised.iter().map(|(key, ..)| key.clone()).collect(),
+    };
+    if rest.is_empty() {
+        return MapSlot {
+            key: format!("band:{}>", band.key),
+            label: format!("just {}", band.name),
+            order: format!("{order}\u{0}"),
+            band: Some(band),
+            group: None,
+            raisable: Vec::new(),
+        };
+    }
+    let (inner, label, inner_order) = combine(&rest);
+    MapSlot {
+        key: format!("band:{}>{inner}", band.key),
+        label,
+        order: format!("{order}\u{0}{inner_order}"),
+        band: Some(band),
+        group: Some(inner),
+        raisable: single_labels(&rest),
+    }
 }
 
 /// Paseo's label and identity colours by name, as their foreground on a
@@ -833,7 +945,11 @@ pub fn label_colors(fleet: &Fleet) -> Value {
 
 /// Each host's connection, for the phone's status dots and host filter.
 /// `since` holds when each host entered its current state.
-pub fn hosts(fleet: &Fleet, since: &HashMap<String, String>) -> Value {
+pub fn hosts(
+    fleet: &Fleet,
+    since: &HashMap<String, String>,
+    cli: &fleet::cli_watch::Watch,
+) -> Value {
     let hosts: Vec<Value> = fleet
         .hosts
         .iter()
@@ -877,6 +993,19 @@ pub fn hosts(fleet: &Fleet, since: &HashMap<String, String>) -> Value {
                 && !version.is_empty()
             {
                 entry["version"] = json!(version);
+            }
+            // Each coding-agent CLI the host runs, and whether it is behind
+            // the newest version the fleet has.
+            let providers = cli.rows(host.name());
+            if !providers.is_empty() {
+                entry["providers"] = providers
+                    .iter()
+                    .map(|row| {
+                        json!({ "id": row.provider, "label": row.label, "version": row.version,
+                                "install": row.install_kind, "models": row.models,
+                                "behind": row.behind })
+                    })
+                    .collect();
             }
             entry
         })
@@ -1540,7 +1669,7 @@ mod tests {
             let mut slots = banded(groups, &bands);
             slots.sort_by(|a, b| a.order.cmp(&b.order));
             (slots.into_iter())
-                .map(|s| (s.key, s.label, s.band.map(|(key, _)| key)))
+                .map(|s| (s.key, s.label, s.band.map(|band| band.key)))
                 .collect()
         };
         let both = || vec![group("infra", "Infra"), group("web", "Web")];
@@ -1577,6 +1706,73 @@ mod tests {
             "\u{10FFFF}".to_string(),
         )];
         assert_eq!(lanes(none, &["infra"])[0].0, "label:");
+    }
+
+    /// By combination, as crusteo's Lanes: the raised labels an agent has,
+    /// together, are its band; its other labels, together, its lane there.
+    #[test]
+    fn by_combination_raised_labels_are_one_band_over_the_rest() {
+        let group =
+            |key: &str, name: &str| (format!("label:{key}"), name.to_string(), key.to_string());
+        let raised = |names: &[&str]| -> Vec<String> {
+            names.iter().map(|b| format!("label:{b}")).collect()
+        };
+        let three = || {
+            vec![
+                group("api", "api"),
+                group("billing", "billing"),
+                group("metrics", "metrics"),
+            ]
+        };
+
+        // Nothing raised: the combination, which offers each label to raise.
+        let plain = combined(three(), &[]);
+        assert_eq!(plain.key, "combo:label:api+label:billing+label:metrics");
+        assert_eq!(plain.label, "api + billing + metrics");
+        assert!(plain.band.is_none());
+        let offered: Vec<&str> = plain
+            .raisable
+            .iter()
+            .map(|(_, name)| name.as_str())
+            .collect();
+        assert_eq!(offered, ["api", "billing", "metrics"]);
+
+        // One raised: its band, holding the rest's combination.
+        let one = combined(three(), &raised(&["billing"]));
+        let band = one.band.clone().unwrap();
+        assert_eq!(
+            (band.key.as_str(), band.name.as_str()),
+            ("label:billing", "billing")
+        );
+        assert_eq!(band.labels, ["label:billing"]);
+        assert_eq!(one.key, "band:label:billing>combo:label:api+label:metrics");
+        assert_eq!(one.label, "api + metrics");
+        assert_eq!(one.group.as_deref(), Some("combo:label:api+label:metrics"));
+        assert_eq!(
+            one.raisable.len(),
+            2,
+            "its other labels can still be raised"
+        );
+
+        // Two raised: one combined band, which lowers both.
+        let two = combined(three(), &raised(&["billing", "metrics"]));
+        let band = two.band.clone().unwrap();
+        assert_eq!(band.name, "billing + metrics");
+        assert_eq!(band.labels, ["label:billing", "label:metrics"]);
+        assert_eq!(two.label, "api");
+        assert_eq!(two.raisable, [("label:api".to_string(), "api".to_string())]);
+
+        // All raised: "just" the band.
+        let all = combined(three(), &raised(&["api", "billing", "metrics"]));
+        assert_eq!(all.label, "just api + billing + metrics");
+        assert!(all.group.is_none() && all.raisable.is_empty());
+
+        // An agent without the raised label is untouched.
+        let other = combined(vec![group("api", "api")], &raised(&["billing"]));
+        assert_eq!(
+            (other.key.as_str(), other.band.is_none()),
+            ("label:api", true)
+        );
     }
 
     #[test]

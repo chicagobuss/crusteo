@@ -122,7 +122,7 @@ impl Upstream {
                 self.reply_from_session(&key.0, &key.1);
                 continue;
             }
-            let Some(link) = self.links.get(&key.0).filter(|link| link.online) else {
+            let Some(link) = self.links.get(&key.0).filter(|link| link.sync.online()) else {
                 continue;
             };
             if self.fleet.agent(&host_id(&key.0), &key.1).is_none() {

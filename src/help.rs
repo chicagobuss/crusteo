@@ -8,7 +8,7 @@ use gpui_kit::component::Sizable;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::gpui::{
     AnyElement, App, InteractiveElement, IntoElement, MouseButton, ParentElement,
-    StatefulInteractiveElement, Styled, Window, div, px, rgba,
+    StatefulInteractiveElement, Styled, Window, div, px,
 };
 
 use crate::theme::{palette, size};
@@ -50,6 +50,7 @@ const SECTIONS: &[Section] = &[
             (&["Mod", "B"], "Show or hide the sidebar"),
             (&["Mod", ","], "Settings"),
             (&["Mod", "Shift", "H"], "History: every agent, latest first"),
+            (&["Mod", "G"], "Grep History: names, labels, replies"),
             (&["Mod", "="], "Zoom in"),
             (&["Mod", "-"], "Zoom out"),
             (&["Mod", "0"], "Actual size"),
@@ -223,7 +224,7 @@ pub fn panel(actions: Actions) -> AnyElement {
     div()
         .absolute()
         .inset_0()
-        .bg(rgba(0x00000080))
+        .bg(crate::theme::scrim(0.5))
         .flex()
         .justify_center()
         .items_start()

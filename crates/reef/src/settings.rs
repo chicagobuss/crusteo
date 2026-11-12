@@ -30,6 +30,14 @@ pub struct Settings {
     /// phone's own filter says otherwise.
     #[serde(default = "on")]
     pub show_background: bool,
+    /// Tell phones when a coding-agent CLI upgraded on a host or a model
+    /// appeared (3.10).
+    #[serde(default = "on")]
+    pub notify_updates: bool,
+    /// Agents can message agents on other hosts, through Reef. Off until
+    /// the owner turns it on: many fleets want that kept by hand.
+    #[serde(default)]
+    pub agent_routing: bool,
 }
 
 impl Default for Settings {
@@ -38,6 +46,8 @@ impl Default for Settings {
             notify_default: true,
             notify: BTreeMap::new(),
             show_background: true,
+            notify_updates: true,
+            agent_routing: false,
         }
     }
 }
@@ -57,7 +67,8 @@ impl Settings {
 
     /// What phones are told. Per-agent choices travel on the agent rows.
     pub fn public(&self) -> Value {
-        json!({ "notify_default": self.notify_default, "show_background": self.show_background })
+        json!({ "notify_default": self.notify_default, "show_background": self.show_background,
+                "notify_updates": self.notify_updates, "agent_routing": self.agent_routing })
     }
 
     /// The saved settings, or the defaults when there are none yet.
@@ -103,6 +114,8 @@ mod tests {
         assert!(Settings::default().show_background);
         let old: Settings = serde_json::from_str(r#"{"notify_default": false}"#).unwrap();
         assert!(old.show_background);
+        assert!(old.notify_updates);
+        assert!(!old.agent_routing, "routing between hosts starts off");
         settings.show_background = false;
         settings.save(&path).unwrap();
         assert!(!Settings::load(&path).show_background);

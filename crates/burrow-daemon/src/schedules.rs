@@ -806,11 +806,20 @@ async fn to_agent(
     if busy {
         return failed(format!("Agent {agent_id} already has an active run"), false);
     }
-    if let Err(error) = agents::send_system(daemon, agent_id, &fire_body(schedule, run_id)).await {
-        return failed(error, false);
+    let sent = match agents::send_system(daemon, agent_id, &fire_body(schedule, run_id)).await {
+        Ok(sent) => sent,
+        Err(error) => return failed(error, false),
+    };
+    // A turn that began since the look above: the run waits behind it.
+    let mut turn = sent.turn_id.clone();
+    if matches!(sent.delivery, agents::Delivery::Queued { .. }) {
+        match agents::wait_started(daemon, agent_id, &sent.message_id, None).await {
+            agents::Waited::Started { turn: started } => turn = started,
+            _ => return failed(format!("Agent {agent_id} was stopped first"), false),
+        }
     }
     waited(
-        agents::wait_for_finish(daemon, agent_id, None).await,
+        agents::wait_for_turn(daemon, agent_id, turn.as_deref(), None).await,
         agent_id,
     )
 }

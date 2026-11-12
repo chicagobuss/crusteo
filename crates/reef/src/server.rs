@@ -109,6 +109,7 @@ struct Head {
     host: Option<String>,
     origin: Option<String>,
     content_length: Option<usize>,
+    authorization: Option<String>,
 }
 
 fn parse_head(bytes: &[u8]) -> Option<Head> {
@@ -124,6 +125,7 @@ fn parse_head(bytes: &[u8]) -> Option<Head> {
         host: None,
         origin: None,
         content_length: None,
+        authorization: None,
     };
     for line in lines {
         let Some((name, value)) = line.split_once(':') else {
@@ -135,10 +137,31 @@ fn parse_head(bytes: &[u8]) -> Option<Head> {
             "host" => head.host = Some(value.to_string()),
             "origin" => head.origin = Some(value.to_string()),
             "content-length" => head.content_length = value.parse().ok(),
+            "authorization" => head.authorization = Some(value.to_string()),
             _ => {}
         }
     }
     Some(head)
+}
+
+/// The token in an `Authorization: Bearer <token>` header (the scheme in any
+/// case), without it.
+fn bearer(head: &Head) -> Option<&str> {
+    let value = head.authorization.as_deref()?;
+    let (scheme, token) = value.split_once(' ')?;
+    scheme
+        .eq_ignore_ascii_case("bearer")
+        .then_some(token.trim())
+}
+
+/// Whether a request may use what Reef serves over HTTP: Reef is open, or
+/// the request carries a device token. Its place is the `Authorization`
+/// header, which a log of requests does not keep; `?t=` is still read, for a
+/// desktop from before the header and for an `<img>`, which cannot send one.
+fn allowed(gate: &Gate, head: &Head) -> bool {
+    gate.open
+        || bearer(head).is_some_and(|token| known(&gate.devices, token))
+        || query(&head.path, "t").is_some_and(|token| known(&gate.devices, &token))
 }
 
 /// The name in a Host header, without its port or IPv6 brackets.
@@ -261,12 +284,10 @@ async fn handle(
         }
         ("GET", "/healthz") => respond(&mut stream, "200 OK", "text/plain", "ok").await,
         ("GET" | "POST", "/api/labels") => {
-            let allowed =
-                gate.open || query(&head.path, "t").is_some_and(|t| known(&gate.devices, &t));
             // An edit from a page on another site, which a browser would send
             // with its Origin, is refused.
             let edit = head.method == "POST";
-            if !allowed {
+            if !allowed(&gate, &head) {
                 respond(
                     &mut stream,
                     "401 Unauthorized",
@@ -296,10 +317,42 @@ async fn handle(
                 }
             }
         }
+        ("GET" | "POST", "/api/settings") => {
+            // Reef's own settings, for a desktop in reef mode; an edit from
+            // a page on another site is refused, as for labels.
+            let edit = head.method == "POST";
+            if !allowed(&gate, &head) {
+                respond(
+                    &mut stream,
+                    "401 Unauthorized",
+                    "text/plain",
+                    "Unauthorized",
+                )
+                .await
+            } else if edit && !origin_allowed(&head) {
+                respond(
+                    &mut stream,
+                    "403 Forbidden",
+                    "text/plain",
+                    "Origin not allowed",
+                )
+                .await
+            } else {
+                let body = if edit {
+                    read_body(&mut stream, &buffer[end..], head.content_length, &limits).await
+                } else {
+                    Ok(None)
+                };
+                match body {
+                    Ok(edit) => settings(&mut stream, edit, &reef).await,
+                    Err(problem) => {
+                        respond(&mut stream, "400 Bad Request", "text/plain", problem).await
+                    }
+                }
+            }
+        }
         ("GET", "/api/hosts") => {
-            let allowed =
-                gate.open || query(&head.path, "t").is_some_and(|t| known(&gate.devices, &t));
-            if !allowed {
+            if !allowed(&gate, &head) {
                 respond(
                     &mut stream,
                     "401 Unauthorized",
@@ -312,9 +365,7 @@ async fn handle(
             }
         }
         ("GET", p) if p.starts_with("/image/") => {
-            let allowed =
-                gate.open || query(&head.path, "t").is_some_and(|t| known(&gate.devices, &t));
-            if !allowed {
+            if !allowed(&gate, &head) {
                 respond(
                     &mut stream,
                     "401 Unauthorized",
@@ -417,6 +468,22 @@ async fn labels(
 ) -> std::io::Result<()> {
     let (reply, answer) = tokio::sync::oneshot::channel();
     if reef.send(FromServer::Labels { edit, reply }).is_err() {
+        return respond(stream, "503 Service Unavailable", "text/plain", "Stopping").await;
+    }
+    match answer.await {
+        Ok(answer) => respond(stream, "200 OK", "application/json", &answer.to_string()).await,
+        Err(_) => respond(stream, "503 Service Unavailable", "text/plain", "Stopping").await,
+    }
+}
+
+/// `/api/settings`: Reef's settings, after an edit if one came, as JSON.
+async fn settings(
+    stream: &mut TcpStream,
+    edit: Option<Value>,
+    reef: &mpsc::UnboundedSender<FromServer>,
+) -> std::io::Result<()> {
+    let (reply, answer) = tokio::sync::oneshot::channel();
+    if reef.send(FromServer::Settings { edit, reply }).is_err() {
         return respond(stream, "503 Service Unavailable", "text/plain", "Stopping").await;
     }
     match answer.await {
@@ -721,6 +788,59 @@ mod tests {
             ..head
         };
         assert!(!origin_allowed(&foreign));
+    }
+
+    #[test]
+    fn a_device_token_comes_in_the_bearer_header_or_in_the_query() {
+        let gate = |open| Gate {
+            devices: vec![Device {
+                name: "phone".into(),
+                token: "tok+/=".into(),
+            }],
+            open,
+            host_names: Vec::new(),
+        };
+        let head = |path: &str, authorization: Option<&str>| {
+            let mut text = format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1:6798\r\n");
+            if let Some(value) = authorization {
+                text.push_str(&format!("Authorization: {value}\r\n"));
+            }
+            parse_head(text.as_bytes()).unwrap()
+        };
+        assert_eq!(bearer(&head("/api/hosts", Some("Bearer abc"))), Some("abc"));
+        // The scheme in any case; nothing else is a bearer token.
+        assert_eq!(bearer(&head("/", Some("bearer  abc "))), Some("abc"));
+        assert_eq!(bearer(&head("/", Some("BEARER abc"))), Some("abc"));
+        for not in [Some("Basic abc"), Some("Bearer"), Some("abc"), None] {
+            assert_eq!(bearer(&head("/", not)), None, "{not:?}");
+        }
+
+        let closed = gate(false);
+        assert!(allowed(&closed, &head("/api/hosts", Some("Bearer tok+/="))));
+        // The query still does, percent-encoded as a desktop sends it.
+        assert!(allowed(&closed, &head("/api/hosts?t=tok%2B%2F%3D", None)));
+        assert!(allowed(&closed, &head("/image/ab?t=tok%2B%2F%3D", None)));
+        // Either one right is enough; neither right, or none, is not.
+        assert!(allowed(
+            &closed,
+            &head("/api/hosts?t=wrong", Some("Bearer tok+/="))
+        ));
+        for (path, authorization) in [
+            ("/api/hosts", None),
+            ("/api/hosts", Some("Bearer wrong")),
+            ("/api/hosts", Some("Bearer ")),
+            ("/api/hosts", Some("Basic tok+/=")),
+            ("/api/hosts", Some("tok+/=")),
+            ("/api/hosts?t=wrong", Some("Bearer also-wrong")),
+            ("/api/hosts?t=", None),
+        ] {
+            assert!(
+                !allowed(&closed, &head(path, authorization)),
+                "{path} {authorization:?}"
+            );
+        }
+        // Reef run open asks for none.
+        assert!(allowed(&gate(true), &head("/api/hosts", None)));
     }
 
     #[test]

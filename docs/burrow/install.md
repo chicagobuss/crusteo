@@ -34,7 +34,7 @@ and `examples/`: two systemd user units and a launchd agent (in the source tree 
 `packaging/burrow/`).
 
 ```sh
-version=0.1.0-beta.1
+version=0.2.0
 target=x86_64-unknown-linux-musl
 base=https://github.com/chicagobuss/crusteo/releases/download/v$version
 curl -LO "$base/burrow-$version-$target.tar.gz"
@@ -54,7 +54,7 @@ The examples keep the binary in `~/burrow`; its state goes to `~/.burrow`.
 ```sh
 mkdir -p ~/burrow
 install -m 0755 "burrow-$version-$target/burrow" ~/burrow/
-~/burrow/burrow --version      # burrow 0.1.0-beta.1 (<commit>)
+~/burrow/burrow --version      # burrow 0.2.0 (<commit>)
 ```
 
 Burrow offers each agent it finds: `claude`, `codex`, `pi`, `agy` and `cursor-agent` on PATH,
@@ -75,10 +75,51 @@ once the VPN is up (after a reboot, say), is picked up on its own. On a laptop t
 networks, list loopback and the VPN rather than `0.0.0.0`: Burrow has no password support yet.
 
 Then add the host in crusteo (`127.0.0.1:6797`, or `192.0.2.10:6797` from elsewhere) or in
-Reef's `hosts.json`. It reports its version to clients as `<version>-burrow`. Every flag is in
+Reef's `hosts.json`. It reports its version to clients as `<version>-burrow` (`0.2.0-internal-<commit>-burrow` for
+a build between releases). Every flag is in
 [README.md](README.md#run-it-next-to-paseo); `BURROW_LOG=debug` turns on verbose logs.
 
+## Drive it
+
+The `burrow` binary has the common agent commands, over the same protocol Paseo's CLI uses, so
+they work on a host without Paseo's CLI:
+
+```sh
+burrow ls                            # agents, most recently updated first (-a adds archived)
+burrow inspect <agent>               # model, state, cwd, labels, attention (--json for all of it)
+burrow send <agent> "<prompt>"       # waits for the reply; --no-wait, --timeout, --prompt-file
+burrow rename <agent> "<name>"
+burrow label <agent> team=core
+burrow stop <agent>                  # interrupts its turn
+burrow archive <agent>               # stops it first if it is running
+burrow status                        # version, pid, providers, agent counts, where the log goes
+```
+
+An agent is its id, a unique prefix of it, or its name. They talk to this host's Burrow, found
+through [Paseo's daemon lock](#paseos-daemon-lock), then `--listen`, then the default, or to
+another with `--host <host[:port]>` (port 6767 when left out) or `PASEO_HOST`, which the agents
+Burrow starts have. `burrow send` exits 2 when the agent waits on a permission and 3 when
+`--timeout` passes first. `burrow status` connects as a client does, so when the port answers but
+Burrow drops the session it says so and exits 1.
+
+Sent to an agent mid-turn, a prompt joins the turn where the agent's provider can take a message
+mid-turn (Claude Code, Codex, Pi), and otherwise waits behind the turn and starts when it ends
+(Cursor, OpenCode, Gemini, Antigravity); `burrow send` says which and waits for the reply to its
+own prompt. `--queue` waits behind the turn even where it could join it, `--interrupt` cuts the
+turn off, and `--steer` is Paseo's steer, which interrupts where it cannot join. Agents sending
+through the `send_agent_prompt` tool get the same: their receipt says whether the prompt started a
+turn, joined one or is queued (and its place in line), and the finish notice is about their own
+prompt's turn. A queue holds up to 20 prompts, in memory; stopping or archiving the agent drops
+them.
+
+Paseo's CLI does everything else (new agents, permissions, terminals, schedules) against Burrow as
+against Paseo: plain `paseo` on Paseo's port, otherwise `paseo --host 127.0.0.1:6797`.
+
 ## Run it as a service
+
+Run Burrow under a service manager, not from a terminal: it logs to standard output, and a
+terminal that closes takes the log with it. (Burrow keeps serving when that happens; up to
+0.1.0-beta.6, every connection then failed on its first log line.)
 
 ### Linux (systemd user unit)
 
@@ -260,9 +301,10 @@ tail -f ~/burrow/upgrade.log
 It hands the work to a one-off launchd job in your login session and returns. The job waits until
 no agent is mid-turn (up to 30 minutes), stops Burrow, keeps the old binary as `burrow.prev`,
 installs and signs the new one, starts Burrow and checks it listens, or puts `burrow.prev` back if
-it does not. It signs from the login session because `codesign` over SSH usually cannot open the
-keychain. `BURROW_SIGN_IDENTITY` overrides the file, and `BURROW_DIR` and `BURROW_HOME` the
-binary's and the state folder.
+it does not within 90 seconds (`BURROW_LISTEN_WAIT_SECONDS`; the log says how long it took). It
+signs from the login session because `codesign` over SSH usually cannot open the keychain.
+`BURROW_SIGN_IDENTITY` overrides the file, and `BURROW_DIR` and `BURROW_HOME` the binary's and the
+state folder.
 
 ## Roll back
 

@@ -209,7 +209,7 @@ impl<L: Launcher> Session<L> {
                 output = output => match output {
                     Some(Output::Message(message)) => self.on_message(message),
                     Some(Output::Garbage(_)) => {}
-                    Some(Output::Exited { status, stderr }) => self.on_exit(status, stderr),
+                    Some(Output::Exited { code, stderr, .. }) => self.on_exit(code, stderr),
                     None => self.on_exit(None, String::new()),
                 },
                 command = commands.recv() => match command {

@@ -41,6 +41,7 @@ gpui_kit::actions!(
         NewWorkspace,
         OpenSettings,
         ShowHistory,
+        GrepHistory,
         CycleLayout,
         FocusComposer,
         Jump1,
@@ -80,6 +81,8 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("secondary-n", NewWorkspace, app),
         KeyBinding::new("secondary-,", OpenSettings, app),
         KeyBinding::new("secondary-shift-h", ShowHistory, app),
+        // Grep in History (find and filter are taken elsewhere).
+        KeyBinding::new("secondary-g", GrepHistory, app),
         KeyBinding::new("secondary-shift-l", CycleLayout, None),
         KeyBinding::new("secondary-shift-t", NewTerminal, None),
         KeyBinding::new("secondary-l", FocusComposer, app),
@@ -148,6 +151,8 @@ pub struct Shell {
     history_resizing: bool,
     /// Settings, made the first time it slides in.
     settings: Option<Entity<crate::layouts::paseo::SettingsPane>>,
+    /// Hosts, made the first time it slides in.
+    hosts: Option<Entity<crate::layouts::paseo::HostsPane>>,
     focus: FocusHandle,
     /// The zoom just set, shown briefly; the counter lets a newer change
     /// keep it up.
@@ -235,6 +240,14 @@ impl Shell {
     fn new(core: Core, window: &mut Window, cx: &mut Context<Self>) -> Self {
         core.set_main_window(window.window_handle());
         window.set_zoom(core.nav.read(cx).zoom, cx);
+        // The system's theme, read from the window now that there is one,
+        // and again whenever the system switches.
+        crate::theme::show(core.nav.read(cx).appearance, Some(window), cx);
+        cx.observe_window_appearance(window, |this: &mut Self, window, cx| {
+            let appearance = this.core.nav.read(cx).appearance;
+            crate::theme::show(appearance, Some(window), cx);
+        })
+        .detach();
         {
             let nav = core.nav.read(cx);
             crate::app::notifications::apply_layout(nav.notification_layout, nav.notification_keep);
@@ -314,6 +327,7 @@ impl Shell {
                 .workspace_actions
                 .extend(parts.workspace_actions);
             contributed.needs.extend(parts.needs);
+            contributed.settings.extend(parts.settings);
             usage_sources.extend(parts.usage);
         }
         core.usage
@@ -335,7 +349,8 @@ impl Shell {
         });
         cx.observe(&core.toolbars, |_, _, cx| cx.notify()).detach();
         let state_list = cx.new(|cx| crate::state_list::StateList::new(core.clone(), cx));
-        let history_dock = cx.new(|cx| crate::state_list::StateList::docked(core.clone(), cx));
+        let history_dock =
+            cx.new(|cx| crate::state_list::StateList::docked(core.clone(), window, cx));
         Self {
             core,
             layouts: crate::layouts::registry(),
@@ -348,6 +363,7 @@ impl Shell {
             history_dock,
             history_resizing: false,
             settings: None,
+            hosts: None,
             focus: cx.focus_handle(),
             zoom_badge: None,
             customizing: false,
@@ -579,7 +595,7 @@ impl Shell {
                 "Archived agents (Paseo history)",
                 PaletteAction::Screen(Screen::History),
             ),
-            ("Hosts", PaletteAction::Screen(Screen::Hosts)),
+            ("Hosts", PaletteAction::Pane(Pane::Hosts)),
             ("Settings", PaletteAction::Pane(Pane::Settings)),
             ("Toggle sidebar", PaletteAction::ToggleSidebar),
             ("About Crusteo", PaletteAction::About),
@@ -866,7 +882,7 @@ impl Shell {
         div()
             .absolute()
             .inset_0()
-            .bg(gpui_kit::gpui::rgba(0x00000080))
+            .bg(crate::theme::scrim(0.5))
             .flex()
             .justify_center()
             .pt(px(48.))
@@ -987,10 +1003,16 @@ impl Shell {
             ));
         }
         let (left, right) = self.bar_slots(bar, layout, cx)?;
-        Some(toolbars::bar_contents(left, right, occlude, window, cx))
+        // An item's right-click opens the bar's menu itself: in the title
+        // bar the item occludes the bar, which would not hear it.
+        let menu: toolbars::BarMenu = Rc::new(self.bar_menu_listener(bar, cx));
+        Some(toolbars::bar_contents(
+            left, right, occlude, menu, window, cx,
+        ))
     }
 
-    /// Right-click on a bar offers to customize the bars.
+    /// Right-click on a bar offers to customize the bars, after what the
+    /// item under the pointer offers ([`toolbars::ToolbarItem::menu`]).
     fn bar_menu_listener(
         &self,
         bar: &str,
@@ -998,7 +1020,10 @@ impl Shell {
     ) -> impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static {
         let bar = bar.to_string();
         cx.listener(move |this, event: &MouseDownEvent, window, cx| {
-            this.open_bar_menu(bar.clone(), event.position, window, cx);
+            let entries = toolbars::take_clicked(event.position, cx)
+                .map(|item| item.menu())
+                .unwrap_or_default();
+            this.open_bar_menu(bar.clone(), entries, event.position, window, cx);
             cx.stop_propagation();
         })
     }
@@ -1006,6 +1031,7 @@ impl Shell {
     fn open_bar_menu(
         &mut self,
         bar: String,
+        entries: Vec<toolbars::MenuEntry>,
         position: Point<Pixels>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -1013,7 +1039,18 @@ impl Shell {
         let shell = cx.entity().downgrade();
         let nav = self.core.nav.clone();
         let customizing = self.customizing;
-        let menu = PopupMenu::build(window, cx, move |menu, _, _| {
+        let menu = PopupMenu::build(window, cx, move |mut menu, _, _| {
+            for entry in &entries {
+                let run = entry.run.clone();
+                menu = menu.item(PopupMenuItem::new(entry.label.clone()).on_click(
+                    move |_, window, cx| {
+                        run(window, cx);
+                    },
+                ));
+            }
+            if !entries.is_empty() {
+                menu = menu.separator();
+            }
             let customize = {
                 let shell = shell.clone();
                 PopupMenuItem::new(if customizing {
@@ -1128,7 +1165,7 @@ impl Shell {
                 .id("customize-dim")
                 .absolute()
                 .inset_0()
-                .bg(gpui_kit::gpui::rgba(0x00000099))
+                .bg(crate::theme::scrim(0.6))
                 .flex()
                 .justify_center()
                 .items_start()
@@ -1272,6 +1309,17 @@ impl Shell {
                     "settings",
                     crate::layouts::paseo::SETTINGS_WIDTH,
                     settings.clone().cached_fill(),
+                )
+            }
+            Pane::Hosts => {
+                let core = self.core.clone();
+                let hosts = self.hosts.get_or_insert_with(|| {
+                    cx.new(|cx| crate::layouts::paseo::HostsPane::new(core, window, cx))
+                });
+                (
+                    "hosts",
+                    crate::layouts::paseo::HOSTS_WIDTH,
+                    hosts.clone().cached_fill(),
                 )
             }
         };
@@ -1649,6 +1697,15 @@ impl Render for Shell {
             }))
             .on_action(cx.listener(|this, _: &ShowHistory, _, cx| {
                 (this.core.nav).update(cx, |nav, cx| nav.toggle_history_dock(cx));
+            }))
+            // Docks History if it is not, and puts the cursor in its Grep box.
+            .on_action(cx.listener(|this, _: &GrepHistory, window, cx| {
+                (this.core.nav).update(cx, |nav, cx| {
+                    if !nav.history_docked {
+                        nav.toggle_history_dock(cx);
+                    }
+                });
+                (this.history_dock).update(cx, |list, cx| list.focus_grep(window, cx));
             }))
             .on_action(
                 cx.listener(|this, action: &crate::extensions::RunCommand, window, cx| {

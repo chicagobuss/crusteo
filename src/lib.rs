@@ -68,7 +68,7 @@ pub fn run_with(extensions: Vec<Box<dyn extensions::Extension>>) {
             let report = format!(
                 "{} crusteo {} panicked: {info}\n{}\n\n",
                 app::store::iso_from_millis(app::store::now_millis()),
-                env!("CARGO_PKG_VERSION"),
+                env!("CRUSTEO_VERSION"),
                 std::backtrace::Backtrace::force_capture()
             );
             let _ = std::fs::create_dir_all(app::config::data_dir());
@@ -99,8 +99,8 @@ pub fn run_with(extensions: Vec<Box<dyn extensions::Extension>>) {
             // identity, registered before any window opens.
             cx.set_app_identity("dev.crusteo.Crusteo", "Crusteo");
             gpui_kit::init(cx);
-            gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, cx);
-            theme::apply(cx);
+            let appearance = theme::Appearance::parse(&app::config::load_ui().appearance);
+            theme::show(appearance, None, cx);
             shell::bind_keys(cx);
             popout::bind_keys(cx);
             app_menu::install(cx);

@@ -142,7 +142,8 @@ async fn play(fixture: &str, resume: Option<&str>, settings: Settings) -> Played
             current
                 .pi
                 .send(Output::Exited {
-                    status: exit["status"].as_i64().map(|s| s as i32),
+                    code: exit["status"].as_i64().map(|s| s as i32),
+                    signal: None,
                     stderr: exit["stderr"].as_str().unwrap_or_default().into(),
                 })
                 .unwrap();

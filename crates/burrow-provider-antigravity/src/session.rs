@@ -77,6 +77,8 @@ struct Turn {
     tools: BTreeMap<u64, Value>,
     usage_steps: HashSet<u64>,
     usage: Option<[u64; 3]>,
+    /// The turn's reply has come: text, with no tool call after it.
+    answered: bool,
 }
 
 pub struct Session<L: Launcher> {
@@ -174,7 +176,7 @@ impl<L: Launcher> Session<L> {
                 output = output => match output {
                     Some(Output::Message(frame)) => self.on_frame(frame),
                     Some(Output::Garbage(_)) => {}
-                    Some(Output::Exited { status, stderr }) => self.on_exit(status, &stderr),
+                    Some(Output::Exited { code, stderr, .. }) => self.on_exit(code, &stderr),
                     None => self.on_exit(None, ""),
                 },
                 _ = sleep_until(deadline), if deadline.is_some() => {
@@ -292,6 +294,7 @@ impl<L: Launcher> Session<L> {
                     tools: BTreeMap::new(),
                     usage_steps: HashSet::new(),
                     usage: None,
+                    answered: false,
                 });
                 self.advance();
             }
@@ -382,11 +385,13 @@ impl<L: Launcher> Session<L> {
                     total[2] += count("cache_read_tokens");
                 }
                 if let Some(delta) = step["text_delta"].as_str().filter(|d| !d.is_empty()) {
+                    turn.answered = true;
                     let item = json!({"type": "assistant_message", "text": delta, "messageId": id});
                     self.item(item);
                 }
             }
             Some("tool" | "subagent") => {
+                turn.answered = false;
                 let item = tool_item(step, &id);
                 turn.tools.insert(index, item.clone());
                 self.item(item);
@@ -415,6 +420,31 @@ impl<L: Launcher> Session<L> {
                 .as_str()
                 .unwrap_or("Antigravity turn failed");
             let canceled = error == "interrupted";
+            // agy can end a turn whose reply has already come with an
+            // ERROR, and an old one: a 5 minute stream timeout reported
+            // after an 80 second turn whose own transcript ends DONE. The
+            // reply stands; the error is a note beside it.
+            if !canceled && self.turn.as_ref().is_some_and(|t| t.answered) {
+                warn!(
+                    error,
+                    "agy reported an error after the turn's reply; the turn stands"
+                );
+                self.item(notification(
+                    "Antigravity reported an error after its reply",
+                    &diagnostic(error),
+                ));
+                self.finish_tools("completed");
+                self.stop(Stop::Interrupt);
+                let Some(turn) = self.turn.take() else { return };
+                let usage = turn.usage.map(|[input, output, cached]| {
+                    json!({"inputTokens": input, "outputTokens": output, "cachedInputTokens": cached})
+                });
+                self.emit(ProviderEvent::TurnCompleted {
+                    turn: Some(turn.id),
+                    usage,
+                });
+                return;
+            }
             self.finish_tools(if canceled { "canceled" } else { "failed" });
             // The CLI exits after an error; retire it before it does.
             self.stop(Stop::Interrupt);

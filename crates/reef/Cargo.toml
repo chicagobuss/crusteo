@@ -26,8 +26,12 @@ futures-util = { version = "0.3", default-features = false, features = ["sink", 
 getrandom = "0.3"
 # Images are kept as the daemon sends them, base64; served as bytes.
 base64.workspace = true
+# The `http` recording sink posts batches to a service, over HTTPS too.
+ureq.workspace = true
 
 [dev-dependencies]
 # A real burrow in-process, for the actions end to end.
 burrow-daemon.workspace = true
 burrow-provider.workspace = true
+# The time `burrow ls` measures ages against, in the fleet test.
+time.workspace = true

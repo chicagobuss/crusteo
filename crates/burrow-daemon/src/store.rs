@@ -356,6 +356,30 @@ impl Default for Store {
     }
 }
 
+/// Agents saved before Burrow kept a last-reply preview get one from their
+/// saved timeline, once, at startup: read from disk and not kept in memory,
+/// before any client is connected, and with `updatedAt` left alone. An agent
+/// with no reply gets an empty preview, so it is not read again.
+fn fill_reply_previews(persist: &Persist, loaded: &mut Loaded) {
+    for record in &mut loaded.agents {
+        let agent = &record.snapshot;
+        if agent.last_reply_preview.is_some() || agent.archived_at.is_some() {
+            continue;
+        }
+        let rows = match persist.load_timeline(&agent.id) {
+            Ok(Some((_, rows))) => rows,
+            Ok(None) => Vec::new(),
+            Err(err) => {
+                tracing::warn!(agent_id = agent.id, %err, "unreadable timeline; no reply preview");
+                continue;
+            }
+        };
+        let text = crate::agents::reply_text(&rows);
+        record.snapshot.last_reply_preview = Some(crate::agents::preview(&text));
+        persist.agent(record.clone());
+    }
+}
+
 impl Store {
     pub fn new() -> Self {
         Self {
@@ -377,7 +401,8 @@ impl Store {
     ///
     /// Agents come back `closed` (resumable, nothing running) until they are
     /// used again; the agent manager starts their provider lazily.
-    pub fn open(persist: Persist, loaded: Loaded) -> Self {
+    pub fn open(persist: Persist, mut loaded: Loaded) -> Self {
+        fill_reply_previews(&persist, &mut loaded);
         let mut store = Self::restore(loaded);
         store.persist = Some(persist);
         store
@@ -508,6 +533,14 @@ impl Store {
             .as_deref()
             .and_then(|id| self.workspaces.get(id))
             .is_some_and(|workspace| workspace.background)
+    }
+
+    /// The label names of the agent's workspace; none when it has none.
+    pub fn workspace_labels(&self, agent: &AgentSnapshot) -> Vec<String> {
+        (agent.workspace_id.as_deref())
+            .and_then(|id| self.workspaces.get(id))
+            .map(|workspace| workspace.labels.clone())
+            .unwrap_or_default()
     }
 
     pub fn workspace_descriptor(&self, workspace: &WorkspaceRecord) -> WorkspaceDescriptor {

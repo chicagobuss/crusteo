@@ -69,12 +69,36 @@ pub mod feature {
     /// `push.unregister.request`: Paseo's app drops its push token from a
     /// host when notifications are turned off, on a host that says so.
     pub const PUSH_TOKEN_REVOCATION: &str = "pushTokenRevocation";
+    /// `project.suggestions.request`: Paseo 0.15's first-run setup suggests
+    /// the folders agents already ran in, from a host that says so.
+    pub const PROJECT_SUGGESTIONS: &str = "projectSuggestions";
+    /// `fetch_recent_provider_sessions_request` and `import_agent_request`
+    /// take a workspace: Paseo's import sheet, opened from a workspace, lists
+    /// the sessions that ran in its folder and imports them into it. From a
+    /// host without the flag it says to update the host.
+    pub const IMPORT_SESSION_WORKSPACE_TARGET: &str = "importSessionWorkspaceTarget";
+    /// `fetch_recent_provider_sessions_request` takes a `query`: the import
+    /// sheet shows its search box only for a host that says so.
+    pub const IMPORT_SESSION_SEARCH: &str = "importSessionSearch";
+    /// Burrow's own: it takes a Reef as its router to the rest of the fleet
+    /// (`burrow.fleet.*` messages), so its agents can message agents on
+    /// other hosts when that Reef allows it. Paseo's apps ignore it.
+    pub const FLEET_ROUTING: &str = "burrowFleetRouting";
     // P1
     pub const PROVIDERS_SNAPSHOT: &str = "providersSnapshot";
     pub const CREATION_LIFECYCLE: &str = "creationLifecycle";
     pub const AGENT_THINKING_UPDATE: &str = "agentThinkingUpdate";
     pub const CANONICAL_SUBMITTED_PROMPTS: &str = "canonicalSubmittedPrompts";
+    /// Workspace terminals: Paseo's app shows a workspace's terminals and
+    /// makes new ones with its `workspaceId`.
     pub const WORKSPACE_TERMINALS: &str = "workspaceTerminals";
+    /// `subscribe_terminal_request` takes `restore` (live, the visible
+    /// screen with some history, or all of it). crusteo sends it only to a
+    /// host that says so.
+    pub const TERMINAL_RESTORE_MODES: &str = "terminal-restore-modes";
+    /// A resize says whether it claims the terminal's size or only updates
+    /// it from the client that holds it.
+    pub const TERMINAL_SIZE_OWNERSHIP: &str = "terminal-size-ownership";
 }
 
 /// The P0 feature set, Paseo 0.12's background workspaces, adding and
@@ -104,6 +128,13 @@ pub const P0_FEATURES: &[&str] = &[
     // without the flag.
     feature::AGENT_THINKING_UPDATE,
     feature::PUSH_TOKEN_REVOCATION,
+    feature::PROJECT_SUGGESTIONS,
+    feature::IMPORT_SESSION_WORKSPACE_TARGET,
+    feature::IMPORT_SESSION_SEARCH,
+    feature::WORKSPACE_TERMINALS,
+    feature::TERMINAL_RESTORE_MODES,
+    feature::TERMINAL_SIZE_OWNERSHIP,
+    feature::FLEET_ROUTING,
 ];
 
 /// `ServerInfoStatusPayloadSchema`.
@@ -164,6 +195,8 @@ mod tests {
         assert_eq!(payload["features"]["daemonStatusRpc"], true);
         assert_eq!(payload["features"]["agentThinkingUpdate"], true);
         assert_eq!(payload["features"]["pushTokenRevocation"], true);
+        assert_eq!(payload["features"]["importSessionWorkspaceTarget"], true);
+        assert_eq!(payload["features"]["importSessionSearch"], true);
         assert_eq!(payload["permissions"].as_array().unwrap().len(), 9);
     }
 }

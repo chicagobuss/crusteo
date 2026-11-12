@@ -216,6 +216,13 @@ fn parse(text: &str) -> Option<LockInfo> {
         .filter(|lock: &LockInfo| lock.pid > 0)
 }
 
+/// The address the daemon holding `home`'s lock listens on, when a running
+/// one holds it: how `burrow status`, like Paseo's CLI, finds the daemon.
+pub fn running_listen(home: &Path) -> Option<String> {
+    let lock = parse(&read(&home.join(FILE)).ok()??)?;
+    owner_running(&lock).then_some(lock.listen).flatten()
+}
+
 /// `isPidLockOwnerRunning`: written during this boot, and its pid runs.
 pub fn owner_running(lock: &LockInfo) -> bool {
     written_this_boot(lock) && pid_running(lock.pid)

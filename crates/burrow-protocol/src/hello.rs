@@ -68,9 +68,24 @@ impl Hello {
 pub mod capability {
     pub const HELLO_REJECTION: &str = "hello_rejection";
     pub const OWNED_SUBSCRIPTIONS: &str = "owned_subscriptions";
+    pub const ALL_PROVIDERS: &str = "all_providers";
     pub const EXPLICIT_EVENT_SUBSCRIPTIONS: &str = "explicit_event_subscriptions";
     pub const SELECTIVE_AGENT_TIMELINE: &str = "selective_agent_timeline";
+    pub const REASONING_MERGE_ENUM: &str = "reasoning_merge_enum";
+    pub const CUSTOM_MODE_ICONS: &str = "custom_mode_icons";
+    pub const TERMINAL_REFLOWABLE_SNAPSHOT: &str = "terminal_reflowable_snapshot";
+    /// A restore comes as ReplayBegin, ReplayData chunks and ReplayEnd
+    /// frames rather than one Restore frame (Paseo's app).
+    pub const TERMINAL_CHUNKED_REPLAY: &str = "terminal_chunked_replay";
+    pub const PROVIDER_SUBAGENTS: &str = "provider_subagents";
+    pub const PROJECTED_SUBAGENT_TIMELINE: &str = "projected_subagent_timeline";
+    pub const PROJECT_UPDATES: &str = "project_updates";
     pub const COMPACT_PROVIDER_SNAPSHOTS: &str = "compact_provider_snapshots";
+    pub const PROVIDER_SNAPSHOT_REFERENCES: &str = "provider_snapshot_references";
+    pub const TIMELINE_REPLACEMENT_INVALIDATION: &str = "timeline_replacement_invalidation";
+    pub const TIMELINE_NOTIFICATIONS: &str = "timeline_notifications";
+    pub const PLUGIN_TIMELINE_ITEMS: &str = "plugin_timeline_items";
+    pub const WORKSPACE_SETUP_BLOCKED: &str = "workspace_setup_blocked";
 }
 
 #[cfg(test)]

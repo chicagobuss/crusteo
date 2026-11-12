@@ -127,6 +127,9 @@ pub struct Subscriptions {
     compact_provider_snapshots: bool,
     /// This socket, among every connection the daemon has had.
     connection: u64,
+    /// The socket's outbound queue, for what sends its own frames
+    /// (terminal streams). None outside a real connection.
+    pub frames: Option<crate::connection::Frames>,
 }
 
 impl Subscriptions {

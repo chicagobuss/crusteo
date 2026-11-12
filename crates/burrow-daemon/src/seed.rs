@@ -55,6 +55,8 @@ pub fn agent(id: &str, cwd: &str, workspace_id: Option<&str>, title: &str) -> Ag
         attention_reason: None,
         attention_timestamp: None,
         archived_at: None,
+        last_reply_preview: None,
+        cli: None,
     }
 }
 

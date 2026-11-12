@@ -9,13 +9,12 @@
 
 pub mod catalog;
 pub mod history;
+pub mod probe;
 pub mod process;
 pub mod session;
 pub mod tools;
 
-use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
 
 use burrow_provider::{
     Capabilities, Provider, ProviderError, ProviderInfo, Session as ProviderSession, SessionSpec,
@@ -23,7 +22,6 @@ use burrow_provider::{
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
-use crate::process::{JsonProcess, Output};
 use crate::session::{Launcher, Session, Settings, Transport};
 
 /// Claude Code, found and version-checked.
@@ -31,12 +29,18 @@ use crate::session::{Launcher, Session, Settings, Transport};
 pub struct ClaudeProvider {
     binary: PathBuf,
     version: Option<Vec<u32>>,
+    /// What the CLI itself said it offers; `None` when it did not (an old
+    /// CLI, or the probe failed), and the fixed manifest stands in.
+    models: Option<Vec<burrow_provider::Model>>,
+    cli: burrow_provider::CliInfo,
     trace_dir: Option<PathBuf>,
+    /// What the transcripts last said, for the session listings.
+    described: std::sync::Arc<history::Described>,
 }
 
 impl ClaudeProvider {
-    /// Finds `claude` (or `binary`) and reads its version. `None` when it
-    /// cannot be run.
+    /// Finds `claude` (or `binary`), reads its version and asks it for its
+    /// models. `None` when it cannot be run.
     pub fn detect(binary: Option<&Path>) -> Option<Self> {
         let binary = binary.map_or_else(|| PathBuf::from("claude"), Path::to_path_buf);
         let output = std::process::Command::new(&binary)
@@ -49,30 +53,51 @@ impl ClaudeProvider {
             .contains("(Claude Code)")
             .then(|| catalog::parse_version(text.trim()))
             .flatten();
+        let models = match probe::models(&binary) {
+            Ok(models) => Some(models),
+            Err(err) => {
+                tracing::warn!(%err, "could not read Claude's models; offering the built-in list");
+                None
+            }
+        };
+        let cli = burrow_provider::CliInfo::of(&binary, version_text(&version));
         Some(Self {
             binary,
             version,
+            cli,
+            models,
             trace_dir: burrow_provider::env::var_os("BURROW_CLAUDE_TRACE").map(PathBuf::from),
+            described: std::sync::Arc::default(),
         })
     }
 
     pub fn version(&self) -> Option<String> {
-        self.version
-            .as_ref()
-            .map(|v| v.iter().map(u32::to_string).collect::<Vec<_>>().join("."))
+        version_text(&self.version)
     }
+}
+
+fn version_text(version: &Option<Vec<u32>>) -> Option<String> {
+    (version.as_ref()).map(|v| v.iter().map(u32::to_string).collect::<Vec<_>>().join("."))
 }
 
 /// What the provider offers for a CLI of `version` (`None`: unknown). Also
 /// what an agent imported without a CLI at hand is described with.
 pub fn info(version: Option<&[u32]>) -> ProviderInfo {
+    info_with(version, None)
+}
+
+/// [`info`] with the models the CLI reported, when it did.
+pub fn info_with(
+    version: Option<&[u32]>,
+    models: Option<&[burrow_provider::Model]>,
+) -> ProviderInfo {
     ProviderInfo {
         id: "claude".into(),
         label: "Claude".into(),
         description: Some("Anthropic's Claude Code".into()),
         modes: catalog::modes(),
         default_mode_id: Some(catalog::DEFAULT_MODE.into()),
-        models: catalog::models(version),
+        models: models.map_or_else(|| catalog::models(version), <[_]>::to_vec),
         capabilities: Capabilities {
             streaming: true,
             session_persistence: true,
@@ -88,7 +113,11 @@ pub fn info(version: Option<&[u32]>) -> ProviderInfo {
 
 impl Provider for ClaudeProvider {
     fn info(&self) -> ProviderInfo {
-        info(self.version.as_deref())
+        info_with(self.version.as_deref(), self.models.as_deref())
+    }
+
+    fn cli(&self) -> Option<burrow_provider::CliInfo> {
+        Some(self.cli.clone())
     }
 
     fn start(&self, spec: SessionSpec) -> Result<ProviderSession, ProviderError> {
@@ -121,6 +150,26 @@ impl Provider for ClaudeProvider {
 
     fn history(&self, cwd: &str, session_id: &str) -> Vec<burrow_provider::HistoryItem> {
         history::read(&history::config_dir(), cwd, session_id)
+    }
+
+    fn recent_sessions(&self, limit: usize) -> Result<Vec<burrow_provider::RecentSession>, String> {
+        history::recent(&history::config_dir(), None, limit, &self.described)
+    }
+
+    fn imports_sessions(&self) -> bool {
+        true
+    }
+
+    fn importable_sessions(
+        &self,
+        cwd: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<burrow_provider::RecentSession>, String> {
+        history::recent(&history::config_dir(), cwd, limit, &self.described)
+    }
+
+    fn session_title(&self, cwd: &str, session_id: &str) -> Option<String> {
+        history::renamed(&history::config_dir(), cwd, session_id)
     }
 }
 
@@ -247,74 +296,11 @@ impl CliLauncher {
 
 impl Launcher for CliLauncher {
     fn launch(&mut self, resume: Option<&str>, settings: &Settings) -> std::io::Result<Transport> {
-        let process = JsonProcess::spawn(self.command(resume, settings))?;
-        Ok(own(process, self.trace.as_deref()))
-    }
-}
-
-/// Owns the process for as long as the session holds its channels, writing
-/// every frame to `trace` when there is one. When the session lets go, the
-/// CLI's process tree is ended while the CLI still runs, before its stdin
-/// closes: a CLI that exits first leaves its tools to init
-/// ([`burrow_provider::group`]).
-fn own(process: JsonProcess, trace: Option<&Path>) -> Transport {
-    let file = trace
-        .and_then(|path| std::fs::File::create(path).ok())
-        .map(|f| Arc::new(Mutex::new(f)));
-    let record = move |file: &Option<Arc<Mutex<std::fs::File>>>, dir: &str, frame: &Value| {
-        if let Some(file) = file
-            && let Ok(mut file) = file.lock()
-        {
-            let _ = writeln!(file, "{}", json!({"dir": dir, "frame": frame}));
-        }
-    };
-    let process::Parts {
-        input: process_input,
-        mut output,
-        mut child,
-    } = process.into_parts();
-    let (input_tx, mut input_rx) = mpsc::unbounded_channel::<Value>();
-    let (output_tx, output_rx) = mpsc::unbounded_channel();
-    tokio::spawn(async move {
-        let mut input_open = true;
-        loop {
-            tokio::select! {
-                frame = input_rx.recv(), if input_open => match frame {
-                    Some(frame) => {
-                        record(&file, "in", &frame);
-                        let _ = process_input.send(frame);
-                    }
-                    None => {
-                        input_open = false;
-                        child.end();
-                    }
-                },
-                message = output.recv() => {
-                    let Some(message) = message else { break };
-                    if let Output::Message(frame) = &message {
-                        record(&file, "out", frame);
-                    }
-                    let done = matches!(message, Output::Exited { .. });
-                    if output_tx.send(message).is_err() {
-                        child.end();
-                        break;
-                    }
-                    if done {
-                        break;
-                    }
-                }
-                _ = output_tx.closed() => {
-                    child.end();
-                    break;
-                }
-            }
-        }
-        // Its stdin closes only now, after the tree was ended.
-        drop(process_input);
-    });
-    Transport {
-        input: input_tx,
-        output: output_rx,
+        let process = process::spawn(self.command(resume, settings), self.trace.as_deref())?;
+        Ok(Transport {
+            input: process.input,
+            output: process.output,
+        })
     }
 }
 
@@ -351,6 +337,90 @@ mod tests {
         assert_eq!(get("CLAUDE_CODE_SSE_PORT"), Some(None));
         assert_eq!(get("ANTHROPIC_MODEL"), Some(Some("opus".into())));
         assert_eq!(get("PASEO_HOME"), Some(None), "what the daemon unsets goes");
+    }
+
+    /// A `claude` that answers `--version` and, in print mode, an
+    /// `initialize` request with `reply`; it records its arguments. Once its
+    /// input closes it takes a second to exit, as a CLI saving a renewed
+    /// sign-in would, and leaves `exited` beside itself when it does.
+    #[cfg(unix)]
+    fn fake_claude(name: &str, version: &str, reply: Option<&str>) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let dir =
+            std::env::temp_dir().join(format!("burrow-fake-claude-{name}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let fixture = dir.join("reply.json");
+        let answer = match reply {
+            Some(reply) => {
+                std::fs::write(&fixture, reply).unwrap();
+                format!(
+                    "read line\ncat '{}'\ncat > /dev/null\nsleep 1\ntouch '{}'\n",
+                    fixture.display(),
+                    dir.join("exited").display()
+                )
+            }
+            None => "exit 1\n".to_string(),
+        };
+        let script = format!(
+            "#!/bin/sh\nif [ \"$1\" = --version ]; then echo '{version} (Claude Code)'; exit 0; fi\n\
+             echo \"$@\" > '{}'\n{answer}",
+            dir.join("args").display()
+        );
+        let cli = dir.join("claude");
+        std::fs::write(&cli, script).unwrap();
+        std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755)).unwrap();
+        cli
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn detect_takes_the_models_the_cli_reports() {
+        let reply = include_str!("../tests/fixtures/initialize.json");
+        let cli = fake_claude("ok", "2.1.317", Some(reply));
+        let claude = ClaudeProvider::detect(Some(&cli)).expect("runs");
+        assert_eq!(claude.version().as_deref(), Some("2.1.317"));
+        let info = Provider::info(&claude);
+        assert!(info.models.iter().any(|m| m.id == "claude-fable-5-2"));
+        let default = info.models.iter().find(|m| m.is_default).unwrap();
+        assert_eq!(default.id, "claude-opus-5-5");
+        // The probe sends no prompt and keeps no transcript.
+        let args = std::fs::read_to_string(cli.with_file_name("args")).unwrap();
+        assert!(args.contains("--no-session-persistence"), "{args}");
+        assert!(args.contains("-p"), "{args}");
+        assert!(args.contains(r#"{"disableAllHooks":true}"#), "{args}");
+        // It is left to exit by itself, not killed once it has answered.
+        let exited = cli.with_file_name("exited");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !exited.exists() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert!(exited.exists(), "the CLI was killed before it could exit");
+        std::fs::remove_dir_all(cli.parent().unwrap()).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn detect_falls_back_to_the_manifest_when_the_cli_does_not_answer() {
+        let cli = fake_claude("silent", "2.1.303", None);
+        let claude = ClaudeProvider::detect(Some(&cli)).expect("runs");
+        let info = Provider::info(&claude);
+        assert_eq!(
+            info.models,
+            catalog::models(catalog::parse_version("2.1.303").as_deref())
+        );
+        // An old CLI that answers without a model list does the same.
+        let old = fake_claude(
+            "old",
+            "2.1.303",
+            Some(
+                r#"{"type":"control_response","response":{"subtype":"success","request_id":"probe","response":{}}}
+"#,
+            ),
+        );
+        let claude = ClaudeProvider::detect(Some(&old)).expect("runs");
+        assert_eq!(Provider::info(&claude).models, info.models);
+        std::fs::remove_dir_all(cli.parent().unwrap()).unwrap();
+        std::fs::remove_dir_all(old.parent().unwrap()).unwrap();
     }
 
     #[test]

@@ -14,6 +14,24 @@ pub const OPCODE_INPUT: u8 = 0x02;
 pub const OPCODE_RESIZE: u8 = 0x03;
 pub const OPCODE_SNAPSHOT: u8 = 0x04;
 pub const OPCODE_RESTORE: u8 = 0x05;
+/// A chunked restore, for a client that advertised `terminal_chunked_replay`:
+/// ReplayBegin (JSON `{rows, cols, retainedHistoryLines}`), ReplayData
+/// chunks of at most [`REPLAY_CHUNK`] bytes, and an empty ReplayEnd. Clients
+/// that do not take them drop them as unknown frames.
+pub const OPCODE_REPLAY_BEGIN: u8 = 0x06;
+pub const OPCODE_REPLAY_DATA: u8 = 0x07;
+pub const OPCODE_REPLAY_END: u8 = 0x08;
+pub const REPLAY_CHUNK: usize = 64 * 1024;
+
+/// A frame of `opcode` on `slot`, by its byte, for the replay frames
+/// [`Opcode`] does not name.
+pub fn encode_raw(opcode: u8, slot: u8, payload: &[u8]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(2 + payload.len());
+    bytes.push(opcode);
+    bytes.push(slot);
+    bytes.extend_from_slice(payload);
+    bytes
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Opcode {

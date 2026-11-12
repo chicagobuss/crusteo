@@ -22,7 +22,11 @@ struct Harness {
 }
 
 async fn harness() -> Harness {
-    let daemon = Daemon::open(Config::ephemeral()).unwrap();
+    harness_with(Config::ephemeral()).await
+}
+
+async fn harness_with(config: Config) -> Harness {
+    let daemon = Daemon::open(config).unwrap();
     daemon.agents.register(Arc::new(EchoProvider {
         chunk_delay: Duration::from_millis(2),
         slow_delay: Duration::from_secs(30),
@@ -71,6 +75,18 @@ fn rpc(url: &str, token: Option<&str>, method: &str, params: Value) -> Value {
 }
 
 impl Harness {
+    /// The token of a client that is not an agent: what Burrow keeps in its
+    /// `mcp-token` file.
+    fn top(&self) -> Option<String> {
+        Some(
+            self.daemon
+                .mcp
+                .top_level_token()
+                .expect("a token")
+                .to_string(),
+        )
+    }
+
     fn url(&self) -> String {
         self.daemon
             .mcp
@@ -151,11 +167,12 @@ async fn agents_see_paseos_own_catalogue_and_a_strange_token_sees_nothing() {
     let h = harness().await;
     let agent = h.agent().await;
     let token = h.daemon.mcp.token(&agent);
+    let top = h.top().unwrap();
     let url = h.url();
     let (as_agent, top_level, strange) = tokio::task::spawn_blocking(move || {
         (
             rpc(&url, Some(&token), "tools/list", json!({})),
-            rpc(&url, None, "tools/list", json!({})),
+            rpc(&url, Some(&top), "tools/list", json!({})),
             rpc(&url, Some("made-up"), "tools/list", json!({})),
         )
     })
@@ -172,6 +189,8 @@ async fn agents_see_paseos_own_catalogue_and_a_strange_token_sees_nothing() {
             let theirs = (paseo.iter())
                 .find(|t| t["name"] == tool["name"])
                 .unwrap_or_else(|| panic!("{} is not Paseo's", tool["name"]));
+            // Paseo's, but for what Burrow does more of.
+            let theirs = burrow_daemon::mcp::burrows_own(theirs.clone());
             for field in ["title", "description", "inputSchema"] {
                 assert_eq!(tool[field], theirs[field], "{} {field}", tool["name"]);
             }
@@ -186,8 +205,176 @@ async fn agents_see_paseos_own_catalogue_and_a_strange_token_sees_nothing() {
     };
     assert_eq!(notify(&as_agent), true);
     assert_eq!(notify(&top_level), false);
+    // And they can queue behind a running turn.
+    let send = (as_agent["result"]["tools"].as_array().unwrap().iter())
+        .find(|t| t["name"] == "send_agent_prompt")
+        .unwrap();
+    let behaviors = &send["inputSchema"]["properties"]["activeTurnBehavior"]["enum"];
+    assert_eq!(*behaviors, json!(["auto", "interrupt", "queue", "steer"]));
     assert!(strange["error"].is_object(), "{strange}");
     h.stop().await;
+}
+
+/// A call as `rpc` makes it, but the answer is its JSON-RPC error's message
+/// (empty when there is none).
+fn refusal(reply: &Value) -> String {
+    reply["error"]["message"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_client_that_is_not_an_agent_needs_the_token_burrow_keeps() {
+    let h = harness().await;
+    let agent = h.agent().await;
+    let (url, top, own) = (h.url(), h.top().unwrap(), h.daemon.mcp.token(&agent));
+    let call = json!({"name": "list_hosts", "arguments": {}});
+    let replies = tokio::task::spawn_blocking(move || {
+        let ask = |token: Option<&str>, method: &str, params: &Value| {
+            rpc(&url, token, method, params.clone())
+        };
+        [
+            // No token: neither the list of tools nor a call.
+            ask(None, "tools/list", &json!({})),
+            ask(None, "tools/call", &call),
+            // A token Burrow never issued.
+            ask(Some("made-up"), "tools/call", &call),
+            // The one it keeps, and an agent's own.
+            ask(Some(&top), "tools/list", &json!({})),
+            ask(Some(&top), "tools/call", &call),
+            ask(Some(&own), "tools/call", &call),
+        ]
+    })
+    .await
+    .unwrap();
+    for (reply, what) in replies[..3].iter().zip(["list", "call", "made up"]) {
+        assert!(reply["result"].is_null(), "{what}: {reply}");
+    }
+    let none = refusal(&replies[0]);
+    assert!(
+        none.contains("needs a token") && none.contains("mcp-token"),
+        "{none}"
+    );
+    assert_eq!(refusal(&replies[1]), none);
+    assert_eq!(refusal(&replies[2]), "this token was not issued by Burrow");
+    assert_eq!(
+        replies[3]["result"]["tools"].as_array().unwrap().len(),
+        burrow_daemon::mcp::tools::NAMES.len()
+    );
+    for reply in &replies[4..] {
+        assert_ne!(reply["result"]["isError"], true, "{reply}");
+        assert_eq!(
+            reply["result"]["structuredContent"]["self"]["serverId"],
+            h.daemon.config.server_id.as_str(),
+            "{reply}"
+        );
+    }
+    h.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn burrow_can_be_set_to_serve_a_client_with_no_token_as_it_once_did() {
+    let h = harness_with(Config {
+        mcp_tokenless: true,
+        ..Config::ephemeral()
+    })
+    .await;
+    let agent = h.agent().await;
+    let (url, own) = (h.url(), h.daemon.mcp.token(&agent));
+    let (none, wrong, agents) = tokio::task::spawn_blocking(move || {
+        (
+            rpc(&url, None, "tools/list", json!({})),
+            rpc(&url, Some("made-up"), "tools/list", json!({})),
+            rpc(&url, Some(&own), "tools/list", json!({})),
+        )
+    })
+    .await
+    .unwrap();
+    let count = |reply: &Value| reply["result"]["tools"].as_array().map(Vec::len);
+    // The top-level tools for a client with none; a wrong token is still refused.
+    assert_eq!(count(&none), Some(burrow_daemon::mcp::tools::NAMES.len()));
+    assert_eq!(refusal(&wrong), "this token was not issued by Burrow");
+    assert_eq!(count(&agents), count(&none));
+    let hosts = h.tool(None, "list_hosts", json!({})).await.unwrap();
+    assert_eq!(
+        hosts["self"]["serverId"],
+        h.daemon.config.server_id.as_str()
+    );
+    h.stop().await;
+}
+
+fn state_dir(name: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!(
+        "burrow-mcp-{name}-{}",
+        burrow_daemon::ids::agent_id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_token_is_in_the_state_directory_for_clients_to_read_and_the_bridge_sends_it() {
+    let home = state_dir("home");
+    let config = || Config {
+        home: Some(home.clone()),
+        ..Config::ephemeral()
+    };
+    let h = harness_with(config()).await;
+    let file = std::fs::read_to_string(home.join("mcp-token")).unwrap();
+    assert_eq!(file, h.top().unwrap());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(home.join("mcp-token"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600, "readable by its user alone");
+    }
+
+    // `burrow mcp-bridge` given the address and nothing else reads it.
+    let url = h.url();
+    let server = burrow_daemon::mcp::bridge::Server::resolve(Some(url.clone()), None, Some(&home))
+        .expect("an address makes a server");
+    assert_eq!(server.token, file);
+    let line = r#"{"jsonrpc":"2.0","id":4,"method":"tools/list"}"#.to_string();
+    let (answered, unauthorized) = {
+        let (url, token, line) = (url.clone(), server.token.clone(), line.clone());
+        tokio::task::spawn_blocking(move || {
+            (
+                burrow_daemon::mcp::bridge::forward(&url, &token, &line),
+                burrow_daemon::mcp::bridge::forward(&url, "", &line),
+            )
+        })
+        .await
+        .unwrap()
+    };
+    let answered: Value = serde_json::from_str(&answered[0]).unwrap();
+    assert_eq!(
+        answered["result"]["tools"].as_array().unwrap().len(),
+        burrow_daemon::mcp::tools::NAMES.len()
+    );
+    // With none to send, Burrow says what it wants.
+    let unauthorized: Value = serde_json::from_str(&unauthorized[0]).unwrap();
+    assert!(
+        refusal(&unauthorized).contains("mcp-token"),
+        "{unauthorized}"
+    );
+    h.stop().await;
+
+    // A Burrow started again keeps the token, so what read it keeps working.
+    let again = harness_with(config()).await;
+    assert_eq!(again.top().unwrap(), file);
+    let reply = {
+        let (url, token) = (again.url(), file.clone());
+        tokio::task::spawn_blocking(move || rpc(&url, Some(&token), "tools/list", json!({})))
+            .await
+            .unwrap()
+    };
+    assert!(reply["result"]["tools"].is_array(), "{reply}");
+    again.stop().await;
+    std::fs::remove_dir_all(&home).unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -270,7 +457,10 @@ async fn an_agent_makes_a_child_in_its_workspace_and_hears_when_it_finishes() {
         )
         .await
         .unwrap();
-    assert_eq!(sent["deliveryStatus"], "queued");
+    assert_eq!(sent["deliveryStatus"], "delivered", "{sent}");
+    assert_eq!(sent["disposition"], "started", "{sent}");
+    assert_eq!(sent["target"]["agentId"], child.as_str(), "{sent}");
+    assert_eq!(sent["target"]["title"], "Count the files", "{sent}");
     timeout(WAIT, async {
         loop {
             let items = h.timeline(&child).await;
@@ -294,6 +484,37 @@ async fn an_agent_makes_a_child_in_its_workspace_and_hears_when_it_finishes() {
         .map(|a| a["id"].as_str().unwrap())
         .collect();
     assert!(ids.contains(&child.as_str()) && ids.contains(&parent.as_str()));
+
+    // Burrow's own filter: the agents of workspaces with a label.
+    let workspace = parent_snapshot["agent"]["workspaceId"].as_str().unwrap();
+    h.request(fleet::requests::set_label(
+        workspace, "Billing", "teal", true,
+    ))
+    .await;
+    let labelled = h
+        .tool(
+            token.clone(),
+            "list_agents",
+            json!({"workspaceLabels": ["billing"]}),
+        )
+        .await
+        .unwrap();
+    let labelled = labelled["agents"].as_array().unwrap();
+    assert_eq!(labelled.len(), 2, "{labelled:?}");
+    assert!(
+        labelled
+            .iter()
+            .all(|a| a["workspaceLabels"] == json!(["Billing"]))
+    );
+    let none = h
+        .tool(
+            token.clone(),
+            "list_agents",
+            json!({"workspaceLabels": ["personal"]}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(none["agents"], json!([]));
     let activity = h
         .tool(
             token.clone(),
@@ -310,12 +531,12 @@ async fn an_agent_makes_a_child_in_its_workspace_and_hears_when_it_finishes() {
     );
     assert!(content.contains("echo: <paseo-system"), "{content}");
     let status = h
-        .tool(None, "get_agent_status", json!({"agentId": child}))
+        .tool(h.top(), "get_agent_status", json!({"agentId": child}))
         .await
         .unwrap();
     assert_eq!(status["snapshot"]["id"], child.as_str());
 
-    // Another host is refused: there are none.
+    // Another host is out of reach without a Reef, and the caller is told so.
     let elsewhere = h
         .tool(
             token.clone(),
@@ -324,7 +545,95 @@ async fn an_agent_makes_a_child_in_its_workspace_and_hears_when_it_finishes() {
         )
         .await
         .unwrap_err();
-    assert!(elsewhere.contains("is not registered"), "{elsewhere}");
+    assert!(
+        elsewhere.contains("Host srv_somewhere is not this host"),
+        "{elsewhere}"
+    );
+    assert!(elsewhere.contains("none is connected"), "{elsewhere}");
+    h.stop().await;
+}
+
+/// The echo provider as one that cannot be steered, under its own id.
+struct Unsteerable(EchoProvider);
+
+impl burrow_provider::Provider for Unsteerable {
+    fn info(&self) -> burrow_provider::ProviderInfo {
+        let mut info = self.0.info();
+        info.id = "unsteerable".into();
+        info.capabilities.steer = false;
+        info
+    }
+
+    fn start(
+        &self,
+        spec: burrow_provider::SessionSpec,
+    ) -> Result<burrow_provider::Session, burrow_provider::ProviderError> {
+        self.0.start(spec)
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_prompt_for_a_busy_unsteerable_agent_waits_and_its_notice_is_its_own() {
+    let h = harness().await;
+    h.daemon.agents.register(Arc::new(Unsteerable(EchoProvider {
+        chunk_delay: Duration::from_millis(2),
+        slow_delay: Duration::from_millis(1500),
+    })));
+    let sender = h.agent().await;
+    let token = Some(h.daemon.mcp.token(&sender));
+    let busy = h
+        .request(json!({"type": "agent.create.request", "labels": {},
+            "config": {"provider": "unsteerable", "cwd": h.cwd.to_string_lossy()}}))
+        .await["agent"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let started = h
+        .request(
+            json!({"type": "send_agent_message_request", "agentId": busy,
+            "text": "slow first", "messageId": "m-first"}),
+        )
+        .await;
+    assert_eq!(started["disposition"], "started", "{started}");
+
+    // Not cut off: it waits behind the turn, and the receipt says so.
+    let sent = h
+        .tool(
+            token.clone(),
+            "send_agent_prompt",
+            json!({"agentId": busy, "prompt": "second"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(sent["deliveryStatus"], "queued", "{sent}");
+    assert_eq!(sent["disposition"], "queued", "{sent}");
+    assert_eq!(sent["queuePosition"], 1, "{sent}");
+    assert_eq!(sent["target"]["agentId"], busy.as_str(), "{sent}");
+    let guidance = sent["guidance"].as_str().unwrap();
+    assert!(
+        guidance.contains("waits behind it (next in line)"),
+        "{guidance}"
+    );
+    assert!(guidance.contains("You will get notified"), "{guidance}");
+
+    // The notice is of the turn the message started, not the one before.
+    let notice = timeout(WAIT, async {
+        loop {
+            let items = h.timeline(&sender).await;
+            if let Some(item) = items
+                .iter()
+                .find(|i| i["agentMessage"]["event"] == "finished")
+            {
+                return item.clone();
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("a finish notice");
+    let text = notice["agentMessage"]["text"].as_str().unwrap();
+    assert!(text.contains("second\n</paseo-system>"), "{text}");
+    assert!(!text.contains("echo: first"), "{text}");
     h.stop().await;
 }
 
@@ -392,7 +701,7 @@ async fn heartbeats_belong_to_their_agent_and_workspaces_are_made_and_renamed() 
 
     let made = h
         .tool(
-            None,
+            h.top(),
             "create_workspace",
             json!({"isolation": "local",
             "path": h.cwd.to_string_lossy(), "title": "Scratch"}),
@@ -404,7 +713,7 @@ async fn heartbeats_belong_to_their_agent_and_workspaces_are_made_and_renamed() 
     let workspace = made["workspaceId"].as_str().unwrap().to_string();
     let renamed = h
         .tool(
-            None,
+            h.top(),
             "rename_workspace",
             json!({"workspaceId": workspace, "title": "Renamed"}),
         )
@@ -413,7 +722,7 @@ async fn heartbeats_belong_to_their_agent_and_workspaces_are_made_and_renamed() 
     assert_eq!(renamed["title"], "Renamed");
     let missing = h
         .tool(
-            None,
+            h.top(),
             "create_workspace",
             json!({"isolation": "local", "path": "/no/such/dir"}),
         )
@@ -421,11 +730,18 @@ async fn heartbeats_belong_to_their_agent_and_workspaces_are_made_and_renamed() 
         .unwrap_err();
     assert_eq!(missing, "Directory not found: /no/such/dir");
     let archived = h
-        .tool(None, "archive_workspace", json!({"workspaceId": workspace}))
+        .tool(
+            h.top(),
+            "archive_workspace",
+            json!({"workspaceId": workspace}),
+        )
         .await
         .unwrap();
     assert_eq!(archived["archivedAgentIds"], json!([]));
-    let unknown = h.tool(None, "list_terminals", json!({})).await.unwrap_err();
+    let unknown = h
+        .tool(h.top(), "list_terminals", json!({}))
+        .await
+        .unwrap_err();
     assert_eq!(unknown, "Paseo tool not found: list_terminals");
     h.stop().await;
 }
