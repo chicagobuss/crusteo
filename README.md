@@ -1,6 +1,7 @@
-# Crusteo
+# Crusteo - [Overview Video](https://www.youtube.com/watch?v=OoVbuHo8n24)
 
 <img src="assets/icon/crusteo.png" alt="Crusteo icon: a crab crossing lane-coloured crosswalk stripes" width="96" align="right">
+
 
 Run coding agents (Claude Code, Codex, Cursor, OpenCode, Gemini CLI, pi, Antigravity) on all your
 machines, and keep an eye on every one of them from your desk or your phone.
