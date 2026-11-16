@@ -1,7 +1,7 @@
-# Crusteo - [Overview Video](https://www.youtube.com/watch?v=OoVbuHo8n24)
+
+# Crusteo
 
 <img src="assets/icon/crusteo.png" alt="Crusteo icon: a crab crossing lane-coloured crosswalk stripes" width="96" align="right">
-
 
 Run coding agents (Claude Code, Codex, Cursor, OpenCode, Gemini CLI, pi, Antigravity) on all your
 machines, and keep an eye on every one of them from your desk or your phone.
@@ -9,12 +9,16 @@ machines, and keep an eye on every one of them from your desk or your phone.
 Crusteo started as an unofficial native desktop client for [Paseo](https://github.com/getpaseo/paseo)
 and grew into three parts that work together, or each on its own alongside Paseo:
 
-- **Burrow**, a daemon for each machine that runs agents: a drop-in replacement for Paseo's daemon,
-  written in Rust.
+- **Crusteo**, a fast native desktop app, written with [GPUI](https://www.gpui.rs/), designed
+  with specific views for power-users.
+- **Burrow**, a daemon for each machine that runs agents: a drop-in replacement for Paseo's daemon
+  with a few extra pieces of functionality and a different agent-to-agent design.
 - **Reef** and **Skiff**: Reef keeps up with every daemon on one always-on machine and serves
-  Skiff, a small web page for your phone (or any browser) that shows the whole fleet.
-- **Crusteo**, a fast native desktop app, written in Rust with [GPUI](https://www.gpui.rs/), that
-  connects to every daemon at once.
+  Skiff, a single-page webapp optimized for fleet management from your mobile devices.
+
+A 76-second overview video:
+
+https://github.com/user-attachments/assets/f5af6fcf-6d1e-4ad6-b496-8fcaaa0aaa2d
 
 > **Status: 0.2.1. Early, and moving fast; expect rough edges.** Crusteo is not affiliated
 > with or endorsed by the Paseo project. Everything speaks Paseo's daemon protocol (version 1), so
