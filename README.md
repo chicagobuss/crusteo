@@ -9,8 +9,8 @@ machines, and keep an eye on every one of them from your desk or your phone.
 Crusteo started as an unofficial native desktop client for [Paseo](https://github.com/getpaseo/paseo)
 and grew into three parts that work together, or each on its own alongside Paseo:
 
-- **Crusteo**, a fast native desktop app, written with [GPUI](https://www.gpui.rs/), designed
-  with specific views for power-users.
+- **Crusteo**, a fast native desktop app, written in Rust with [GPUI](https://www.gpui.rs/),
+  designed with specific views for power-users.
 - **Burrow**, a daemon for each machine that runs agents: a drop-in replacement for Paseo's daemon
   with a few extra pieces of functionality and a different agent-to-agent design.
 - **Reef** and **Skiff**: Reef keeps up with every daemon on one always-on machine and serves
