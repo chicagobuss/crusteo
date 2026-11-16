@@ -767,7 +767,10 @@ impl<L: Launcher> Session<L> {
             self.emit(ProviderEvent::TurnFailed {
                 turn,
                 error,
-                code: message["subtype"].as_str().map(str::to_string),
+                // A result flagged `is_error` still says `success`: no code.
+                code: (message["subtype"].as_str())
+                    .filter(|subtype| *subtype != "success")
+                    .map(str::to_string),
                 diagnostic: None,
             });
         }

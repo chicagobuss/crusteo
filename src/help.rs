@@ -31,6 +31,13 @@ type Section = (&'static str, &'static [Row]);
 /// What a button in the panel does.
 pub type Handler = Rc<dyn Fn(&mut Window, &mut App)>;
 
+/// History's key ([`crate::shell::HISTORY_KEY`]): Cmd+H is the Mac's Hide.
+const HISTORY_KEYS: &[&str] = if cfg!(target_os = "macos") {
+    &["Mod", "Shift", "H"]
+} else {
+    &["Mod", "H"]
+};
+
 /// Keys and what they do, by where they work. `Mod` stands for
 /// [`primary`].
 const SECTIONS: &[Section] = &[
@@ -49,7 +56,7 @@ const SECTIONS: &[Section] = &[
             (&["Mod", "L"], "Focus the composer"),
             (&["Mod", "B"], "Show or hide the sidebar"),
             (&["Mod", ","], "Settings"),
-            (&["Mod", "Shift", "H"], "History: every agent, latest first"),
+            (HISTORY_KEYS, "History: every agent, latest first"),
             (&["Mod", "G"], "Grep History: names, labels, replies"),
             (&["Mod", "="], "Zoom in"),
             (&["Mod", "-"], "Zoom out"),
@@ -68,6 +75,14 @@ const SECTIONS: &[Section] = &[
             (&["Esc"], "Leave focus mode, or collapse the card"),
             (&["Mod", "Wheel"], "Make lanes wider or narrower"),
             (&["Middle-drag"], "Pan the board"),
+        ],
+    ),
+    (
+        "History's Grep box",
+        &[
+            (&["↑", "↓"], "Move the ring through the agents"),
+            (&["Enter"], "Open the ringed agent"),
+            (&["Esc"], "Empty the box; when it is empty, close History"),
         ],
     ),
     (

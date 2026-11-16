@@ -1,11 +1,19 @@
-//! Reef mode, early: with `reef.json` in the data dir, the desktop takes its
-//! hosts from a Reef (`GET /api/hosts`) instead of its own `hosts.json`, and
-//! keeps following that list. It still connects to every daemon itself.
+//! Reef mode: with `reef.json` in the data dir, the desktop takes its hosts
+//! from a Reef (`GET /api/hosts`) instead of its own `hosts.json`, and keeps
+//! following that list.
 //!
-//! Reef gives each host's address as Reef reaches it. A loopback one
-//! (`127.0.0.1`, `localhost`, `::1`) means Reef's own machine, so it becomes
-//! the address the desktop reaches Reef at. `overrides` in `reef.json` give a
-//! host another address, or a password, for this desktop only.
+//! A Reef that passes daemons through (its answer names a `relay`) is the
+//! only thing the desktop connects to: each host's daemon is opened at
+//! `ws://<reef>/daemon/<id>/ws` with the device token, and Reef reaches the
+//! daemon as it does for Skiff, with its own address, ssh and password for
+//! it. An `https://` Reef, and a Reef from before 0.2.1, give the hosts'
+//! addresses instead, and the desktop connects to each itself. `"direct":
+//! true` in `reef.json` does that with any Reef.
+//!
+//! Connecting directly, a loopback address (`127.0.0.1`, `localhost`, `::1`)
+//! means Reef's own machine, so it becomes the address the desktop reaches
+//! Reef at. `overrides` in `reef.json` give a host another address, which is
+//! then connected to directly, or a password, for this desktop only.
 //!
 //! Reef keeps the fleet's labels too (`/api/labels`); in reef mode they
 //! belong to agents ([`fleet::labels`]), and Lanes places agents by them.
@@ -29,6 +37,10 @@ pub struct ReefLink {
     /// By host id.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub overrides: BTreeMap<String, HostOverride>,
+    /// Connect to every daemon directly, as before Reef passed them
+    /// through, rather than through Reef.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub direct: bool,
 }
 
 /// One host as this desktop reaches it, where that differs from Reef.
@@ -60,20 +72,52 @@ impl ReefLink {
         (!machine.is_empty()).then_some(machine)
     }
 
+    /// Reef's address as a WebSocket's, `ws://192.0.2.10:6798`, for its
+    /// pass-through. None for an `https://` Reef, which this desktop's
+    /// client cannot open a socket to yet: its hosts are then reached
+    /// directly.
+    fn socket_base(&self) -> Option<String> {
+        let url = self.url.trim();
+        let rest = match url.split_once("://") {
+            Some(("http" | "ws", rest)) => rest,
+            Some(_) => return None,
+            None => url,
+        };
+        let authority = rest.split('/').next()?;
+        (!authority.is_empty()).then(|| format!("ws://{authority}"))
+    }
+
+    /// Whether `endpoint` is this Reef's, a daemon through its pass-through:
+    /// it is opened with the device token.
+    pub fn passes(&self, endpoint: &str) -> bool {
+        self.socket_base()
+            .is_some_and(|base| endpoint.starts_with(&format!("{base}/")))
+    }
+
     /// The hosts in Reef's answer to `/api/hosts`, as this desktop connects
-    /// to them.
+    /// to them: through Reef when it passes daemons through (`relay`), else
+    /// directly. A host with an `overrides` address is reached there, and
+    /// `direct` reaches every one directly.
     pub fn hosts(&self, answer: &Value) -> Result<Vec<HostConfig>, String> {
         let list = answer["hosts"].as_array().ok_or("Reef sent no host list")?;
+        let relay = (answer["relay"].as_str())
+            .filter(|_| !self.direct)
+            .zip(self.socket_base());
         let mut hosts = Vec::new();
         for entry in list {
             let (Some(id), Some(name)) = (entry["id"].as_str(), entry["name"].as_str()) else {
                 continue;
             };
-            let mut endpoint = entry["endpoint"]
-                .as_str()
-                .map(|endpoint| self.reachable(endpoint));
+            let local = self.overrides.get(id);
+            let through = relay
+                .as_ref()
+                .filter(|_| local.is_none_or(|l| l.endpoint.is_none()));
+            let mut endpoint = match through {
+                Some((path, base)) => Some(format!("{base}{path}{}/ws", encode(id))),
+                None => (entry["endpoint"].as_str()).map(|endpoint| self.reachable(endpoint)),
+            };
             let mut password = None;
-            if let Some(local) = self.overrides.get(id) {
+            if let Some(local) = local {
                 endpoint = local.endpoint.clone().or(endpoint);
                 password = local.password.clone();
             }
@@ -291,6 +335,61 @@ mod tests {
             ]
         );
         assert!(link("http://192.0.2.10:6798").hosts(&json!({})).is_err());
+    }
+
+    #[test]
+    fn a_reef_that_passes_daemons_through_is_all_the_desktop_connects_to() {
+        let answer = json!({"reef": "0.2.1", "relay": "/daemon/", "hosts": [
+            {"id": "devbox", "name": "devbox", "endpoint": "192.0.2.20:6767", "password": true},
+            {"id": "build box", "name": "build box", "endpoint": "ssh://dev@buildbox", "password": false},
+            {"id": "laptop", "name": "laptop", "endpoint": "192.0.2.30:6767", "password": false},
+        ]});
+        let mut reef = link("http://192.0.2.10:6798/");
+        reef.overrides.insert(
+            "laptop".into(),
+            HostOverride {
+                endpoint: Some("127.0.0.1:6797".into()),
+                password: None,
+            },
+        );
+        let endpoints = |reef: &ReefLink| -> Vec<(String, Option<String>)> {
+            (reef.hosts(&answer).unwrap().into_iter())
+                .map(|h| (h.endpoint.unwrap(), h.password))
+                .collect()
+        };
+        assert_eq!(
+            endpoints(&reef),
+            [
+                // Its password is Reef's to add, not this desktop's.
+                ("ws://192.0.2.10:6798/daemon/devbox/ws".into(), None),
+                ("ws://192.0.2.10:6798/daemon/build%20box/ws".into(), None),
+                // An address of this desktop's own is connected to directly.
+                ("127.0.0.1:6797".into(), None),
+            ]
+        );
+        assert!(reef.passes("ws://192.0.2.10:6798/daemon/devbox/ws"));
+        assert!(!reef.passes("192.0.2.20:6767"));
+        assert!(!reef.passes("ws://192.0.2.10:67980/daemon/devbox/ws"));
+
+        // `direct`, an https Reef, or a Reef without the relay: as before.
+        for other in [
+            ReefLink {
+                direct: true,
+                ..reef.clone()
+            },
+            ReefLink {
+                url: "https://reef.example".into(),
+                ..reef.clone()
+            },
+        ] {
+            assert_eq!(endpoints(&other)[0].0, "192.0.2.20:6767");
+        }
+        let mut old = answer.clone();
+        old.as_object_mut().unwrap().remove("relay");
+        assert_eq!(
+            reef.hosts(&old).unwrap()[0].endpoint.as_deref(),
+            Some("192.0.2.20:6767")
+        );
     }
 
     #[test]

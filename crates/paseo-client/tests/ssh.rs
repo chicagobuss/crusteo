@@ -153,6 +153,31 @@ fn what_ssh_says_is_the_reason_a_host_is_down() {
     });
 }
 
+/// Reef opens a daemon with `open_socket`: what ssh said is its error too,
+/// and not the handshake's "Handshake not finished" over ssh's closed streams.
+#[test]
+fn opening_a_socket_says_what_ssh_said_too() {
+    paseo_client::block_on(async {
+        let failed = |endpoint: String| async move {
+            match paseo_client::open_socket(&config(endpoint)).await {
+                Ok(_) => panic!("opened"),
+                Err(reason) => reason,
+            }
+        };
+        assert_eq!(
+            failed("ssh://dev@denied-open.example".into()).await,
+            "dev@denied-open.example: Permission denied (publickey)."
+        );
+        let (port, _seen) = daemon("srv_unused").await;
+        assert_eq!(
+            failed(format!("ssh://closed-open.example?daemonPort={port}")).await,
+            "channel 0: open failed: connect failed: Connection refused; stdio forwarding failed"
+        );
+        forget_runs("dev@denied-open.example");
+        forget_runs("closed-open.example");
+    });
+}
+
 #[test]
 fn a_missing_ssh_and_a_malformed_endpoint_say_so() {
     paseo_client::block_on(async {

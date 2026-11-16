@@ -735,15 +735,28 @@ row about 330 bytes, so a full list of 20 is under 7 KB.
 ### 3.15 Desktops in reef mode
 
 A crusteo desktop with `reef.json` in its data dir takes its hosts and labels from Reef over
-plain HTTP, gated by the device token (none with `--open`), and still connects to every daemon
-itself. The token goes in an `Authorization: Bearer <token>` header, which a proxy's or Reef's own
+plain HTTP, gated by the device token (none with `--open`), and reaches every daemon through Reef
+(below). The token goes in an `Authorization: Bearer <token>` header, which a proxy's or Reef's own
 access log does not keep, as a URL is. `?t=<token>` is still read on `/api/*` for a desktop from
 before 0.2.0, and on `/image/`, where an `<img>` cannot send a header; a request with either, or
 both, is authorized if the token in either is right. A desktop whose header is answered with a 401
 (a Reef from before 0.2.0) asks again with `?t=`, so upgrading the desktop first does not break it.
 
-- `GET /api/hosts`: `{"reef": <version>, "hosts": [{"id", "name", "endpoint", "password":
-  bool}]}`. A password is never sent, only whether one is needed.
+- `GET /api/hosts`: `{"reef": <version>, "relay": "/daemon/", "hosts": [{"id", "name",
+  "endpoint", "password": bool}]}`. A password is never sent, only whether one is needed. `relay`
+  (from 0.2.1) says Reef passes daemons through.
+- `GET /daemon/<id>/ws`, a WebSocket upgrade: the pass-through. The token is checked from the
+  same header before the socket opens (401 without it, 404 for a host Reef does not have). Reef
+  then opens that host's daemon as it reaches it, directly or through ssh from its machine, and
+  carries frames both ways unchanged: the desktop's hello goes to the daemon and the daemon's
+  `server_info` comes back, as if Reef were not there. Reef changes one thing, the hello, which
+  gets the host's password (`auth`) when Reef has one and the hello has none. A daemon Reef cannot
+  reach closes the socket with why ("Reef could not reach it: …"), which the desktop shows as the
+  host's state. A desktop silent for a minute (its heartbeat is every ten seconds) is dropped,
+  with its daemon socket. Each pass-through is its own connection to the daemon; Reef's own, which
+  Skiff's views come from, is not shared. Whoever holds a token holds each daemon's whole protocol
+  this way, terminals included: as much as reaching the daemon itself, and with `--open`, anyone
+  who reaches Reef does.
 - `GET /api/labels`: `{"ok": true, "catalog": {...}}`, the whole catalog (3.9.2) with its
   `revision`, bumped on every change.
 - `POST /api/labels` (JSON, at most 64 KB; a browser's request only from Reef's own origin) makes
@@ -914,7 +927,9 @@ with routing on or off; routing adds no reach beyond Reef's own (section 7).
 - At most one list view and one conversation are subscribed at a time.
 - **Later, a native app** (Jetpack Compose, or a thin WebView/TWA shell around the same page) against
   the same protocol, if the page feels lacking: better notifications, share targets, a widget.
-- crusteo desktop keeps talking to daemons directly. A "through Reef" mode is possible later.
+- crusteo desktop in reef mode reaches every daemon through Reef's pass-through (3.15), one
+  connection to each daemon per desktop. Carrying the desktop on Reef's own connections, as Skiff
+  is, is possible later.
 
 ## 5. Push notifications (later)
 

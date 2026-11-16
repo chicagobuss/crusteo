@@ -305,20 +305,17 @@ select, input, textarea { font: inherit; color: inherit; background: var(--surfa
 .resort.idle i { opacity: 0; }
 .resort.held i { opacity: .45; }
 .row.gone { opacity: .45; }
-/* Usage: the tightest account's dial in the top bar, and a panel that
-   slides in from the right with every account. */
-.ugauge { display: flex; align-items: center; gap: 4px; background: none; border: none; padding: 4px 6px;
-  font-size: 13px; font-variant-numeric: tabular-nums; color: var(--muted); }
-.ugauge.stale { opacity: .45; }
+/* Usage: up to four accounts' dials in the top bar, and a panel that
+   slides in from the right with every account. Each dial's rim is in the
+   account's colour, the centre in the colour of what is left, the needle
+   (its pace) in the text's. Full size in a row when the bar has room, else
+   a 2x2 block 40px tall: either reaches into the bar's padding (32px
+   inside it) rather than making the bar taller. */
+.ugauge { display: flex; align-items: center; background: none; border: none; padding: 0 4px; margin: -4px 0;
+  flex-shrink: 0; color: var(--text); }
+.ugauge svg { overflow: visible; }
 .sev-critical { color: var(--bad); } .sev-warn { color: var(--warn); } .sev-on_pace { color: var(--pace); }
 .sev-surplus { color: var(--run); } .sev-unknown { color: var(--muted); }
-/* The micro dials: up to four accounts in a 2x2 block, the rim in the
-   account's colour, the centre in the colour of what is left, the needle
-   (its pace) in the text's. */
-/* 40px tall in a bar 32px inside its padding: it reaches into the
-   padding rather than making the bar taller. */
-.ugauge.micro { padding: 0 4px; margin: -4px 0; color: var(--text); }
-.ugauge.micro svg { overflow: visible; }
 .pool .who .dialbtn { align-self: center; flex-shrink: 0; margin: -4px -4px -4px 2px; padding: 3px; line-height: 0;
   background: none; border: none; color: var(--faint); }
 .pool .who .dialbtn.open { background: var(--surface2); border-radius: 6px; }
@@ -703,12 +700,11 @@ prefs.tab = "map";
 for (const old of ["sort", "collapsed", "more"]) delete prefs[old];
 if (!MODES[prefs.listMode]) prefs.listMode = "unseen";
 function savePrefs() { try { localStorage.setItem("skiff-prefs", JSON.stringify(prefs)); } catch (e) {} }
-// The top bar's usage: ?usage=micro turns on the micro dials on this
-// device, ?usage=dial goes back to the one dial. Which accounts they show
-// and in what colours is this device's too (`dials`).
+// The top bar's usage dials: which accounts they show and in what colours
+// is this device's choice (`dials`). The one dial they replaced, and its
+// `usageMode`, are gone.
 {
-  const usage = new URLSearchParams(location.search).get("usage");
-  if (usage === "micro" || usage === "dial") { prefs.usageMode = usage === "micro" ? "micro" : ""; savePrefs(); }
+  delete prefs.usageMode;
   if (!prefs.dials || typeof prefs.dials !== "object") prefs.dials = { shown: null, colors: {} };
   if (!prefs.dials.colors) prefs.dials.colors = {};
 }
@@ -1137,6 +1133,28 @@ function ago(iso) {
   return Math.floor(s / 86400) + "d";
 }
 
+// An age that keeps up: told again every half minute (see keepAges), since
+// what it sits in is only redrawn when something changes. With `long`, as a
+// turn's footer says it: "now", "5m ago".
+function agoSpan(cls, iso, long) {
+  const s = el("span", cls);
+  s.dataset.ago = iso;
+  if (long) s.dataset.long = "1";
+  s.textContent = agoText(s);
+  return s;
+}
+function agoText(s) {
+  const a = ago(s.dataset.ago);
+  return s.dataset.long && a && a !== "now" ? a + " ago" : a;
+}
+function keepAges() {
+  if (document.hidden) return;
+  for (const s of document.querySelectorAll("[data-ago]")) {
+    const text = agoText(s);
+    if (s.textContent !== text) s.textContent = text;
+  }
+}
+
 function duration(s) {
   s = Math.max(0, Math.floor(s));
   if (s < 60) return s + "s";
@@ -1227,6 +1245,8 @@ function drawAll() { drawChrome(); drawConv(); drawComposer(); }
 // Whether the list is up, over the map (not under a conversation).
 function listShown() { return recent.open; }
 
+// What the top bar held when drawChrome last looked, to fit the dials to it.
+let barHeld = "";
 function drawChrome() {
   const app = $("app");
   app.className = "app map";
@@ -1260,6 +1280,14 @@ function drawChrome() {
   // Only a host down for a while is named.
   const long = hosts.filter((h) => h.state !== "online" && h.since && Date.now() - Date.parse(h.since) > 120000);
   $("down").textContent = long.map((h) => h.name + " down " + ago(h.since)).join(" · ");
+  fitDials();
+}
+
+// The dials give way to what else the bar holds, and none of it resizes the
+// bar itself. Fit them again when any of it changed, and not otherwise.
+function fitDials() {
+  const held = JSON.stringify([$("down").textContent, $("unseen-count").textContent, hosts.length]);
+  if (held !== barHeld) { barHeld = held; if (usageRows().length) drawUsage(); }
 }
 
 function fillSelects() {
@@ -1335,7 +1363,7 @@ function agentRow(row) {
   const top = el("div", "top1");
   top.append(el("span", "dot s-" + row.state));
   if (row.unseen) { const dot = el("span", "new"); dot.title = "Finished a turn you have not looked at"; top.append(dot); }
-  top.append(el("span", "title", row.title), el("span", "when", ago(row.reply_at || row.at)));
+  top.append(el("span", "title", row.title), agoSpan("when", row.reply_at || row.at));
   body.append(top);
   if (row.parent) body.append(parentLink(row));
   if (row.ask) body.append(el("div", "line ask", row.ask.question || row.ask.title + (row.ask.more ? " (+" + row.ask.more + ")" : "")));
@@ -1383,6 +1411,7 @@ function drawCounts() {
   }
   const waiting = blocked.size + unseen.size;
   $("unseen-count").textContent = waiting ? String(waiting) : "";
+  fitDials();
   $("view-list").title = "Every agent in a list (L)" + (waiting ? ": " + unseen.size + " unseen, " + blocked.size + " blocked" : "");
   for (const b of $("modes").querySelectorAll("button")) {
     const c = b.querySelector(".c");
@@ -1817,9 +1846,10 @@ function drawConv() {
     if (turn.clipped) t.append(el("div", "small", turn.clipped + " earlier steps"));
     for (const item of turn.items) { const node = renderItem(item); node.dataset.id = item.id; t.append(node); }
     if (turn.footer) {
-      const f = [ago(turn.footer.at) + (ago(turn.footer.at) === "now" ? "" : " ago")];
-      if (turn.footer.secs) f.push(duration(turn.footer.secs));
-      t.append(el("div", "footer", f.join(" · ")));
+      const f = el("div", "footer");
+      f.append(agoSpan("", turn.footer.at, true));
+      if (turn.footer.secs) f.append(" · " + duration(turn.footer.secs));
+      t.append(f);
     }
     body.append(t);
   }
@@ -1924,31 +1954,12 @@ function showImage(url) {
 
 // ---- usage ------------------------------------------------------------------------
 // Reef's `usage` view: a row per account, worked out by the rules
-// crusteo's title bar follows, so both say the same. The top bar shows
-// the tightest account's pace dial; a tap opens every account.
+// crusteo's title bar follows, so both say the same. The top bar shows up
+// to four accounts' dials; a tap opens every account.
 
 function usageRows() { return (views.usage && views.usage.parts) || []; }
 function usageOpen() { return !!document.querySelector(".drawer.open"); }
 let usageTimer = null;
-
-// A half dial, green on the left through blue at the top to red on the
-// right, with the needle at the window's pace (degrees from straight up).
-function dialSvg(needle) {
-  const W = 26, H = 14, cx = W / 2, cy = H, r = H - 2;
-  const at = (deg, rad) => { const t = (180 - deg) * Math.PI / 180; return [cx + rad * Math.cos(t), cy - rad * Math.sin(t)]; };
-  const arc = (from, to, color) => {
-    const [x1, y1] = at(from, r), [x2, y2] = at(to, r);
-    return '<path d="M' + x1.toFixed(1) + " " + y1.toFixed(1) + " A" + r + " " + r + " 0 0 1 " + x2.toFixed(1) + " " + y2.toFixed(1) +
-      '" stroke="' + color + '" stroke-width="3" fill="none" opacity=".55"/>';
-  };
-  let svg = '<svg width="' + W + '" height="' + H + '" viewBox="0 0 ' + W + " " + H + '" aria-hidden="true">' +
-    arc(0, 74, "var(--run)") + arc(74, 106, "var(--pace)") + arc(106, 140, "var(--warn)") + arc(140, 180, "var(--bad)");
-  if (needle !== null && needle !== undefined) {
-    const [x, y] = at(90 + needle, H - 1);
-    svg += '<path d="M' + cx + " " + cy + " L" + x.toFixed(1) + " " + y.toFixed(1) + '" stroke="currentColor" stroke-width="1.5"/>';
-  }
-  return svg + "</svg>";
-}
 
 // As crusteo writes a reset: 26m, 3.3h, 2.1d. Numbers kept from a read
 // before a failed one don't say a window whose reset has gone by resets now.
@@ -2028,12 +2039,12 @@ function dialRows() {
   if (!Array.isArray(shown)) return rows.slice(0, 4);
   return shown.map((key) => rows.find((r) => r.key === key)).filter(Boolean).slice(0, 4);
 }
-// One dial in a 30x30 cell of a 64-unit block: a 270-degree rim, from low
+// One dial in a 30x30 cell, of a 64-unit block or (`full`) of a row: a 270-degree rim, from low
 // on the left round to low on the right, the colour of what is left solid to 40% of
 // the way out and fading before the rim, and the needle reaching past it.
 // A window without a pace has no needle or colour.
 const DIAL_HALF = 135;
-function microDial(row, color, ix) {
+function microDial(row, color, ix, full) {
   const cx = 15, cy = 16, r = 12, inner = 10;
   const at = (deg, rad) => { const t = deg * Math.PI / 180; return (cx + rad * Math.sin(t)).toFixed(2) + " " + (cy - rad * Math.cos(t)).toFixed(2); };
   const needle = microNeedle(row), known = needle !== null;
@@ -2053,7 +2064,8 @@ function microDial(row, color, ix) {
       '<path d="M' + cx + " " + cy + " L" + tip + '" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/>' +
       '<circle cx="' + cx + '" cy="' + cy + '" r="2.6" fill="currentColor" style="stroke: var(--bg)" stroke-width="1"/>';
   }
-  return '<g transform="translate(' + (ix % 2) * 34 + "," + Math.floor(ix / 2) * 34 + ')"' + (row.stale ? ' opacity=".45"' : "") + ">" + s + "</g>";
+  const [x, y] = full ? [ix * 34, 0] : [(ix % 2) * 34, Math.floor(ix / 2) * 34];
+  return '<g transform="translate(' + x + "," + y + ')"' + (row.stale ? ' opacity=".45"' : "") + ">" + s + "</g>";
 }
 function dialTip(row) {
   const w = bindingWindow(row);
@@ -2061,31 +2073,42 @@ function dialTip(row) {
     w ? (w.short || w.name) + " " + Math.round(w.remaining) + "% left, " + resetsIn(w.resets_at, row.retained) + (w.pace ? ", " + w.pace : "") : "",
     row.retained ? failureText(row) : ""].filter(Boolean).join("\n");
 }
-function drawMicro(g) {
-  const rows = usageRows(), shown = dialRows();
-  g.hidden = !shown.length;
-  if (!shown.length) return;
-  // One or two dials take one row: half the height.
-  const tall = shown.length > 2, size = 40;
-  g.className = "ugauge micro";
-  g.innerHTML = '<svg width="' + size + '" height="' + (tall ? size : size * 30 / 64) + '" viewBox="0 0 64 ' + (tall ? 64 : 30) + '" aria-hidden="true">' +
-    shown.map((row, ix) => microDial(row, dialColor(row, rows), ix)).join("") + "</svg>";
-  g.title = shown.map(dialTip).join("\n\n");
+// The dials full size in a row, as tall as the top bar, while the bar has
+// the room: nothing pushed off its end, and a host's "down" note still
+// whole. Else quarter size, two by two in the same height (one row of two
+// at most is half as tall).
+const DIAL_FULL = 34, DIAL_BLOCK = 40;
+function dialsSvg(shown, rows, full) {
+  const n = shown.length, cells = shown.map((row, ix) => microDial(row, dialColor(row, rows), ix, full)).join("");
+  if (full) {
+    const w = n * 34 - 4;
+    return '<svg width="' + (w * DIAL_FULL / 32).toFixed(1) + '" height="' + DIAL_FULL + '" viewBox="0 0 ' + w + ' 32" aria-hidden="true">' + cells + "</svg>";
+  }
+  const tall = n > 2;
+  return '<svg width="' + DIAL_BLOCK + '" height="' + (tall ? DIAL_BLOCK : DIAL_BLOCK * 30 / 64) + '" viewBox="0 0 64 ' + (tall ? 64 : 30) + '" aria-hidden="true">' + cells + "</svg>";
 }
-
+function topCrowded() {
+  const top = document.querySelector(".top"), down = $("down");
+  return top.scrollWidth > top.clientWidth + 1 || down.scrollWidth > down.clientWidth + 1;
+}
 function drawUsage() {
-  const rows = usageRows(), top = rows.find((r) => r.tightest), g = $("usage");
-  if (prefs.usageMode === "micro") { drawMicro(g); drawUsageDrawer(); return; }
-  g.hidden = !top;
-  if (top) {
-    const w = bindingWindow(top);
-    g.className = "ugauge sev-" + top.severity + (top.stale ? " stale" : "");
-    g.innerHTML = dialSvg(top.needle) + "<span>" + top.slack + "</span>";
-    g.title = [top.provider + " " + (top.account || top.label), w ? (w.short || w.name) + " " + Math.round(w.remaining) + "% left, " + resetsIn(w.resets_at, top.retained) : "",
-      top.retained ? failureText(top) + "\n" + lastUpdated(top) : ""]
-      .filter(Boolean).join("\n");
+  const rows = usageRows(), shown = dialRows(), g = $("usage");
+  g.hidden = !shown.length;
+  if (shown.length) {
+    g.className = "ugauge";
+    g.title = shown.map(dialTip).join("\n\n");
+    g.innerHTML = dialsSvg(shown, rows, true);
+    if (topCrowded()) g.innerHTML = dialsSvg(shown, rows, false);
   }
   drawUsageDrawer();
+}
+// A wider or narrower window may have room for the full dials, or not.
+{
+  let width = 0;
+  new ResizeObserver((entries) => {
+    const now = Math.round(entries[0].contentRect.width);
+    if (now !== width) { width = now; if (usageRows().length) drawUsage(); }
+  }).observe(document.querySelector(".top"));
 }
 
 function showUsage() {
@@ -2124,10 +2147,9 @@ function drawUsageDrawer() {
     who.append(el("span", "", p.provider), el("span", "acct", [p.label, p.plan].filter(Boolean).join(" · ")));
     if (p.retained) who.append(el("span", "fail " + (p.failure.status === "error" ? "error" : "unavailable")));
     who.append(el("span", "pace sev-" + p.severity, p.slack));
-    const micro = prefs.usageMode === "micro";
-    if (micro) who.append(dialButton(p, rows));
+    who.append(dialButton(p, rows));
     box.append(who);
-    if (micro && dialOpen === p.key) box.append(dialSettings(p, rows));
+    if (dialOpen === p.key) box.append(dialSettings(p, rows));
     if (p.retained) {
       box.append(el("div", "why failed", failureText(p)), el("div", "why last", lastUpdated(p)));
     } else if (p.status && p.status !== "ok") box.append(el("div", "why", p.status));
@@ -2922,7 +2944,7 @@ function agentLink(a, host) {
   link.append(el("span", "dot s-" + (a.state || "")));
   if (a.unseen) link.append(el("span", "new"));
   link.append(el("span", "t", a.title || a.id));
-  if (a.at) link.append(el("span", "when", ago(a.at)));
+  if (a.at) link.append(agoSpan("when", a.at));
   link.onclick = () => {
     closePanel();
     const agent = { host, id: a.id, title: a.title };
@@ -4125,6 +4147,7 @@ document.addEventListener("keydown", (e) => {
 setInterval(() => send({ type: "ping", t: Date.now() }), 25000);
 setInterval(() => { const e = document.querySelector("#working .elapsed"); if (e) e.textContent = elapsed(); }, 1000);
 setInterval(drawChrome, 30000);
+setInterval(keepAges, 30000);
 // Tiles age between updates too.
 setInterval(() => { if (prefs.tab === "map" && mapState.layout && !document.hidden) drawFar(); }, 30000);
 document.addEventListener("visibilitychange", () => {

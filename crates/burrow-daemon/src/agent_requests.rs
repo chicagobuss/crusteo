@@ -314,7 +314,9 @@ struct WaitRequest {
 
 /// `wait_for_finish_request`; with a `turnId`, the finish of that turn;
 /// with a queued prompt's `messageId`, of that prompt's turn, not of the
-/// one it waited behind.
+/// one it waited behind, and `error` when the prompt never got a turn
+/// (dropped by a stop or a restart). Paseo's statuses have no word for
+/// dropped, so it is `error`, with no `lastMessage` and no `turnId`.
 async fn wait_for(daemon: &Arc<Daemon>, request: &WaitRequest) -> Value {
     let Some(message_id) = request.message_id.as_deref() else {
         let turn = request.turn_id.as_deref();
@@ -331,12 +333,13 @@ async fn wait_for(daemon: &Arc<Daemon>, request: &WaitRequest) -> Value {
         }
         agents::Waited::TimedOut => {
             let agent = daemon.read(|store| store.agent(&agent_id).cloned());
-            json!({"status": "timeout", "final": agent, "error": null, "lastMessage": null})
+            json!({"status": "timeout", "final": agent, "error": null, "lastMessage": null,
+                   "turnId": null})
         }
         agents::Waited::Dropped => {
             let agent = daemon.read(|store| store.agent(&agent_id).cloned());
-            json!({"status": "error", "final": agent, "lastMessage": null,
-                   "error": "The queued prompt was dropped: the agent was stopped before it got to it"})
+            json!({"status": "error", "final": agent, "lastMessage": null, "turnId": null,
+                   "error": "The queued prompt was dropped: the agent was stopped or restarted before it got to it"})
         }
     }
 }

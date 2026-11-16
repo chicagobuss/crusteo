@@ -476,14 +476,17 @@ async fn an_agent_makes_a_child_in_its_workspace_and_hears_when_it_finishes() {
     .await
     .expect("the message from the parent");
 
+    // The list is compact, so the agents are its shortIds: each addresses
+    // the agent with every tool that takes an id.
     let listed = h
         .tool(token.clone(), "list_agents", json!({}))
         .await
         .unwrap();
-    let ids: Vec<&str> = (listed["agents"].as_array().unwrap().iter())
-        .map(|a| a["id"].as_str().unwrap())
+    let short_of = |id: &str| id.chars().take(7).collect::<String>();
+    let shorts: Vec<String> = (listed["agents"].as_array().unwrap().iter())
+        .map(|a| a["shortId"].as_str().unwrap().to_string())
         .collect();
-    assert!(ids.contains(&child.as_str()) && ids.contains(&parent.as_str()));
+    assert!(shorts.contains(&short_of(&child)) && shorts.contains(&short_of(&parent)));
 
     // Burrow's own filter: the agents of workspaces with a label.
     let workspace = parent_snapshot["agent"]["workspaceId"].as_str().unwrap();
@@ -530,6 +533,17 @@ async fn an_agent_makes_a_child_in_its_workspace_and_hears_when_it_finishes() {
         "{content}"
     );
     assert!(content.contains("echo: <paseo-system"), "{content}");
+    // By a prefix of its id, the same activity, under its whole id.
+    let by_prefix = h
+        .tool(
+            token.clone(),
+            "get_agent_activity",
+            json!({"agentId": &child[..12]}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(by_prefix["agentId"], child.as_str(), "{by_prefix}");
+    assert_eq!(by_prefix["content"], activity["content"], "{by_prefix}");
     let status = h
         .tool(h.top(), "get_agent_status", json!({"agentId": child}))
         .await
@@ -634,6 +648,375 @@ async fn a_prompt_for_a_busy_unsteerable_agent_waits_and_its_notice_is_its_own()
     let text = notice["agentMessage"]["text"].as_str().unwrap();
     assert!(text.contains("second\n</paseo-system>"), "{text}");
     assert!(!text.contains("echo: first"), "{text}");
+    h.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_deleted_or_archived_agents_token_is_refused() {
+    let h = harness().await;
+    let (deleted, archived, kept) = (h.agent().await, h.agent().await, h.agent().await);
+    let tokens: Vec<String> = [&deleted, &archived, &kept]
+        .iter()
+        .map(|agent| h.daemon.mcp.token(agent))
+        .collect();
+    h.request(json!({"type": "delete_agent_request", "agentId": deleted}))
+        .await;
+    h.request(json!({"type": "archive_agent_request", "agentId": archived}))
+        .await;
+    let url = h.url();
+    let replies = tokio::task::spawn_blocking(move || {
+        (tokens.iter())
+            .map(|token| rpc(&url, Some(token), "tools/list", json!({})))
+            .collect::<Vec<_>>()
+    })
+    .await
+    .unwrap();
+    for reply in &replies[..2] {
+        assert_eq!(refusal(reply), "this token was not issued by Burrow");
+    }
+    assert!(replies[2]["result"]["tools"].is_array(), "{}", replies[2]);
+    h.stop().await;
+}
+
+/// The echo provider under its own id, deaf to interrupts: a turn it runs
+/// cannot be replaced.
+struct Deaf(EchoProvider);
+
+impl burrow_provider::Provider for Deaf {
+    fn info(&self) -> burrow_provider::ProviderInfo {
+        let mut info = self.0.info();
+        info.id = "deaf".into();
+        info
+    }
+
+    fn start(
+        &self,
+        spec: burrow_provider::SessionSpec,
+    ) -> Result<burrow_provider::Session, burrow_provider::ProviderError> {
+        let mut session = self.0.start(spec)?;
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let inner = std::mem::replace(&mut session.commands, tx);
+        tokio::spawn(async move {
+            while let Some(command) = rx.recv().await {
+                if !matches!(command, burrow_provider::Command::Interrupt) {
+                    let _ = inner.send(command);
+                }
+            }
+        });
+        Ok(session)
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_sender_is_told_when_a_turn_it_said_it_would_replace_cannot_be() {
+    let h = harness().await;
+    h.daemon.agents.register(Arc::new(Deaf(EchoProvider {
+        chunk_delay: Duration::from_millis(2),
+        slow_delay: Duration::from_secs(120),
+    })));
+    let sender = h.agent().await;
+    let token = Some(h.daemon.mcp.token(&sender));
+    let busy = h
+        .request(json!({"type": "agent.create.request", "labels": {},
+            "config": {"provider": "deaf", "cwd": h.cwd.to_string_lossy()}}))
+        .await["agent"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let started = h
+        .request(
+            json!({"type": "send_agent_message_request", "agentId": busy,
+            "text": "slow first", "messageId": "m-first"}),
+        )
+        .await;
+    assert_eq!(started["disposition"], "started", "{started}");
+
+    let sent = h
+        .tool(
+            token.clone(),
+            "send_agent_prompt",
+            json!({"agentId": busy, "prompt": "second", "activeTurnBehavior": "interrupt"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(sent["disposition"], "interrupting", "{sent}");
+    assert_eq!(sent["deliveryStatus"], "pending", "{sent}");
+
+    // The interrupt is given up on after its grace: the sender hears so.
+    let notice = timeout(Duration::from_secs(45), async {
+        loop {
+            let items = h.timeline(&sender).await;
+            if let Some(item) = items
+                .iter()
+                .find(|i| i["agentMessage"]["event"] == "errored")
+            {
+                return item.clone();
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    })
+    .await
+    .expect("an errored notice");
+    assert_eq!(notice["agentMessage"]["sender"]["id"], busy.as_str());
+    let text = notice["agentMessage"]["text"].as_str().unwrap();
+    assert!(text.starts_with(&format!("Agent {busy} (")), "{text}");
+    assert!(
+        text.contains("Your prompt was not delivered: Cannot replace agent"),
+        "{text}"
+    );
+    h.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_server_id_that_names_this_host_runs_the_tool_here() {
+    let h = harness().await;
+    let caller = h.agent().await;
+    let token = Some(h.daemon.mcp.token(&caller));
+    let elsewhere = std::env::temp_dir().join(format!(
+        "burrow-mcp-other-{}",
+        burrow_daemon::ids::agent_id()
+    ));
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    let other = h
+        .request(json!({"type": "agent.create.request", "labels": {},
+            "config": {"provider": "echo", "cwd": elsewhere.to_string_lossy()}}))
+        .await["agent"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let hostname = h.daemon.config.hostname.clone().unwrap();
+    let server_id = h.daemon.config.server_id.clone();
+
+    // By its name, in any case, or its id: here, for the caller, so its own
+    // directory by default; no Reef is asked (none is connected).
+    for named in [hostname.to_uppercase(), server_id.clone()] {
+        let listed = h
+            .tool(token.clone(), "list_agents", json!({"serverId": named}))
+            .await
+            .unwrap();
+        let short_of = |id: &str| id.chars().take(7).collect::<String>();
+        let shorts: Vec<String> = (listed["agents"].as_array().unwrap().iter())
+            .map(|a| a["shortId"].as_str().unwrap().to_string())
+            .collect();
+        assert!(shorts.contains(&short_of(&caller)), "{named}: {listed}");
+        assert!(!shorts.contains(&short_of(&other)), "{named}: {listed}");
+        assert_eq!(listed["serverId"], server_id.as_str());
+    }
+
+    // The tools that act by an agent's id take it too.
+    let canceled = h
+        .tool(
+            token.clone(),
+            "cancel_agent",
+            json!({"agentId": other, "serverId": hostname}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        canceled["success"], false,
+        "nothing was running: {canceled}"
+    );
+    let answered = h
+        .tool(
+            token.clone(),
+            "respond_to_permission",
+            json!({"agentId": other, "requestId": "perm-none", "serverId": hostname,
+                   "response": {"behavior": "allow"}}),
+        )
+        .await
+        .unwrap_err();
+    // This host's own answer: there is no such request.
+    assert!(
+        answered.contains("perm-none") && !answered.contains("this host only"),
+        "{answered}"
+    );
+
+    // Another host's id sends them to it, through a Reef, rather than
+    // refusing them outright.
+    let routed = h
+        .tool(
+            token.clone(),
+            "cancel_agent",
+            json!({"agentId": other, "serverId": "srv_somewhere"}),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        routed.contains("Host srv_somewhere is not this host"),
+        "{routed}"
+    );
+    assert!(routed.contains("none is connected"), "{routed}");
+    h.stop().await;
+    let _ = std::fs::remove_dir_all(&elsewhere);
+}
+
+impl Harness {
+    /// An echo agent with `title`.
+    async fn titled(&self, title: &str) -> String {
+        let reply = self
+            .request(json!({"type": "agent.create.request", "labels": {},
+                "config": {"provider": "echo", "cwd": self.cwd.to_string_lossy(),
+                           "title": title}}))
+            .await;
+        reply["agent"]["id"].as_str().unwrap().to_string()
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_prompt_that_names_another_host_is_not_given_to_an_agent_here_of_that_name() {
+    let h = harness().await;
+    let caller = h.agent().await;
+    let token = Some(h.daemon.mcp.token(&caller));
+    let local = h.titled("worker").await;
+    let hostname = h.daemon.config.hostname.clone().unwrap();
+
+    // Another host's id: the agent is that host's to find, so with no Reef
+    // to ask it is out of reach, not this host's agent of the same name.
+    for agent in ["worker", local.as_str()] {
+        let refused = h
+            .tool(
+                token.clone(),
+                "send_agent_prompt",
+                json!({"agentId": agent, "prompt": "go", "serverId": "srv_somewhere"}),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            refused.contains("Host srv_somewhere is not this host"),
+            "{refused}"
+        );
+        assert!(refused.contains("none is connected"), "{refused}");
+    }
+    assert_eq!(h.timeline(&local).await, Vec::<Value>::new());
+
+    // This host's own name, in any case, is as if none was given.
+    let sent = h
+        .tool(
+            token.clone(),
+            "send_agent_prompt",
+            json!({"agentId": "worker", "prompt": "go", "serverId": hostname.to_uppercase(),
+                   "notifyOnFinish": false}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(sent["target"]["agentId"], local.as_str(), "{sent}");
+    h.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cancelling_by_a_title_or_an_id_prefix_says_it_stopped_a_running_turn() {
+    let h = harness().await;
+    let top = h.top();
+    let slow = h.titled("Slowpoke").await;
+    let prefix = slow[..8].to_string();
+    for (n, named) in ["Slowpoke", prefix.as_str(), slow.as_str()]
+        .into_iter()
+        .enumerate()
+    {
+        let started = h
+            .request(
+                json!({"type": "send_agent_message_request", "agentId": slow,
+                            "text": format!("slow {n}"), "messageId": format!("m-{n}")}),
+            )
+            .await;
+        assert_eq!(started["disposition"], "started", "{named}: {started}");
+        // However it is named, the turn it stopped is the one it reports.
+        let canceled = (h
+            .tool(top.clone(), "cancel_agent", json!({"agentId": named}))
+            .await)
+            .unwrap();
+        assert_eq!(canceled["success"], true, "{named}: {canceled}");
+    }
+    // Idle now: nothing to stop, however it is named.
+    for named in ["Slowpoke", slow.as_str()] {
+        let idle = (h
+            .tool(top.clone(), "cancel_agent", json!({"agentId": named}))
+            .await)
+            .unwrap();
+        assert_eq!(idle["success"], false, "{named}: {idle}");
+    }
+    h.stop().await;
+}
+
+/// Starts a turn on a new agent of the `deaf` provider, which cannot be
+/// replaced, and returns its id.
+async fn busy_deaf_agent(h: &Harness) -> String {
+    let busy = h
+        .request(json!({"type": "agent.create.request", "labels": {},
+            "config": {"provider": "deaf", "cwd": h.cwd.to_string_lossy()}}))
+        .await["agent"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let started = h
+        .request(
+            json!({"type": "send_agent_message_request", "agentId": busy,
+                        "text": "slow first", "messageId": format!("m-first-{busy}")}),
+        )
+        .await;
+    assert_eq!(started["disposition"], "started", "{started}");
+    busy
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_sender_that_wanted_no_notice_is_not_told_of_a_turn_that_could_not_be_replaced() {
+    let h = harness().await;
+    h.daemon.agents.register(Arc::new(Deaf(EchoProvider {
+        chunk_delay: Duration::from_millis(2),
+        slow_delay: Duration::from_secs(120),
+    })));
+    let (quiet, told) = (h.agent().await, h.agent().await);
+    let (busy_quiet, busy_told) = (busy_deaf_agent(&h).await, busy_deaf_agent(&h).await);
+    let replace = |agent: &str, notify: bool| {
+        json!({"agentId": agent, "prompt": "second", "activeTurnBehavior": "interrupt",
+               "notifyOnFinish": notify})
+    };
+
+    // Both are given up on after the same grace: the one that asked is told.
+    let sent = h
+        .tool(
+            Some(h.daemon.mcp.token(&quiet)),
+            "send_agent_prompt",
+            replace(&busy_quiet, false),
+        )
+        .await
+        .unwrap();
+    assert_eq!(sent["deliveryStatus"], "pending", "{sent}");
+    assert!(
+        !sent["guidance"]
+            .as_str()
+            .unwrap()
+            .contains("You will get notified"),
+        "{sent}"
+    );
+    h.tool(
+        Some(h.daemon.mcp.token(&told)),
+        "send_agent_prompt",
+        replace(&busy_told, true),
+    )
+    .await
+    .unwrap();
+    timeout(Duration::from_secs(45), async {
+        loop {
+            let items = h.timeline(&told).await;
+            if items
+                .iter()
+                .any(|i| i["agentMessage"]["event"] == "errored")
+            {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    })
+    .await
+    .expect("an errored notice for the sender that asked");
+    // The other's was given up on at the same time, a moment earlier.
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let items = h.timeline(&quiet).await;
+    assert!(
+        !items.iter().any(|i| i["agentMessage"]["event"].is_string()),
+        "{items:?}"
+    );
     h.stop().await;
 }
 

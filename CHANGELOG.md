@@ -5,7 +5,111 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.2.1] - 2026-11-16
+
+Fixes, mostly to messages between agents and to connections, compact agent lists, and the desktop
+in reef mode connecting through Reef alone. Highlights:
+
+- **The desktop in reef mode needs to reach Reef and nothing else:** Reef passes each daemon
+  through to it, with its own address, ssh and password for it.
+- **History from the keyboard** (Ctrl+H; ⇧⌘H on a Mac), and Skiff's top bar shows up to four
+  usage dials.
+- **Messages between agents** go where they are sent: a prompt that names another host goes to
+  that host's agent only, a prompt that could not be delivered is reported as such, and Reef
+  keeps a route it has answered for across a restart.
+- **Agent lists are compact:** `list_agents` gives each agent's short id, name, state, model,
+  labels and age (`verbose: true` for the full snapshot), and `burrow ls` filters by state and
+  host, shows labels and counts, and finds other hosts' agents for `inspect`, `logs` and `wait`.
+- **Connections come back after a network drop:** a write that a dropped path holds no longer
+  keeps a connection from noticing it is dead, so Reef's links to the hosts, and the desktop's,
+  reconnect within seconds instead of minutes.
+- "Just now" labels keep up, and a desktop or daemon that stops reading no longer holds Reef's
+  pass-through open.
+
+Before you upgrade:
+
+- **Upgrade Reef before the Burrows.** A 0.2.1 Burrow sends a prompt for a named host's agent
+  only there through a 0.2.1 Reef; a Reef from before 0.2.1 ignores the host and looks on every
+  host, as before.
+- **Burrow still has no passwords.** Keep it on loopback or a private network such as a VPN.
+
+### Added
+
+- **The desktop in reef mode connects only to Reef.** Reef passes each daemon through to it
+  (`/daemon/<id>/ws`, with the device token), reaching the daemon as it does for Skiff: its
+  address, its ssh and its password. A desktop then needs to reach Reef and nothing else, no ssh
+  keys or passwords for the hosts. A host with an `overrides` address is still connected to
+  directly, and `"direct": true` in `reef.json` connects to all of them directly, as before. A Reef
+  from before this, or one at an `https://` address, gives addresses as before and the desktop
+  connects to each daemon itself. The Hosts screen says "through Reef".
+- **`burrow inspect`, `logs` and `wait` reach another host's agent by name**, through the Reef
+  that routes for this host: the CLI finds the agent in the fleet's list, and `logs` and `wait`
+  run on the agent's own host (`wait_for_finish` joins the read-only tools a host runs for agents
+  elsewhere, and a waiting tool passes its own timeout to the Reef, up to 24 hours).
+- **`burrow ls`:** `--state` (several allowed) and `--on <host>` filters, a LABELS column (the
+  workspace's label names, then the agent's own `key=value` labels), `--group-by host|label|state`
+  for counts per group, and `--json --brief` for the compact shape. Without `-a`, closed and
+  archived agents are left out and a footer says how many.
+
+### Changed
+
+- **`list_agents` is compact by default:** each agent is its `shortId`, `host` on a fleet list,
+  `title`, `status`, `attention`, `model` as provider/model, `workspaceLabels`, its own labels
+  (`paseo.*` and `crusteo.*` keys hidden) and `updated` as a short age, with empty fields left
+  out; `verbose: true` gives the full snapshots, with ids. Address an agent by its short id or
+  name. Hosts still answer the Reef with full snapshots, so an older Burrow or CLI reads them as
+  before.
+
+- **History from the keyboard.** Ctrl+H opens and closes History on Linux and Windows (it was
+  Ctrl+Shift+H; a Mac keeps ⇧⌘H, since ⌘H hides the app). However History is opened, the cursor
+  goes to its Grep box, and while it is there a ring marks the top agent: Up and Down move it,
+  Enter opens that agent as a click does. A new grep puts the ring back on the top row. Escape
+  empties the box, and in an empty box closes History.
+- Skiff's top bar always shows the **usage dials** (up to four accounts), full size side by side
+  when the bar has room and quarter size, two by two, when it doesn't. The single dial and the
+  `?usage=` parameter are gone.
+
+### Fixed
+
+- **"Just now" kept saying so.** A quiet agent's timeline, Lanes in a window without focus, the
+  Fleet layout's columns and Skiff's lists only reworked their "3m ago" labels when something
+  changed, so an agent that stopped hours ago could still read "just now". They now keep up on
+  their own.
+- **A wrong Reef token stops asking.** A desktop whose device token Reef refuses (HTTP 401) says
+  so on the host and waits for Reconnect or a new token, instead of retrying forever. A 403, which
+  a proxy in front may answer for a while, is shown and tried again.
+- **Connections notice a dropped network.** The client every desktop and Reef uses waited on
+  each socket write with no deadline, so after a network drop without a reset (a VPN path that
+  went away) one pending write kept it from checking its heartbeat, and the link stayed dead for
+  minutes. Every write now has a time limit, and a connection that cannot write is dropped and
+  dialled again.
+- **Reef's pass-through lets go of a stuck peer.** A desktop or daemon that stops reading, as a
+  desktop whose network dropped without a reset does, no longer holds the connection open: Reef
+  gives up on a frame not taken within a minute and closes both sides. When Reef cannot reach a
+  daemon over ssh, the desktop shows what ssh said.
+- **Messages between agents:**
+  - Reef saves a routed prompt's route before it answers the sender, so a Reef stopped in between
+    still sends the notice it owes.
+  - A prompt sent to replace a running turn that then fails to get through is reported to the
+    sender as `errored`, on the same host or through Reef, instead of leaving it waiting.
+  - A queued prompt lost when its agent restarts is reported as dropped, not as finished with the
+    previous turn's reply. Wait answers also say which turn they are of (`turnId`).
+  - A `serverId` naming the agent's own host, by its server id or its name in any case, runs the
+    tool on that host; `cancel_agent` and `respond_to_permission` take another host's `serverId`
+    and go through Reef.
+  - `send_agent_prompt` with another host's `serverId` goes to that host's agent only. It used to
+    take an agent on the sender's own host that had the same name, and Reef looked on every host.
+    Reef finds a host by its name, server id or reported hostname, in any case.
+  - A sender that asked for no finish notice (`notifyOnFinish: false`) is not sent one when its
+    replacing prompt fails.
+  - A queued prompt dropped before it ran is reported through Reef as not delivered, with why,
+    instead of only "was closed".
+  - `cancel_agent` by an id prefix or a name answers `success: true` when it stopped a turn, and
+    `get_agent_activity` by one shows the agent's activity (it showed none).
+  - A host's server id names it in any case, on Burrow as on Reef.
+- **Skiff's usage dials** shrink when a "host down" note or the unseen count needs the room.
+- **An archived or deleted agent's tools token stops working** at once, not at the next restart.
+- A Claude turn that fails with an API error no longer ends with "code: success".
 
 ## [0.2.0] - 2026-11-11
 
@@ -1110,7 +1214,7 @@ First alpha, for a few early testers. Early software: expect rough edges.
 - Patched GPUI (`vendor/gpui-pre`) that skips redraws on window moves and lets cached views be
   reused after they move.
 
-[Unreleased]: https://github.com/chicagobuss/crusteo/compare/v0.2.0...HEAD
+[0.2.1]: https://github.com/chicagobuss/crusteo/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/chicagobuss/crusteo/releases/tag/v0.2.0
 [0.1.0-beta.6]: https://github.com/chicagobuss/crusteo/releases/tag/v0.1.0-beta.6
 [0.1.0-beta.5]: https://github.com/chicagobuss/crusteo/releases/tag/v0.1.0-beta.5

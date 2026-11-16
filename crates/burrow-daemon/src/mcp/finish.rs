@@ -6,9 +6,9 @@
 //! `<home>/finish-subscriptions.json`, so a restart keeps the intent. A
 //! caller that is gone or archived is told nothing.
 //!
-//! Paseo's version also follows children on other hosts, with retries and
-//! acknowledged dispatch; Burrow has no connected hosts, so a child is
-//! always local and its daemon is this one.
+//! A child on another host is followed by the Reef that routed the prompt,
+//! which sends its notice here ([`routed`]) until it is acknowledged, as
+//! Paseo's version follows children on other hosts with retries.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -238,6 +238,26 @@ async fn tell(
     }
 }
 
+/// Tells `caller` that its prompt to `child` failed after the receipt said
+/// it was under way (a turn that would not be interrupted), as an `errored`
+/// notice: the caller is not left waiting for one that never comes.
+pub async fn undelivered(daemon: &Arc<Daemon>, caller: &str, child: &str, error: &str) {
+    let title = daemon
+        .read(|store| store.find_agent(child).and_then(|a| a.title.clone()))
+        .filter(|t| !t.trim().is_empty())
+        .unwrap_or_else(|| child.to_string());
+    let reason = "errored";
+    let mut text = body(child, &daemon.config.server_id, &title, reason, None, None);
+    text.push_str(&format!("\n\n{}", not_delivered(error)));
+    if let Err(error) = agents::send_notice(daemon, caller, child, event(reason), &text).await {
+        warn!(caller, child, %error, "an undelivered prompt's notice was not delivered");
+    }
+}
+
+fn not_delivered(error: &str) -> String {
+    format!("Your prompt was not delivered: {error}")
+}
+
 /// A Reef's notice about a prompt it routed to another host
 /// ([`burrow_protocol::routing::FINISHED`]): told to the caller in the same
 /// words as a local child's, with the child's host, once however often the
@@ -290,6 +310,10 @@ pub fn routed(daemon: &Arc<Daemon>, message: &Value, late: &crate::agent_request
                 &format!("Server: {server}\nHost: {host}"),
                 1,
             );
+        }
+        // Burrow's: a routed prompt that failed after its receipt.
+        if let Some(error) = message["error"].as_str().filter(|e| !e.trim().is_empty()) {
+            text.push_str(&format!("\n\n{}", not_delivered(error.trim())));
         }
         let sent =
             agents::send_notice_once(&daemon, &caller, &child, event(reason), &text, notice_id)

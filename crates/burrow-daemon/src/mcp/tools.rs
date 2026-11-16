@@ -61,7 +61,8 @@ pub const NAMES: &[&str] = &[
 ];
 
 /// The tools that take a `serverId` to act on another host (Paseo's host
-/// tools). Burrow has no connected hosts: only its own id is accepted.
+/// tools). Another host's id goes through the Reef, when Burrow has one;
+/// this host's id, or a name it goes by, runs here.
 const HOST_TOOLS: &[&str] = &[
     "create_agent",
     "create_workspace",
@@ -86,7 +87,7 @@ async fn notify_when_started(daemon: Arc<Daemon>, caller: String, sent: agents::
             agents::Waited::TimedOut => return,
             agents::Waited::Dropped => {
                 let body = format!(
-                    "Your queued message to agent {} was dropped: the agent was stopped before it got to it.",
+                    "Your queued message to agent {} was dropped: the agent was stopped or restarted before it got to it.",
                     sent.agent_id
                 );
                 let told =
@@ -107,14 +108,26 @@ type Outcome = Result<Value, String>;
 /// client).
 pub async fn call(daemon: &Arc<Daemon>, caller: Option<&str>, name: &str, args: Value) -> Outcome {
     let cx = Cx { daemon, caller };
-    // Another host's, by its server id: run there, through the Reef.
+    // Another host's, by its server id: run there, through the Reef. One
+    // that names this host runs here, as if none were given.
     if let Some(server) = cx.other_host(&args) {
         return match name {
-            "list_agents" | "get_agent_status" | "get_agent_activity" => {
+            "list_agents" => {
+                let verbose = args["verbose"] == true;
+                let listed = cx
+                    .elsewhere(name, json!({"serverId": server}), args)
+                    .await?;
+                Ok(if verbose { listed } else { compacted(listed) })
+            }
+            "get_agent_status"
+            | "get_agent_activity"
+            | "cancel_agent"
+            | "respond_to_permission" => {
                 cx.elsewhere(name, json!({"serverId": server}), args).await
             }
-            // Routed by the agent's id, which is the fleet's.
-            "send_agent_prompt" => cx.send_agent_prompt(parse(args)?).await,
+            // Not looked for here: an id prefix or a name means the agent on
+            // that host, not one of this host's that goes by the same.
+            "send_agent_prompt" => cx.route_prompt(&parse(args)?, Some(&server)).await,
             _ => Err(format!(
                 "{name} works on this host only ({}). On other hosts' agents these work by id, through this host's Reef: send_agent_prompt, get_agent_status, get_agent_activity, list_agents, cancel_agent and respond_to_permission.",
                 daemon.config.server_id
@@ -190,6 +203,12 @@ async fn here(cx: Cx<'_>, name: &str, args: Value) -> Outcome {
             Ok(json!({"success": true}))
         }
         "get_agent_activity" => cx.get_agent_activity(parse(args)?),
+        // For an agent on another host, through the Reef (a [`TOOLS`]);
+        // no MCP tool of it: a CLI's `burrow wait`, not an agent's.
+        "wait_for_finish" => {
+            let args: WaitForFinishArgs = parse(args)?;
+            Ok(agents::wait_for_finish(daemon, &args.agent_id, args.timeout_ms).await)
+        }
         "list_providers" => Ok(json!({"providers": providers(daemon)})),
         "list_models" => cx.list_models(parse(args)?),
         // Burrow has no agent profiles (Paseo's `agentProfiles` setting).
@@ -274,6 +293,12 @@ pub fn for_reef(
     if let Some(fields) = args.as_object_mut() {
         fields.remove("serverId");
     }
+    // A host answers the Reef with full snapshots, and the Burrow that asked
+    // compacts them for its own caller: a caller older than compact lists
+    // (a Burrow, a CLI) then reads every host's agents as it always has.
+    if tool == "list_agents" {
+        args["verbose"] = true.into();
+    }
     let (daemon, late) = (daemon.clone(), late.clone());
     tokio::spawn(async move {
         let outcome = if !routing {
@@ -320,6 +345,56 @@ async fn fleet_agents(daemon: &Daemon, args: Value) -> Outcome {
         })
 }
 
+/// A client of this Burrow asks one of the fleet's tools on the agent's
+/// host (`burrow logs` and `wait` for an agent elsewhere)
+/// ([`burrow_protocol::routing::FLEET_TOOL_REQUEST`]).
+pub fn fleet_tool_for_client(
+    daemon: &Arc<Daemon>,
+    message: &Value,
+    late: &crate::agent_requests::Late,
+) {
+    use burrow_protocol::routing::FLEET_TOOL_RESPONSE;
+    let request_id = message["requestId"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    let mut at = json!({"tool": message["tool"].as_str().unwrap_or_default()});
+    if let Some(key) = message["targetAgentId"].as_str() {
+        at["targetAgentId"] = key.into();
+    }
+    if let Some(server) = message["serverId"].as_str() {
+        at["serverId"] = server.into();
+    }
+    if let Some(within) = message.get("timeoutMs").cloned().filter(Value::is_number) {
+        at["timeoutMs"] = within;
+    }
+    let args = (message.get("args").cloned())
+        .filter(Value::is_object)
+        .unwrap_or_else(|| json!({}));
+    let (daemon, late) = (daemon.clone(), late.clone());
+    tokio::spawn(async move {
+        let payload = if daemon.router.reach() != crate::router::Reach::On {
+            json!({"requestId": request_id, "ok": false, "code": "unreachable",
+                   "error": crate::router::fleet_unreachable(&daemon.router.reach())})
+        } else {
+            at["args"] = args;
+            match daemon
+                .router
+                .ask(burrow_protocol::routing::op::TOOL, at)
+                .await
+            {
+                Ok(result) => json!({"requestId": request_id, "ok": true, "result": result}),
+                Err(refused) => json!({"requestId": request_id, "ok": false, "code": refused.code,
+                                       "error": refused.error, "detail": refused.detail}),
+            }
+        };
+        let _ = late.send(burrow_protocol::envelope::session(
+            FLEET_TOOL_RESPONSE,
+            payload,
+        ));
+    });
+}
+
 /// A client of this Burrow asks for the fleet's agents
 /// ([`burrow_protocol::routing::FLEET_AGENTS_REQUEST`]).
 pub fn fleet_agents_for_client(
@@ -346,6 +421,18 @@ pub fn fleet_agents_for_client(
             payload,
         ));
     });
+}
+
+/// A list of other hosts' full snapshots in the compact shape an agent
+/// gets by default.
+fn compacted(mut listed: Value) -> Value {
+    let now = time::OffsetDateTime::now_utc();
+    if let Some(agents) = listed["agents"].as_array_mut() {
+        for agent in agents.iter_mut() {
+            *agent = crate::commands::compact_agent(agent, now);
+        }
+    }
+    listed
 }
 
 fn parse<T: DeserializeOwned>(args: Value) -> Result<T, String> {
@@ -599,6 +686,9 @@ struct ListAgentsArgs {
     /// Burrow's own: workspace label names an agent's workspace must have.
     #[serde(default)]
     workspace_labels: Option<Vec<String>>,
+    /// Burrow's own: the full snapshots, not the compact ones.
+    #[serde(default)]
+    verbose: Option<bool>,
 }
 
 #[derive(Deserialize, Default)]
@@ -640,6 +730,16 @@ struct ActivityArgs {
     agent_id: String,
     #[serde(default)]
     limit: Option<f64>,
+}
+
+/// `wait_for_finish`, for an agent on another host (a [`super::super::routing`]
+/// tool run through the Reef, as for a finish notice).
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WaitForFinishArgs {
+    agent_id: String,
+    #[serde(default)]
+    timeout_ms: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -761,11 +861,12 @@ impl Cx<'_> {
         }
     }
 
-    /// The server id a host tool names, when it is not this host's.
+    /// The server id a host tool names, when it is not this host's (by its
+    /// server id or a name it goes by).
     fn other_host(&self, args: &Value) -> Option<String> {
         (args.get("serverId").and_then(Value::as_str))
             .map(str::trim)
-            .filter(|id| !id.is_empty() && *id != self.daemon.config.server_id)
+            .filter(|id| !id.is_empty() && !self.daemon.config.names_this_host(id))
             .map(str::to_string)
     }
 
@@ -797,11 +898,14 @@ impl Cx<'_> {
 
     /// `list_agents` with `fleet`: every connected host's, through the Reef.
     async fn fleet_agents(&self, mut args: Value) -> Outcome {
+        let verbose = args["verbose"] == true;
         if let Some(fields) = args.as_object_mut() {
             fields.remove("fleet");
             fields.remove("serverId");
         }
-        fleet_agents(self.daemon, args).await
+        args["verbose"] = true.into();
+        let listed = fleet_agents(self.daemon, args).await?;
+        Ok(if verbose { listed } else { compacted(listed) })
     }
 
     /// Paseo's host directory: this host, and the fleet's others when a
@@ -1053,7 +1157,7 @@ impl Cx<'_> {
             .daemon
             .read(|store| store.find_agent(&args.agent_id).is_some());
         if !exists {
-            return self.route_prompt(&args).await;
+            return self.route_prompt(&args, None).await;
         }
         if let Some(mode) = &args.session_mode {
             agents::until_provider_of(self.daemon, &args.agent_id).await;
@@ -1129,11 +1233,26 @@ impl Cx<'_> {
             sent
         };
         // Replacing a turn waits for it to end, and the caller may be the
-        // agent whose turn it is: that one is delivered in the background.
+        // agent whose turn it is: that one is delivered in the background,
+        // and a calling agent that wants the notice told if it fails, since
+        // its receipt said pending.
         if busy == agents::Busy::Interrupt {
+            // The notice names the agent by its id, which a name or prefix
+            // given here is not.
+            let agent = (target["agentId"].as_str()).unwrap_or(&args.agent_id);
+            let (daemon, caller, agent) = (
+                self.daemon.clone(),
+                self.caller.map(str::to_string),
+                agent.to_string(),
+            );
             tokio::spawn(async move {
                 if let Err(error) = deliver.await {
                     tracing::warn!(%error, "a tool's message was not delivered");
+                    // Told only when it asked to hear how this ends, as for
+                    // a prompt that is delivered.
+                    if notify && let Some(caller) = caller {
+                        finish::undelivered(&daemon, &caller, &agent, &error).await;
+                    }
                 }
             });
             let mut guidance = format!(
@@ -1180,14 +1299,25 @@ impl Cx<'_> {
     }
 
     /// `send_agent_prompt` for an agent not on this host: through the Reef
-    /// that routes for it, when there is one and its owner allows it. The
-    /// receipt reads as a local one, with the target's host; the Reef sends
-    /// the finish notice when the turn ends.
-    async fn route_prompt(&self, args: &SendArgs) -> Outcome {
-        use crate::router::{Reach, not_here};
+    /// that routes for it, when there is one and its owner allows it. When
+    /// the caller named a host (`server`, not this one), the agent is looked
+    /// for there only. The receipt reads as a local one, with the target's
+    /// host; the Reef sends the finish notice when the turn ends.
+    async fn route_prompt(&self, args: &SendArgs, server: Option<&str>) -> Outcome {
+        use crate::router::{Reach, Refused, not_here, not_there};
         let reach = self.daemon.router.reach();
+        let refused = |reach: &Reach, refused: Option<&Refused>| match server {
+            Some(server) => not_there(
+                &args.agent_id,
+                server,
+                &self.daemon.config.server_id,
+                reach,
+                refused,
+            ),
+            None => not_here(&args.agent_id, reach, refused),
+        };
         if reach != Reach::On {
-            return Err(not_here(&args.agent_id, &reach, None));
+            return Err(refused(&reach, None));
         }
         if args.session_mode.is_some() {
             return Err(format!(
@@ -1203,15 +1333,19 @@ impl Cx<'_> {
             agents::Busy::Interrupt => "interrupt",
         };
         let notify = self.caller.is_some() && args.notify_on_finish.unwrap_or(true);
-        let ask = json!({
+        let mut ask = json!({
             "targetAgentId": args.agent_id, "prompt": args.prompt,
             "sourceAgentId": self.caller, "sourceServerId": self.daemon.config.server_id,
             "activeTurnBehavior": behavior, "notifyOnFinish": notify,
         });
+        // A Reef from before this ignores it, and looks everywhere.
+        if let Some(server) = server {
+            ask["serverId"] = server.into();
+        }
         let routed = (self.daemon.router)
             .ask(burrow_protocol::routing::op::ROUTE_PROMPT, ask)
             .await
-            .map_err(|refused| not_here(&args.agent_id, &Reach::On, Some(&refused)))?;
+            .map_err(|r| refused(&Reach::On, Some(&r)))?;
         let target = routed["target"].clone();
         let name = target["title"].as_str().unwrap_or("The agent");
         let host = target["host"].as_str().unwrap_or("another host");
@@ -1344,12 +1478,16 @@ impl Cx<'_> {
                 .then(rank(a.status).cmp(&rank(b.status)))
                 .then(activity(b).cmp(&activity(a)))
         });
+        // Compact by default: the fields an agent needs to find and choose,
+        // the rest behind `verbose: true`.
+        let verbose = args.verbose.unwrap_or(false);
+        let now = time::OffsetDateTime::now_utc();
         let items: Vec<Value> = (agents.iter().take(limit))
             .map(|a| {
                 let model = (a.runtime_info.as_ref())
                     .and_then(|r| r["model"].as_str().map(str::to_string))
                     .or_else(|| a.model.clone());
-                json!({
+                let full = json!({
                     "id": a.id, "shortId": a.id.chars().take(7).collect::<String>(),
                     "title": a.title, "provider": a.provider, "model": model,
                     "thinkingOptionId": a.thinking_option_id,
@@ -1361,20 +1499,25 @@ impl Cx<'_> {
                     "attentionReason": a.attention_reason,
                     "attentionTimestamp": a.attention_timestamp, "labels": a.labels,
                     "workspaceLabels": labels_of(a),
-                })
+                });
+                if verbose {
+                    full
+                } else {
+                    crate::commands::compact_agent(&full, now)
+                }
             })
             .collect();
         Ok(json!({"agents": items}))
     }
 
     async fn cancel_agent(&self, args: AgentId) -> Outcome {
-        let running = self.daemon.read(|store| {
-            store
-                .agents
-                .get(&args.agent_id)
-                .is_some_and(|a| a.active_turn.is_some())
-        });
-        agents::cancel(self.daemon, &args.agent_id).await?;
+        // The agent an id, a prefix of it or a name finds, as `cancel` does.
+        let (id, running) = (self.daemon)
+            .read(|store| {
+                (store.find_agent(&args.agent_id)).map(|a| (a.id.clone(), a.active_turn.is_some()))
+            })
+            .unwrap_or_else(|| (args.agent_id.clone(), false));
+        agents::cancel(self.daemon, &id).await?;
         Ok(json!({"success": running}))
     }
 
@@ -1459,9 +1602,11 @@ impl Cx<'_> {
     /// Paseo's `summarizeAgentActivity`, through crusteo's own timeline
     /// model: its rows folded as clients show them, one line or more each.
     fn get_agent_activity(&self, args: ActivityArgs) -> Outcome {
-        let id = args.agent_id;
+        let key = args.agent_id;
         let (agent, page) = self.daemon.apply(|store| {
-            let agent = store.find_agent(&id).cloned();
+            let agent = store.find_agent(&key).cloned();
+            // By the agent's id: the key may be a prefix of it, or its name.
+            let id = agent.as_ref().map(|a| a.id.clone()).unwrap_or_default();
             let page = agent
                 .as_ref()
                 .and_then(|_| store.ensure_timeline(&id))
@@ -1478,7 +1623,7 @@ impl Cx<'_> {
                 });
             ((agent, page), Vec::new())
         });
-        let agent = agent.ok_or_else(|| format!("Agent {id} not found"))?;
+        let agent = agent.ok_or_else(|| format!("Agent {key} not found"))?;
         let (updates, payload) = page.unwrap_or((0, json!({"entries": []})));
         let mut model = fleet::timeline::Timeline::default();
         model.apply_page(&payload);
@@ -1503,7 +1648,7 @@ impl Cx<'_> {
             lines.join("\n")
         };
         Ok(json!({
-            "agentId": id, "updateCount": updates, "currentModeId": agent.current_mode_id,
+            "agentId": agent.id, "updateCount": updates, "currentModeId": agent.current_mode_id,
             "content": format!("{header}\n\n{text}"),
         }))
     }

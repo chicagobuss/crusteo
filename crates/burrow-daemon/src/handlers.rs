@@ -143,6 +143,12 @@ pub fn handle(
             crate::mcp::tools::fleet_agents_for_client(daemon, &message, late);
             Ok(Vec::new())
         }
+        // A local client (`burrow inspect`, `logs` and `wait` for an agent
+        // elsewhere) asks one of the fleet's tools on its host.
+        routing::FLEET_TOOL_REQUEST => {
+            crate::mcp::tools::fleet_tool_for_client(daemon, &message, late);
+            Ok(Vec::new())
+        }
         other if crate::terminals::KINDS.contains(&other) => {
             crate::terminals::handle(daemon, subs, shape, late, other, &message)
                 .ok_or(Failure::Schema)

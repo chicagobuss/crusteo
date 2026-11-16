@@ -272,12 +272,13 @@ impl FleetStore {
             store.start_stress(stress, cx);
             return store;
         }
+        // Reef mode first: hosts it passes through are opened with its token.
+        if let Some(link) = crate::app::config::reef_link() {
+            store.follow_reef(link, cx);
+        }
         let ids: Vec<HostId> = store.fleet.hosts.iter().map(|h| h.id().clone()).collect();
         for id in ids {
             store.connect(&id, cx);
-        }
-        if let Some(link) = crate::app::config::reef_link() {
-            store.follow_reef(link, cx);
         }
         store
     }
@@ -410,8 +411,13 @@ impl FleetStore {
             return;
         };
         host.connection = Connection::Connecting;
+        // Through Reef's pass-through, with its device token.
+        let bearer = (self.reef.as_ref())
+            .filter(|reef| reef.link.passes(&endpoint))
+            .and_then(|reef| reef.link.token.clone());
         let mut config = Config::new(endpoint, self.client_id.clone());
         config.password = host.config.password.clone();
+        config.bearer = bearer;
         let client = Client::connect(config);
         let events = client.events();
         self.next_generation += 1;

@@ -26,7 +26,7 @@ Each holds the `reef` binary, this guide as `INSTALL.md`, the license, the chang
 `reef-settings.json` (in the source tree they are in `packaging/reef/`).
 
 ```sh
-version=0.2.0
+version=0.2.1
 target=x86_64-unknown-linux-musl
 base=https://github.com/chicagobuss/crusteo/releases/download/v$version
 curl -LO "$base/reef-$version-$target.tar.gz"
@@ -47,7 +47,7 @@ The examples keep everything in one folder, `~/reef`:
 mkdir -p ~/reef
 install -m 0755 "reef-$version-$target/reef" ~/reef/
 cp "reef-$version-$target/examples/hosts.json" ~/reef/
-~/reef/reef --version      # reef 0.2.0 (<commit>)
+~/reef/reef --version      # reef 0.2.1 (<commit>)
 ```
 
 ### hosts.json
@@ -103,8 +103,9 @@ WebSocket runs over it.
   running. `sshd` must allow TCP forwarding (`AllowTcpForwarding`, on by default).
 - **When it fails.** A host that cannot be reached shows what ssh said, such as `Permission
   denied (publickey)` or `stdio forwarding failed` when no daemon listens on the far side.
-- **The desktop app.** In reef mode it connects to the same `ssh://` address through its own
-  `ssh` and config, so that machine needs the key as well.
+- **The desktop app.** In reef mode it reaches the host through Reef, which uses its own ssh, so
+  the desktop needs no key. With `"direct": true` in its `reef.json` it connects to the same
+  `ssh://` address through its own `ssh` and config, and then that machine needs the key as well.
 
 ### The data folder
 

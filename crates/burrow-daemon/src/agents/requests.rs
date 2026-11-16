@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 
 use super::create::PARENT_AGENT_LABEL;
 use super::live::{ensure_live, interrupt};
-use super::{last_assistant_text, resolve, turn_error, turn_text, unarchive, update};
+use super::{last_assistant_text, last_turn, resolve, turn_error, turn_text, unarchive, update};
 use crate::clock;
 use crate::daemon::Daemon;
 use crate::store::StoreEvent;
@@ -29,7 +29,9 @@ pub async fn wait_for_finish(daemon: &Arc<Daemon>, key: &str, timeout_ms: Option
 /// [`wait_for_finish`], for one turn when `turn` names it: answered once it
 /// is no longer the agent's running turn, from that turn's own rows, so a
 /// turn that starts straight after it (a queued prompt's) is not taken for
-/// it. A permission only counts while the turn runs.
+/// it. A permission only counts while the turn runs. Beyond Paseo's fields,
+/// `turnId` says which turn the answer is of: `turn`, else the running or
+/// last one.
 pub async fn wait_for_turn(
     daemon: &Arc<Daemon>,
     key: &str,
@@ -37,15 +39,21 @@ pub async fn wait_for_turn(
     timeout_ms: Option<u64>,
 ) -> Value {
     let answer = |status: &str, agent: Option<&AgentSnapshot>, error: Option<String>| {
-        let last = agent
+        let (last, turn_id) = agent
             .map(|agent| {
                 daemon.read(|store| match turn {
-                    Some(turn) => turn_text(store, &agent.id, turn),
-                    None => last_assistant_text(store, &agent.id),
+                    Some(turn) => (turn_text(store, &agent.id, turn), Some(turn.to_string())),
+                    None => {
+                        let running = agent.active_turn.as_ref().map(|t| t.turn_id.clone());
+                        let turn = running.or_else(|| last_turn(store, &agent.id));
+                        (last_assistant_text(store, &agent.id), turn)
+                    }
                 })
             })
-            .filter(|text| !text.is_empty());
-        json!({"status": status, "final": agent, "error": error, "lastMessage": last})
+            .unwrap_or_default();
+        let last = Some(last).filter(|text| !text.is_empty());
+        json!({"status": status, "final": agent, "error": error, "lastMessage": last,
+               "turnId": turn_id})
     };
     // Watched before the first look, so a change between the two is seen.
     let mut changes = daemon.changes();
@@ -165,6 +173,8 @@ pub async fn archive(daemon: &Arc<Daemon>, key: &str) -> Result<String, String> 
     });
     // Its schedules end, as Paseo's `completeForAgent`.
     daemon.schedules.complete_for_agent(&agent_id);
+    // Its CLI is gone, so its tools token goes too.
+    daemon.mcp.forget(&agent_id);
     Ok(archived_at)
 }
 
@@ -180,6 +190,7 @@ pub async fn delete(daemon: &Arc<Daemon>, agent_id: &str) -> bool {
         daemon.agents.forget(agent_id);
         let _ = live.commands.send(Command::Shutdown);
     }
+    daemon.mcp.forget(agent_id);
     daemon.apply(|store| store.delete_agent(agent_id))
 }
 

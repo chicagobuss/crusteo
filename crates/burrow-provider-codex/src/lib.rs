@@ -430,9 +430,26 @@ while IFS= read -r line; do
 done
 "#;
         let binary = dir.join("codex");
-        std::fs::write(&binary, script).unwrap();
+        write_script(&binary, script);
         std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
         binary
+    }
+
+    /// Writes `text` to `path` for running: written here under another name
+    /// and copied into place by `cp`. A test thread forking while this
+    /// process held `path` open for writing would pass that open file to its
+    /// child, and running it then fails with "Text file busy"; `cp`'s own
+    /// open file goes to no one.
+    #[cfg(unix)]
+    fn write_script(path: &Path, text: &str) {
+        let source = path.with_extension("src");
+        std::fs::write(&source, text).unwrap();
+        let copied = std::process::Command::new("cp")
+            .arg(&source)
+            .arg(path)
+            .status()
+            .unwrap();
+        assert!(copied.success(), "cp to {}", path.display());
     }
 
     #[cfg(unix)]

@@ -123,13 +123,15 @@ pub enum Waited {
     Started {
         turn: Option<String>,
     },
-    /// The agent was stopped or closed before it got to it.
+    /// The agent was stopped, closed or restarted before it got to it.
     Dropped,
     TimedOut,
 }
 
 /// Waits until the prompt `message_id` no longer waits behind `agent_id`'s
-/// turn: started, or dropped by a stop.
+/// turn: started, or dropped by a stop. One the session does not know of (it
+/// ended or was restarted since) is looked for in the timeline: its turn if
+/// it got there, else dropped, so no earlier turn is taken for it.
 pub async fn wait_started(
     daemon: &Arc<Daemon>,
     agent_id: &str,
@@ -137,12 +139,16 @@ pub async fn wait_started(
     deadline: Option<Instant>,
 ) -> Waited {
     let Some(live) = daemon.agents.live(agent_id) else {
-        return Waited::Started { turn: None }; // no session, so nothing waits in one
+        return in_timeline(daemon, agent_id, message_id);
     };
     let mut started = live.started.subscribe();
     loop {
-        if let Some(waited) = live.waiting(message_id) {
-            return waited;
+        match live.waiting(message_id) {
+            Some(Waited::Started { turn: None }) => {
+                return in_timeline(daemon, agent_id, message_id);
+            }
+            Some(waited) => return waited,
+            None => {}
         }
         let changed = started.changed();
         let changed = match deadline {
@@ -153,8 +159,28 @@ pub async fn wait_started(
             None => changed.await,
         };
         if changed.is_err() {
-            return Waited::Started { turn: None };
+            return in_timeline(daemon, agent_id, message_id);
         }
+    }
+}
+
+/// Where the prompt `message_id` went, by the agent's timeline: the turn its
+/// row was recorded in, or dropped when it never got there.
+fn in_timeline(daemon: &Daemon, agent_id: &str, message_id: &str) -> Waited {
+    let call = format!("paseo-agent-message:{message_id}");
+    let found = daemon.apply(|store| {
+        let found = store.ensure_timeline(agent_id).and_then(|timeline| {
+            (timeline.rows().iter().rev())
+                .find(|row| {
+                    row.item["messageId"] == message_id || row.item["callId"] == call.as_str()
+                })
+                .map(|row| row.turn_id.clone())
+        });
+        (found, Vec::new())
+    });
+    match found {
+        Some(turn) => Waited::Started { turn },
+        None => Waited::Dropped,
     }
 }
 

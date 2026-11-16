@@ -230,6 +230,26 @@ pub fn not_here(key: &str, reach: &Reach, refused: Option<&Refused>) -> String {
     }
 }
 
+/// What an agent is told when a prompt names the agent `key` on host
+/// `server`, which is not this host (`this`), and the Reef cannot, or did
+/// not, route it there.
+pub fn not_there(
+    key: &str,
+    server: &str,
+    this: &str,
+    reach: &Reach,
+    refused: Option<&Refused>,
+) -> String {
+    match (reach, refused) {
+        // The Reef's words say which is missing, the host or its agent.
+        (Reach::On, Some(refused)) if refused.code == code::NOT_FOUND => refused.error.clone(),
+        (Reach::On, Some(refused)) if refused.code == code::AMBIGUOUS => {
+            not_here(key, reach, Some(refused))
+        }
+        _ => host_not_here(server, this, reach, refused),
+    }
+}
+
 /// What an agent is told when a host tool names `server`, which is not
 /// this host (`this`), and the Reef cannot, or did not, run it there.
 pub fn host_not_here(server: &str, this: &str, reach: &Reach, refused: Option<&Refused>) -> String {
@@ -317,5 +337,42 @@ mod tests {
         assert_eq!(router.reach(), Reach::Off);
         router.gone(1);
         assert_eq!(router.reach(), Reach::NoReef);
+    }
+
+    #[test]
+    fn a_prompt_to_a_named_host_is_refused_in_words_about_that_host() {
+        let refused = |code: &str, error: &str| Refused {
+            code: code.into(),
+            error: error.into(),
+            detail: json!({"candidates": [{"agentId": "a1", "title": "worker",
+                                            "host": "devbox", "status": "idle"}]}),
+        };
+        let told = |reach: &Reach, refused: Option<&Refused>| {
+            not_there("worker", "devbox", "srv_here", reach, refused)
+        };
+        // No Reef, or routing off: that host is out of reach, and why.
+        let none = told(&Reach::NoReef, None);
+        assert!(
+            none.contains("Host devbox is not this host (srv_here)"),
+            "{none}"
+        );
+        assert!(none.contains("none is connected"), "{none}");
+        assert!(told(&Reach::Off, None).contains("off in this fleet's Reef"));
+        // The Reef's own words for a host or an agent it did not find.
+        let missing = refused(code::NOT_FOUND, "No agent on devbox goes by worker.");
+        assert_eq!(
+            told(&Reach::On, Some(&missing)),
+            "No agent on devbox goes by worker."
+        );
+        // Two on that host: which, by id.
+        let two = refused(code::AMBIGUOUS, "More than one agent goes by worker.");
+        let two = told(&Reach::On, Some(&two));
+        assert!(two.contains("- a1 (worker) on devbox, idle"), "{two}");
+        // Anything else it refused, as one of that host's.
+        let limited = refused(code::RATE_LIMITED, "Too many prompts.");
+        assert_eq!(
+            told(&Reach::On, Some(&limited)),
+            "Host devbox: Too many prompts."
+        );
     }
 }

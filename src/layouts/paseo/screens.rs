@@ -241,12 +241,18 @@ impl Render for HostsPane {
                                         .truncate()
                                         .text_size(size::sm())
                                         .text_color(p.muted)
-                                        .child(
-                                            host.config
-                                                .endpoint
-                                                .clone()
-                                                .unwrap_or_else(|| "no address".into()),
-                                        ),
+                                        .child(match &host.config.endpoint {
+                                            // Its pass-through address says
+                                            // nothing the reader can use.
+                                            Some(endpoint)
+                                                if (reef.as_ref())
+                                                    .is_some_and(|r| r.link.passes(endpoint)) =>
+                                            {
+                                                "through Reef".to_string()
+                                            }
+                                            Some(endpoint) => endpoint.clone(),
+                                            None => "no address".into(),
+                                        }),
                                 ),
                         )
                         .child(
@@ -403,7 +409,7 @@ impl Render for HostsPane {
                 );
                 match &reef.error {
                     Some(error) => format!("Hosts come from Reef at {}, which did not answer: {error}. These are the hosts it gave last ({synced}).", reef.url),
-                    None => format!("Hosts come from Reef at {} (last asked {synced}). Add or remove them there; this desktop connects to each daemon itself.", reef.url),
+                    None => format!("Hosts come from Reef at {} (last asked {synced}). Add or remove them there.", reef.url),
                 }
             }
         };

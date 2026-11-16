@@ -16,7 +16,7 @@ and grew into three parts that work together, or each on its own alongside Paseo
 - **Crusteo**, a fast native desktop app, written in Rust with [GPUI](https://www.gpui.rs/), that
   connects to every daemon at once.
 
-> **Status: 0.2.0. Early, and moving fast; expect rough edges.** Crusteo is not affiliated
+> **Status: 0.2.1. Early, and moving fast; expect rough edges.** Crusteo is not affiliated
 > with or endorsed by the Paseo project. Everything speaks Paseo's daemon protocol (version 1), so
 > Paseo's own apps and CLI work with Burrow, and Crusteo and Reef work with Paseo's daemons. See
 > [docs/burrow/compatibility.md](docs/burrow/compatibility.md) for exactly which versions were
@@ -25,22 +25,24 @@ and grew into three parts that work together, or each on its own alongside Paseo
 ## How the parts fit
 
 Each host that runs agents has a daemon, Burrow or Paseo's. The desktop app connects to every one
-of them; Skiff connects only to Reef, which connects to every daemon for it.
+of them, or in reef mode only to Reef; Skiff connects only to Reef, which connects to every daemon
+for it.
 
 | Part | Binary | Runs on | Does |
 |---|---|---|---|
 | **Burrow** | `burrow` | each host that runs agents | Runs your agents with your own installs of each CLI, speaking Paseo's protocol, so any Paseo client connects to it. Runs beside Paseo's daemon, or replaces it and brings its agents over. [Install](docs/burrow/install.md) |
 | **Reef** | `reef` | one always-on machine | Connects to every daemon, Burrow or Paseo, and serves **Skiff**. A phone gets one connection carrying only what it shows, not one to each host. Can also record the fleet's activity to files or tools like Elasticsearch. [Install](docs/reef/install.md) |
-| **Crusteo** | `crusteo` | your computer | The desktop app: every daemon at once, in one window, with several ways to look at them. On its own it keeps its own host list; in **reef mode** it follows Reef's, so the desktop and Skiff see the same fleet. |
+| **Crusteo** | `crusteo` | your computer | The desktop app: every daemon at once, in one window, with several ways to look at them. On its own it keeps its own host list and connects to each daemon; in **reef mode** it follows Reef's list and reaches every daemon through Reef, so the desktop and Skiff see the same fleet. |
 
 Every release has all three, with the same version, for Linux, macOS and Windows.
 
 **Reef mode.** With a `reef.json` in its data directory naming a Reef (and a device token, unless
 Reef runs `--open`), the desktop takes its hosts from Reef and keeps following them: a host added or
 removed in Skiff comes and goes on the desktop too. It also takes the fleet's label catalog from
-Reef, so labels belong to agents, as in Skiff, and Lanes groups by them. `overrides` give a host
-another address or a password for this desktop only. The desktop still connects to each daemon
-itself; carrying its conversations through Reef too is planned.
+Reef, so labels belong to agents, as in Skiff, and Lanes groups by them. And it connects only to
+Reef: Reef passes each daemon through to it, so the desktop needs to reach Reef and nothing else,
+as a phone does. `overrides` give a host another address (reached directly) or a password, for
+this desktop only.
 
 ## Screenshots
 
@@ -242,8 +244,11 @@ the data directory:
   }
   ```
 
-  `token` is a device token Reef prints when it starts (not needed with `--open`); `overrides`
-  give a host, by its id, another address or a password for this desktop only.
+  `token` is a device token Reef prints when it starts (not needed with `--open`). The desktop
+  then connects only to Reef, which passes each daemon through with its own address, ssh and
+  password for it. `overrides` give a host, by its id, another address, which this desktop then
+  connects to directly, or a password. `"direct": true` connects to every daemon directly, as
+  with a Reef from before 0.2.1 or one at an `https://` address.
 
 A daemon only accepts connections from other machines if it is listening on a reachable address:
 Burrow's `--listen`, or Paseo's `listen` and `hostnames` settings.
@@ -305,7 +310,7 @@ crusteo saves them in `integrations.json` and tells the extension.
 | Ctrl/Cmd+L | Focus the composer |
 | Ctrl/Cmd+V | Paste text or attach a clipboard image in the composer |
 | Ctrl/Cmd+, | Settings, sliding in over the layout |
-| Ctrl/Cmd+Shift+H | History, docked at the right; again to hide it |
+| Ctrl+H (⇧⌘H on a Mac) | History, docked at the right, the cursor in its Grep box; again to hide it. Up and Down in Grep move a ring through the agents, Enter opens the ringed one, Esc empties Grep and then closes History |
 | Ctrl/Cmd+Shift+L | Cycle layouts |
 | Ctrl/Cmd+F | Find on the Lanes board |
 | Ctrl/Cmd+= / - / 0 | Zoom in, zoom out, actual size |

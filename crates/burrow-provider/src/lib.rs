@@ -553,7 +553,7 @@ mod tests {
                 "#!/bin/sh\necho run >> '{}'\necho {version}\n",
                 runs.display()
             );
-            std::fs::write(&cli, script).unwrap();
+            write_script(&cli, &script);
             std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755)).unwrap();
         };
         let launches = || {
@@ -587,7 +587,7 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         let cli = dir.join("cli");
-        std::fs::write(&cli, "#!/bin/sh\necho 2.0.0\n").unwrap();
+        write_script(&cli, "#!/bin/sh\necho 2.0.0\n");
         std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o644)).unwrap();
         let cached = CachedVersion::default();
         assert_eq!(cached.of(&cli), None, "not executable yet");
@@ -595,6 +595,22 @@ mod tests {
         std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755)).unwrap();
         assert_eq!(cached.of(&cli).as_deref(), Some("2.0.0"));
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Writes `text` to `path` for running: written here under another name
+    /// and copied into place by `cp`. A test thread forking while this
+    /// process held `path` open for writing would pass that open file to its
+    /// child, and running it then fails with "Text file busy"; `cp`'s own
+    /// open file goes to no one.
+    fn write_script(path: &std::path::Path, text: &str) {
+        let source = path.with_extension("src");
+        std::fs::write(&source, text).unwrap();
+        let copied = std::process::Command::new("cp")
+            .arg(&source)
+            .arg(path)
+            .status()
+            .unwrap();
+        assert!(copied.success(), "cp to {}", path.display());
     }
 }
 

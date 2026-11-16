@@ -426,6 +426,24 @@ async fn a_lost_session_starts_over_without_resume() {
     assert_eq!(played.resumes, [Some("gone".to_string()), None]);
 }
 
+#[tokio::test]
+async fn an_error_reported_as_success_fails_the_turn_without_a_code() {
+    let played = play(
+        include_str!("fixtures/api_error.jsonl"),
+        Some("sess-1"),
+        None,
+    )
+    .await;
+    let failed = played.events.iter().find_map(|x| match x {
+        ProviderEvent::TurnFailed { error, code, .. } => Some((error.clone(), code.clone())),
+        _ => None,
+    });
+    assert_eq!(
+        failed,
+        Some(("Failed to authenticate. API Error: 403".to_string(), None))
+    );
+}
+
 /// Replays a transcript recorded with `BURROW_CLAUDE_TRACE`: the daemon's
 /// side (prompts, answers, the interrupt) is rebuilt from its `in` frames,
 /// and every `out` frame is what Claude Code really sent.

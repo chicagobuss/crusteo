@@ -85,6 +85,11 @@ pub fn burrows_own(mut tool: Value) -> Value {
         behavior["enum"] = serde_json::json!(["auto", "interrupt", "queue", "steer"]);
     }
     if tool["name"] == "list_agents" {
+        tool["description"] = LIST_AGENTS_DESCRIPTION.into();
+        tool["inputSchema"]["properties"]["verbose"] = serde_json::json!({
+            "description": "The full snapshots (every field and all labels), not the compact ones.",
+            "type": "boolean",
+        });
         tool["inputSchema"]["properties"]["workspaceLabels"] = serde_json::json!({
             "description": WORKSPACE_LABELS_DESCRIPTION,
             "type": "array",
@@ -98,7 +103,9 @@ pub fn burrows_own(mut tool: Value) -> Value {
     tool
 }
 
-const FLEET_DESCRIPTION: &str = "List every host's agents, through this host's Reef, each with its host and serverId; every directory unless cwd is given. Needs messaging between hosts turned on in the Reef. Any agent listed takes send_agent_prompt, get_agent_status, get_agent_activity, cancel_agent and respond_to_permission by its id, wherever it runs.";
+const LIST_AGENTS_DESCRIPTION: &str = "List recent agents as compact metadata: each with shortId, host (on a fleet list), title, status, attention (the reason it needs it), model as provider/model, workspaceLabels, its own human labels (paseo.* and crusteo.* keys are hidden) and updated as a short age; null and empty fields are left out. verbose: true returns the full snapshots, with each agent's id. Address an agent by its shortId, or its name, anywhere an agent id is taken: send_agent_prompt, get_agent_status, get_agent_activity, cancel_agent and respond_to_permission take it, wherever the agent runs.";
+
+const FLEET_DESCRIPTION: &str = "List every host's agents, through this host's Reef, each with its host; every directory unless cwd is given. Needs messaging between hosts turned on in the Reef.";
 
 const WORKSPACE_LABELS_DESCRIPTION: &str = "Only agents whose workspace has every one of these labels (names as the app shows them, any case). Without cwd, looks in every directory rather than the caller's. Each agent listed carries its workspaceLabels.";
 
@@ -155,6 +162,15 @@ impl Mcp {
         tokens.0.insert(token.clone(), agent_id.to_string());
         tokens.1.insert(agent_id.to_string(), token.clone());
         token
+    }
+
+    /// Drops the agent's token, so it no longer calls as the agent: for an
+    /// agent deleted or archived. One brought back gets a new token.
+    pub fn forget(&self, agent_id: &str) {
+        let mut tokens = self.tokens.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(token) = tokens.1.remove(agent_id) {
+            tokens.0.remove(&token);
+        }
     }
 
     /// The token a client that is not an agent sends, the one in
@@ -401,8 +417,15 @@ fn result(outcome: Result<Value, String>) -> CallToolResult {
 
 /// Paseo's `formatStructuredContentForModel`: `<key>_count=N` (and
 /// `<key>_ids=…` when every item has an id) for each list, then the JSON.
+/// A list of agents is the tokens itself, so its JSON is not
+/// pretty-printed, and its ids line is the short ids when the list carries
+/// them.
 fn model_text(value: &Value) -> String {
-    let json = serde_json::to_string_pretty(value).unwrap_or_default();
+    let agents_list = value.get("agents").is_some_and(Value::is_array);
+    let json = match agents_list {
+        true => serde_json::to_string(value).unwrap_or_default(),
+        false => serde_json::to_string_pretty(value).unwrap_or_default(),
+    };
     let Value::Object(fields) = value else {
         return json;
     };
@@ -413,7 +436,11 @@ fn model_text(value: &Value) -> String {
         };
         summary.push(format!("{key}_count={}", items.len()));
         let ids: Vec<&str> = (items.iter())
-            .filter_map(|item| item.get("id").and_then(Value::as_str))
+            .filter_map(|item| {
+                item.get("shortId")
+                    .or_else(|| item.get("id"))
+                    .and_then(Value::as_str)
+            })
             .filter(|id| !id.is_empty())
             .collect();
         if !ids.is_empty() && ids.len() == items.len() {
@@ -594,6 +621,13 @@ mod tests {
             Caller::Refused
         );
         assert_eq!(who(&strict, Some(format!("Basic {top}"))), Caller::NoToken);
+        // A forgotten agent's token is no one's, and the agent gets a new one.
+        strict.mcp.forget("agt_1");
+        assert_eq!(
+            who(&strict, Some(format!("Bearer {agent}"))),
+            Caller::Refused
+        );
+        assert_ne!(strict.mcp.token("agt_1"), agent);
         // Set to take a client with none, it is one; a wrong token still is not.
         assert_eq!(who(&open, None), Caller::TopLevel);
         assert_eq!(who(&open, Some("Bearer made-up".into())), Caller::Refused);

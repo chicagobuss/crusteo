@@ -63,6 +63,13 @@ gpui_kit::actions!(
     ]
 );
 
+/// The key that opens and closes History.
+pub const HISTORY_KEY: &str = if cfg!(target_os = "macos") {
+    "cmd-shift-h"
+} else {
+    "ctrl-h"
+};
+
 pub fn bind_keys(cx: &mut App) {
     // On Linux a focused terminal has to receive Ctrl+letter. Cmd shortcuts
     // on macOS stay with the app, so those bindings keep an empty context.
@@ -80,7 +87,9 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("secondary-[", PreviousWorkspace, app),
         KeyBinding::new("secondary-n", NewWorkspace, app),
         KeyBinding::new("secondary-,", OpenSettings, app),
-        KeyBinding::new("secondary-shift-h", ShowHistory, app),
+        // History opens and closes on Ctrl+H; Cmd+H is the Mac's Hide, so
+        // there it stays Cmd+Shift+H.
+        KeyBinding::new(HISTORY_KEY, ShowHistory, app),
         // Grep in History (find and filter are taken elsewhere).
         KeyBinding::new("secondary-g", GrepHistory, app),
         KeyBinding::new("secondary-shift-l", CycleLayout, None),

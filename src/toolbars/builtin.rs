@@ -119,7 +119,7 @@ impl ToolbarItem for History {
                     let keys = if cfg!(target_os = "macos") {
                         "⇧⌘H"
                     } else {
-                        "Ctrl+Shift+H"
+                        "Ctrl+H"
                     };
                     gpui_kit::component::tooltip::Tooltip::new(format!(
                         "Every agent, latest first, docked at the right ({keys})"

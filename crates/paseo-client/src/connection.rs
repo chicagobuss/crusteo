@@ -20,7 +20,8 @@ pub enum ConnState {
         attempt: u32,
     },
     Connected(ServerInfo),
-    /// `auth` is set when the daemon refused the hello; the loop then stops
+    /// `auth` is set when the daemon refused the hello, or the handshake was
+    /// answered 401 (a Reef refusing the token); the loop then stops
     /// retrying until told to reconnect.
     Disconnected {
         reason: String,
@@ -39,6 +40,14 @@ const SSH_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 const CLOSE_TIMEOUT: Duration = Duration::from_millis(250);
 const HEARTBEAT_EVERY: Duration = Duration::from_secs(10);
 const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(15);
+/// How long one write to the socket may stay pending before the connection is
+/// given up as lost: [`Config::new`]'s default for [`Config::write_timeout`].
+/// It is the heartbeat's own limit, and not a few seconds: while a write is
+/// pending the loop reads nothing, a pong included, so a connection that
+/// cannot write for this long is one the heartbeat would drop as well. A
+/// shorter bound would cut a healthy slow link in the middle of a request
+/// that carries a prompt with several MB of images.
+pub(crate) const WRITE_TIMEOUT: Duration = HEARTBEAT_TIMEOUT;
 const BACKOFF_BASE_MS: u64 = 1500;
 const BACKOFF_MAX_MS: u64 = 30_000;
 
@@ -106,6 +115,29 @@ enum Ended {
     Lost(String),
     Refused(String),
     Redial,
+}
+
+/// Why a socket did not open. `Refused` is what asking again will not
+/// change; `Lost` is tried again after the backoff.
+#[derive(Debug, PartialEq)]
+enum Failed {
+    Lost(String),
+    Refused(String),
+}
+
+impl From<String> for Failed {
+    fn from(reason: String) -> Self {
+        Failed::Lost(reason)
+    }
+}
+
+impl From<Failed> for Ended {
+    fn from(failed: Failed) -> Self {
+        match failed {
+            Failed::Lost(reason) => Ended::Lost(reason),
+            Failed::Refused(reason) => Ended::Refused(reason),
+        }
+    }
 }
 
 pub(crate) async fn run(
@@ -179,8 +211,110 @@ async fn idle(delay: Option<Duration>, commands: &mut mpsc::UnboundedReceiver<Co
 }
 
 /// What the WebSocket runs over: a TCP connection, or ssh's standard streams.
-trait Transport: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send {}
+pub trait Transport: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send {}
 impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send> Transport for T {}
+
+/// A daemon's WebSocket, open and before its hello.
+pub type Socket = tokio_tungstenite::WebSocketStream<Box<dyn Transport>>;
+
+/// Opens `config`'s daemon as this client does: dialled directly, or through
+/// ssh for an `ssh://` endpoint, with the bearer token in the handshake if
+/// there is one. Nothing is sent yet: no hello. The [`crate::ssh::Watch`],
+/// for an `ssh://` endpoint, says why ssh failed once it has ended. Reef's
+/// pass-through for a desktop opens daemons with this. When ssh fails, the
+/// error is what ssh said, as for a client's own connection, and not what
+/// the handshake made of ssh's closed streams.
+pub async fn open_socket(config: &Config) -> Result<(Socket, Option<crate::ssh::Watch>), String> {
+    let mut ssh = None;
+    match connect(config, &mut ssh).await {
+        Ok(socket) => Ok((socket, ssh)),
+        Err(Failed::Lost(reason)) => Err(match ssh {
+            Some(ssh) => ssh.failure().await.unwrap_or(reason),
+            None => reason,
+        }),
+        // The daemon answered, over ssh or not: that is the reason.
+        Err(Failed::Refused(reason)) => Err(reason),
+    }
+}
+
+async fn connect(config: &Config, ssh: &mut Option<crate::ssh::Watch>) -> Result<Socket, Failed> {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
+    let url = config.url();
+    let target = match crate::ssh::Target::parse(&config.endpoint) {
+        None => None,
+        Some(Ok(target)) => Some(target),
+        Some(Err(err)) => return Err(err.into()),
+    };
+    // ssh may make two hops and a key exchange before the daemon answers.
+    let within = if target.is_some() {
+        SSH_CONNECT_TIMEOUT
+    } else {
+        CONNECT_TIMEOUT
+    };
+    let connect = async {
+        let ws_config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
+            .max_message_size(Some(MAX_MESSAGE_BYTES))
+            .max_frame_size(Some(MAX_FRAME_BYTES));
+        let mut request = (url.as_str().into_client_request()).map_err(|err| describe(&err))?;
+        if let Some(token) = &config.bearer {
+            let value = format!("Bearer {token}")
+                .parse()
+                .map_err(|_| "the token cannot go in a header".to_string())?;
+            request.headers_mut().insert("authorization", value);
+        }
+        let transport: Box<dyn Transport> = match (&target, authority(&url)) {
+            (Some(target), _) => {
+                let (stream, watch) = crate::ssh::open(target, config.ssh_program.as_deref())?;
+                *ssh = Some(watch);
+                Box::new(stream)
+            }
+            (None, Some((host, port))) => {
+                Box::new(dial(host, port).await.map_err(|e| e.to_string())?)
+            }
+            (None, None) => {
+                return Err(Failed::Lost(format!(
+                    "{url}: only host:port, ws:// and ssh:// addresses are supported"
+                )));
+            }
+        };
+        tokio_tungstenite::client_async_with_config(request, transport, Some(ws_config))
+            .await
+            .map(|(socket, _)| socket)
+            .map_err(|err| handshake_failed(&err, config.bearer.is_some()))
+    };
+    match timeout(within, connect).await {
+        Ok(result) => result,
+        Err(_) => Err(Failed::Lost("connect timed out".into())),
+    }
+}
+
+/// How a handshake failed. A 401 is refused: the token is wrong, and asking
+/// again will not change that. Anything else is tried again, a 404 too: the
+/// far end may know the host soon, as a Reef given it, or one restarting,
+/// does. So is a 403: a proxy in front of the far end answers it for a while
+/// as it reloads, or limits what it lets through. Reef and a daemon answer
+/// 403 for an origin or host name they do not allow, and that is shown too.
+fn handshake_failed(err: &tokio_tungstenite::tungstenite::Error, bearer: bool) -> Failed {
+    use tokio_tungstenite::tungstenite::Error as WsError;
+    let WsError::Http(response) = err else {
+        return Failed::Lost(describe(err));
+    };
+    match response.status().as_u16() {
+        401 if bearer => Failed::Refused("Reef refused this desktop's token (HTTP 401)".into()),
+        401 => Failed::Refused("It wants a token this connection does not have (HTTP 401)".into()),
+        403 => {
+            // Reef says why: the origin, or the host name it was asked by.
+            let why = (response.body().as_deref())
+                .map(|body| String::from_utf8_lossy(body).trim().to_string())
+                .filter(|why| !why.is_empty());
+            Failed::Lost(match why {
+                Some(why) => format!("{}: {why}", describe(err)),
+                None => describe(err),
+            })
+        }
+        _ => Failed::Lost(describe(err)),
+    }
+}
 
 async fn session(
     config: &Config,
@@ -206,45 +340,9 @@ async fn session_over(
     attempt: &mut u32,
     ssh: &mut Option<crate::ssh::Watch>,
 ) -> Ended {
-    let url = config.url();
-    let target = match crate::ssh::Target::parse(&config.endpoint) {
-        None => None,
-        Some(Ok(target)) => Some(target),
-        Some(Err(err)) => return Ended::Lost(err),
-    };
-    // ssh may make two hops and a key exchange before the daemon answers.
-    let within = if target.is_some() {
-        SSH_CONNECT_TIMEOUT
-    } else {
-        CONNECT_TIMEOUT
-    };
-    let connect = async {
-        let ws_config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
-            .max_message_size(Some(MAX_MESSAGE_BYTES))
-            .max_frame_size(Some(MAX_FRAME_BYTES));
-        let transport: Box<dyn Transport> = match (&target, authority(&url)) {
-            (Some(target), _) => {
-                let (stream, watch) = crate::ssh::open(target, config.ssh_program.as_deref())?;
-                *ssh = Some(watch);
-                Box::new(stream)
-            }
-            (None, Some((host, port))) => {
-                Box::new(dial(host, port).await.map_err(|e| e.to_string())?)
-            }
-            (None, None) => {
-                return Err(format!(
-                    "{url}: only host:port, ws:// and ssh:// addresses are supported"
-                ));
-            }
-        };
-        tokio_tungstenite::client_async_with_config(url.as_str(), transport, Some(ws_config))
-            .await
-            .map_err(|err| describe(&err))
-    };
-    let socket = match timeout(within, connect).await {
-        Ok(Ok((socket, _))) => socket,
-        Ok(Err(err)) => return Ended::Lost(err),
-        Err(_) => return Ended::Lost("connect timed out".into()),
+    let socket = match connect(config, ssh).await {
+        Ok(socket) => socket,
+        Err(failed) => return failed.into(),
     };
     let (mut sink, mut stream) = socket.split();
 
@@ -259,7 +357,9 @@ async fn session_over(
     if let Some(password) = &config.password {
         hello["auth"] = json!({ "kind": "password", "password": password });
     }
-    if let Err(err) = sink.send(Message::text(hello.to_string())).await {
+    let write_timeout = config.write_timeout;
+    if let Err(err) = send_within(&mut sink, Message::text(hello.to_string()), write_timeout).await
+    {
         return Ended::Lost(describe(&err));
     }
 
@@ -272,7 +372,15 @@ async fn session_over(
             Ok(Some(Err(err))) => return Ended::Lost(describe(&err)),
             Ok(Some(Ok(frame))) => frame,
         };
-        let Message::Text(text) = frame else { continue };
+        let text = match frame {
+            Message::Text(text) => text,
+            // Closed with a reason: a Reef passing the daemon through says
+            // why it could not reach it.
+            Message::Close(Some(frame)) if !frame.reason.is_empty() => {
+                return Ended::Lost(frame.reason.to_string());
+            }
+            _ => continue,
+        };
         let Ok(value) = serde_json::from_str::<Value>(text.as_str()) else {
             continue;
         };
@@ -320,7 +428,10 @@ async fn session_over(
                         drop(text); // do not retain the wire copy during backpressure
                         let published = match value["type"].as_str() {
                             Some("ping") => {
-                                let _ = sink.send(Message::text(r#"{"type":"pong"}"#)).await;
+                                let pong = Message::text(r#"{"type":"pong"}"#);
+                                if let Err(err) = send_within(&mut sink, pong, write_timeout).await {
+                                    break Ended::Lost(describe(&err));
+                                }
                                 Ok(())
                             }
                             Some("session") => route(value, &mut pending, events).await,
@@ -336,7 +447,9 @@ async fn session_over(
                         }
                     }
                     Message::Ping(bytes) => {
-                        let _ = sink.send(Message::Pong(bytes)).await;
+                        if let Err(err) = send_within(&mut sink, Message::Pong(bytes), write_timeout).await {
+                            break Ended::Lost(describe(&err));
+                        }
                     }
                     Message::Close(frame) => {
                         let reason = frame
@@ -358,7 +471,7 @@ async fn session_over(
                     }
                     Some(Command::Request { id, message, reply, until, .. }) => {
                         let frame = envelope::request_frame(message);
-                        match sink.send(Message::text(frame.to_string())).await {
+                        match send_within(&mut sink, Message::text(frame.to_string()), write_timeout).await {
                             Ok(()) => {
                                 pending.insert(id, Waiting { reply, until, updates: Vec::new() });
                             }
@@ -371,12 +484,12 @@ async fn session_over(
                     Some(Command::Cancel(id)) => { pending.remove(&id); }
                     Some(Command::Send(message)) => {
                         let frame = envelope::request_frame(message);
-                        if let Err(err) = sink.send(Message::text(frame.to_string())).await {
+                        if let Err(err) = send_within(&mut sink, Message::text(frame.to_string()), write_timeout).await {
                             break Ended::Lost(describe(&err));
                         }
                     }
                     Some(Command::SendBinary(bytes)) => {
-                        if let Err(err) = sink.send(Message::binary(bytes)).await {
+                        if let Err(err) = send_within(&mut sink, Message::binary(bytes), write_timeout).await {
                             break Ended::Lost(describe(&err));
                         }
                     }
@@ -389,7 +502,8 @@ async fn session_over(
                     }
                 } else {
                     awaiting_pong = Some(Instant::now());
-                    if let Err(err) = sink.send(Message::text(r#"{"type":"ping"}"#)).await {
+                    let ping = Message::text(r#"{"type":"ping"}"#);
+                    if let Err(err) = send_within(&mut sink, ping, write_timeout).await {
                         break Ended::Lost(describe(&err));
                     }
                 }
@@ -404,6 +518,28 @@ async fn session_over(
         let _ = waiting.reply.send(Err(Error::Disconnected));
     }
     ended
+}
+
+/// Sends one frame, or fails once `limit` has passed. On a half-open path (a
+/// network that drops packets without resetting the connection) a write can
+/// stay pending until TCP gives up, minutes later, and the loop that awaits it
+/// reaches neither its heartbeat check nor a reconnect meanwhile. The timeout
+/// is an error like any other write error: the caller ends the session as
+/// lost, and the connection is dialled again after the backoff.
+async fn send_within<S>(
+    sink: &mut S,
+    frame: Message,
+    limit: Duration,
+) -> Result<(), tokio_tungstenite::tungstenite::Error>
+where
+    S: futures_util::Sink<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin,
+{
+    match timeout(limit, sink.send(frame)).await {
+        Ok(sent) => sent,
+        Err(_) => Err(tokio_tungstenite::tungstenite::Error::Io(
+            std::io::Error::new(std::io::ErrorKind::TimedOut, "write timed out"),
+        )),
+    }
 }
 
 /// Hands a reply to its waiting request, or publishes the message as an event.
@@ -531,6 +667,81 @@ mod tests {
         let error = json!({"type": "rpc_error", "payload": {"requestId": "r3", "error": "nope"}});
         assert!(settle(&mut pending, error).is_none());
         assert!(rx.try_recv().unwrap().is_err());
+    }
+
+    #[test]
+    fn a_refused_token_stops_the_retries_and_what_may_pass_does_not() {
+        use tokio_tungstenite::tungstenite::{Error as WsError, http::Response};
+        let answered = |status: u16, body: &str| {
+            let response = Response::builder()
+                .status(status)
+                .body(Some(body.as_bytes().to_vec()))
+                .unwrap();
+            WsError::Http(Box::new(response))
+        };
+        assert_eq!(
+            handshake_failed(&answered(401, "Unauthorized"), true),
+            Failed::Refused("Reef refused this desktop's token (HTTP 401)".into())
+        );
+        assert_eq!(
+            handshake_failed(&answered(401, "Unauthorized"), false),
+            Failed::Refused("It wants a token this connection does not have (HTTP 401)".into())
+        );
+        // A 403 may be a proxy in front for a moment: again, and why is shown.
+        assert_eq!(
+            handshake_failed(&answered(403, "Origin not allowed\n"), true),
+            Failed::Lost("HTTP 403 Forbidden: Origin not allowed".into())
+        );
+        assert_eq!(
+            handshake_failed(&answered(403, ""), true),
+            Failed::Lost("HTTP 403 Forbidden".into())
+        );
+        assert_eq!(
+            handshake_failed(&answered(403, "Origin not allowed"), false),
+            Failed::Lost("HTTP 403 Forbidden: Origin not allowed".into())
+        );
+        // A host the far end does not know yet, or one in trouble: again.
+        for status in [404, 500, 502, 503] {
+            let failed = handshake_failed(&answered(status, "No such host"), true);
+            assert!(matches!(failed, Failed::Lost(_)), "{status}: {failed:?}");
+        }
+        let refused = WsError::Io(std::io::ErrorKind::ConnectionRefused.into());
+        assert!(matches!(handshake_failed(&refused, true), Failed::Lost(_)));
+    }
+
+    /// A write that never completes (a half-open path leaves one pending) is
+    /// given up on after the limit, as a timeout; one that completes is left
+    /// alone. A client's default bound is the heartbeat's own limit.
+    #[test]
+    fn a_write_that_never_completes_is_bounded_and_reported_as_a_timeout() {
+        type Failure = tokio_tungstenite::tungstenite::Error;
+        crate::block_on(async {
+            let stuck = futures_util::sink::unfold((), |(), _: Message| async {
+                std::future::pending::<Result<(), Failure>>().await
+            });
+            let mut stuck = Box::pin(stuck);
+            // The outer limit makes an unbounded send fail the test, not hang it.
+            let err = timeout(
+                Duration::from_secs(5),
+                send_within(&mut stuck, Message::text("x"), Duration::from_millis(50)),
+            )
+            .await
+            .expect("the send is not bounded")
+            .unwrap_err();
+            assert!(
+                matches!(&err, Failure::Io(io) if io.kind() == std::io::ErrorKind::TimedOut),
+                "{err:?}"
+            );
+            assert_eq!(describe(&err), "write timed out");
+
+            let open =
+                futures_util::sink::unfold((), |(), _: Message| async { Ok::<(), Failure>(()) });
+            let mut open = Box::pin(open);
+            send_within(&mut open, Message::text("x"), Duration::from_secs(5))
+                .await
+                .unwrap();
+        });
+        assert_eq!(Config::new("host", "cid").write_timeout, HEARTBEAT_TIMEOUT);
     }
 
     #[test]

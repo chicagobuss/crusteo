@@ -12,15 +12,20 @@
 //! * Burrow → Reef, [`REQUEST`] (an outbound session message):
 //!   `{type, payload: {requestId, op, ...}}`. `op` is one of [`op`]'s:
 //!   [`op::ROUTE_PROMPT`] (`targetAgentId`, `prompt`, `sourceAgentId`,
-//!   `sourceServerId`, `activeTurnBehavior`, `notifyOnFinish`);
+//!   `sourceServerId`, `activeTurnBehavior`, `notifyOnFinish`, and `serverId`
+//!   when the caller named a host: the agent is looked for there only, by
+//!   that host's server id, name or reported hostname in any case; without
+//!   it, on every host);
 //!   [`op::LIST_HOSTS`] (no arguments; the result is Paseo's host directory,
 //!   `{hosts: [...]}`, without the asking host); [`op::LIST_AGENTS`] (`args`,
 //!   `list_agents`'s arguments; the result is `{agents, hosts}`, every
 //!   connected Burrow's agents with their `host` and `serverId`, and each
 //!   host asked with whether it answered); [`op::TOOL`] (`tool`, `args`, and
 //!   `targetAgentId` or `serverId`: one of [`TOOLS`] run on the agent's or
-//!   the server's host; the result is the tool's own, with `host` and
-//!   `serverId`).
+//!   the server's host, found as for [`op::ROUTE_PROMPT`]'s `serverId`; the
+//!   result is the tool's own, with `host` and `serverId`; with
+//!   `timeoutMs`, how long the Reef waits for the host to run it, instead
+//!   of its 20 seconds: a waiting tool passes its own timeout).
 //! * Reef → Burrow, [`TOOL_REQUEST`] (a request): `{type, requestId, tool,
 //!   args}`, one of [`TOOLS`] for this host to run as if no agent called it.
 //!   Burrow answers [`TOOL_RESPONSE`] `{requestId, ok, result | error}`.
@@ -28,7 +33,9 @@
 //!   result | code, error}`, with `code` one of [`code`]'s.
 //! * Reef → Burrow, [`FINISHED`] (a request): a routed prompt's turn ended
 //!   or needs permission; `{type, requestId, noticeId, callerAgentId,
-//!   agentId, title, serverId, host, reason, lastMessage, permission}`.
+//!   agentId, title, serverId, host, reason, lastMessage, permission}`, and
+//!   `error` (reason `errored`) for a prompt that failed after an
+//!   `interrupting` receipt, or was queued and dropped before it got a turn.
 //!   Burrow answers [`FINISHED_RESPONSE`] `{requestId, delivered, gone,
 //!   error}` once the notice is with the caller, or the caller is gone; the
 //!   Reef keeps it and tries again until then.
@@ -49,14 +56,23 @@ pub const TOOL_RESPONSE: &str = "burrow.fleet.tool.response";
 /// [`op::LIST_AGENTS`]'s.
 pub const FLEET_AGENTS_REQUEST: &str = "burrow.fleet.agents.request";
 pub const FLEET_AGENTS_RESPONSE: &str = "burrow.fleet.agents.response";
+/// A client of this Burrow (`burrow inspect`, `logs` and `wait` for an
+/// agent elsewhere) asks one of [`TOOLS`] on the agent's host:
+/// `{type, requestId, tool, args, targetAgentId}` (or `serverId`, and
+/// `timeoutMs` as [`op::TOOL`]'s). The response's payload is
+/// `{requestId, ok, result | code, error}`.
+pub const FLEET_TOOL_REQUEST: &str = "burrow.fleet.tool.run.request";
+pub const FLEET_TOOL_RESPONSE: &str = "burrow.fleet.tool.run.response";
 
 /// The agent tools one host runs for an agent on another, through the Reef:
-/// the reads a finish notice points to, and stopping a turn or answering a
-/// permission. Nothing that makes, archives or changes an agent.
+/// the reads a finish notice points to, waiting for a turn to end, and
+/// stopping a turn or answering a permission. Nothing that makes, archives
+/// or changes an agent.
 pub const TOOLS: &[&str] = &[
     "list_agents",
     "get_agent_status",
     "get_agent_activity",
+    "wait_for_finish",
     "cancel_agent",
     "respond_to_permission",
 ];

@@ -194,3 +194,42 @@ async fn stopping_the_agent_drops_what_waits_behind_its_turn() {
     assert_eq!(after["agent"]["status"], "idle", "{after}");
     h.stop().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_queued_prompt_lost_to_a_restart_is_dropped_not_answered_with_the_last_reply() {
+    let mut h = harness(Duration::from_secs(30)).await;
+    let agent = h.create("unsteerable").await;
+
+    let first = h.send(&agent, "a", None).await;
+    let a = h.wait(&agent, ("turnId", &first["turnId"])).await;
+    assert_eq!(a["lastMessage"], "echo: a", "{a}");
+    // The answer says which turn it is of.
+    assert_eq!(a["turnId"], first["turnId"], "{a}");
+
+    h.send(&agent, "slow x", None).await;
+    let queued = h.send(&agent, "y", Some("queue")).await;
+    assert_eq!(queued["disposition"], "queued", "{queued}");
+    // A new session for the agent knows nothing of what waited in the old.
+    let refreshed = h
+        .client
+        .request(
+            json!({"type": "refresh_agent_request", "agentId": agent}),
+            WITHIN,
+        )
+        .await
+        .expect("refresh");
+    assert_eq!(refreshed["status"], "agent_refreshed", "{refreshed}");
+
+    let y = h.wait(&agent, ("messageId", &queued["messageId"])).await;
+    assert_eq!(y["status"], "error", "{y}");
+    assert!(
+        y["error"].as_str().is_some_and(|e| e.contains("dropped")),
+        "{y}"
+    );
+    assert!(
+        y["lastMessage"].is_null(),
+        "not an earlier turn's reply: {y}"
+    );
+    assert!(y["turnId"].is_null(), "{y}");
+    h.stop().await;
+}

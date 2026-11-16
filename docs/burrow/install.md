@@ -34,7 +34,7 @@ and `examples/`: two systemd user units and a launchd agent (in the source tree 
 `packaging/burrow/`).
 
 ```sh
-version=0.2.0
+version=0.2.1
 target=x86_64-unknown-linux-musl
 base=https://github.com/chicagobuss/crusteo/releases/download/v$version
 curl -LO "$base/burrow-$version-$target.tar.gz"
@@ -54,7 +54,7 @@ The examples keep the binary in `~/burrow`; its state goes to `~/.burrow`.
 ```sh
 mkdir -p ~/burrow
 install -m 0755 "burrow-$version-$target/burrow" ~/burrow/
-~/burrow/burrow --version      # burrow 0.2.0 (<commit>)
+~/burrow/burrow --version      # burrow 0.2.1 (<commit>)
 ```
 
 Burrow offers each agent it finds: `claude`, `codex`, `pi`, `agy` and `cursor-agent` on PATH,

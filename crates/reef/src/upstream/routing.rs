@@ -48,6 +48,18 @@ const LOOKUP_TRIES: u64 = 20;
 const LOOKUP_PAUSE: Duration = Duration::from_millis(250);
 /// How long a host has to run a tool for an agent elsewhere.
 const TOOL_WITHIN: Duration = Duration::from_secs(20);
+/// The most the Reef waits for a tool that waits: the daemon's own longest
+/// wait (a wait_for_finish without its own timeout), the cap on a client's.
+const TOOL_WITHIN_MAX: Duration = Duration::from_secs(24 * 3600);
+
+/// How long the Reef waits for this tool request: the 20 seconds for the
+/// reads, the client's own for a waiting tool, capped at [`TOOL_WITHIN_MAX`].
+fn tool_within(payload: &Value) -> Duration {
+    (payload["timeoutMs"].as_u64())
+        .map(Duration::from_millis)
+        .unwrap_or(TOOL_WITHIN)
+        .min(TOOL_WITHIN_MAX)
+}
 
 /// A routed prompt whose sender is to be told how its turn ends.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -163,6 +175,19 @@ async fn link(apply: &mpsc::UnboundedSender<Apply>, host: &str) -> LinkNow {
     rx.await.unwrap_or(LinkNow::Gone)
 }
 
+/// Has Reef's state keep `route`, saved, and follow it; returns once it is
+/// in `routes.json`, or Reef is stopping.
+async fn follow_recorded(apply: &mpsc::UnboundedSender<Apply>, route: Route) {
+    let (tx, rx) = oneshot::channel();
+    let asked = apply.send(Box::new(move |up: &mut Upstream| {
+        up.follow_route(route, true);
+        let _ = tx.send(());
+    }));
+    if asked.is_ok() {
+        let _ = rx.await;
+    }
+}
+
 impl Upstream {
     /// Loads the routes a stop left under way and follows them again.
     pub fn open_routes(&mut self, data_dir: Option<&Path>) {
@@ -235,7 +260,11 @@ impl Upstream {
                 "A prompt needs an agent and text.",
             ));
         }
-        let (target_host, agent) = match self.find_agent(key) {
+        // A caller that named a host wants its agent from there only.
+        let server = (payload["serverId"].as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let (target_host, agent) = match self.find_agent(key, server) {
             Ok(found) => found,
             Err(refusal) => {
                 if !self.look_again(name, payload, &refusal) {
@@ -305,9 +334,13 @@ impl Upstream {
             "messageId": message_id, "status": agent.status,
         });
         let apply = self.apply.clone();
-        // Replacing a turn waits for it to end: the sender hears at once.
+        // Replacing a turn waits for it to end: the sender hears at once,
+        // once the route is kept, so a Reef stopped now still tells it.
         let interrupting = behavior == "interrupt";
         if interrupting {
+            if let Some(route) = &route {
+                self.keep_route(route.clone());
+            }
             let mut receipt = receipt.clone();
             receipt["disposition"] = "interrupting".into();
             source.send(response(&request_id, Ok(receipt)));
@@ -328,34 +361,54 @@ impl Upstream {
             let turn = (outcome.as_ref().ok())
                 .and_then(|r| r["turnId"].as_str())
                 .map(str::to_string);
-            if !interrupting {
-                let answer = outcome.map(|reply| {
-                    let mut receipt = receipt;
-                    receipt["disposition"] =
-                        (reply["disposition"].as_str()).unwrap_or("started").into();
-                    if let Some(position) = reply["queuePosition"].as_u64() {
-                        receipt["queuePosition"] = position.into();
+            if interrupting {
+                match (outcome, route) {
+                    (Ok(_), Some(mut route)) => {
+                        route.turn_id = turn;
+                        follow_recorded(&apply, route).await;
                     }
-                    receipt
-                });
-                let delivered = answer.is_ok();
-                source.send(response(&request_id, answer));
-                if !delivered {
-                    return;
+                    (Ok(_), None) => {}
+                    (Err(refusal), route) => {
+                        eprintln!(
+                            "reef: a routed interrupt was not delivered: {}",
+                            refusal.error
+                        );
+                        if let Some(route) = route {
+                            // The sender was told "interrupting" and waits
+                            // for a notice: it hears this one instead.
+                            let notice = json!({
+                                "type": FINISHED, "noticeId": format!("{}:end", route.route_id),
+                                "callerAgentId": route.caller_agent_id,
+                                "agentId": route.target_agent_id, "title": route.target_title,
+                                "serverId": route.target_server_id, "host": route.target_host,
+                                "reason": "errored", "lastMessage": Value::Null,
+                                "permission": Value::Null, "error": refusal.error,
+                            });
+                            let _ = tell(&apply, &route.source_host, notice).await;
+                            let _ = apply.send(Box::new(move |up: &mut Upstream| {
+                                up.route_done(&route.route_id)
+                            }));
+                        }
+                    }
                 }
-            } else if let Err(refusal) = outcome {
-                eprintln!(
-                    "reef: a routed interrupt was not delivered: {}",
-                    refusal.error
-                );
                 return;
             }
-            if let Some(mut route) = route {
+            let answer = outcome.map(|reply| {
+                let mut receipt = receipt;
+                receipt["disposition"] =
+                    (reply["disposition"].as_str()).unwrap_or("started").into();
+                if let Some(position) = reply["queuePosition"].as_u64() {
+                    receipt["queuePosition"] = position.into();
+                }
+                receipt
+            });
+            // The route is on disk before the sender hears: a Reef stopped
+            // in between would otherwise lose the notice it is owed.
+            if let (Ok(_), Some(mut route)) = (&answer, route) {
                 route.turn_id = turn;
-                let _ = apply.send(Box::new(move |up: &mut Upstream| {
-                    up.follow_route(route, true)
-                }));
+                follow_recorded(&apply, route).await;
             }
+            source.send(response(&request_id, answer));
         });
     }
 
@@ -450,16 +503,23 @@ impl Upstream {
                 }
             });
             let answers = futures_util::future::join_all(asks).await;
-            let mut agents: Vec<Value> = Vec::new();
+            let mut lists: Vec<Vec<Value>> = Vec::new();
             let mut hosts: Vec<Value> = Vec::new();
             for (name, server, answer) in answers {
                 match answer {
                     Ok(listed) => {
-                        for mut agent in (listed["agents"].as_array().cloned()).unwrap_or_default()
-                        {
+                        let mut list: Vec<Value> =
+                            (listed["agents"].as_array().cloned()).unwrap_or_default();
+                        for agent in &mut list {
                             agent["host"] = name.clone().into();
-                            agent["serverId"] = server.clone().into();
-                            agents.push(agent);
+                            // A full snapshot keeps its host's server id; a
+                            // compact one stays compact.
+                            if agent["updatedAt"].is_string() {
+                                agent["serverId"] = server.clone().into();
+                            }
+                        }
+                        if !list.is_empty() {
+                            lists.push(list);
                         }
                         hosts.push(json!({"host": name, "serverId": server, "answered": true}));
                     }
@@ -467,7 +527,7 @@ impl Upstream {
                                                     "answered": false, "error": error})),
                 }
             }
-            sort_listed(&mut agents);
+            let mut agents = merge_listed(lists);
             agents.truncate(limit);
             source.send(response(
                 &request_id,
@@ -491,7 +551,7 @@ impl Upstream {
             .filter(Value::is_object)
             .unwrap_or_else(|| json!({}));
         let host = if let Some(key) = payload["targetAgentId"].as_str() {
-            match self.find_agent(key.trim()) {
+            match self.find_agent(key.trim(), None) {
                 Ok((host, agent)) => {
                     args["agentId"] = agent.id.into();
                     host
@@ -505,10 +565,7 @@ impl Upstream {
             }
         } else {
             let server = payload["serverId"].as_str().unwrap_or_default();
-            let found = (self.fleet.hosts.iter()).find(|host| {
-                host.name() == server || host.server.as_ref().is_some_and(|s| s.server_id == server)
-            });
-            match found {
+            match self.hosts_named(server).first() {
                 Some(host) => host.name().to_string(),
                 None => {
                     return refuse(Refusal::new(
@@ -534,9 +591,10 @@ impl Upstream {
             }
         };
         let request_id = request_id.to_string();
+        let within = tool_within(payload);
         tokio::spawn(async move {
             let ask = json!({"type": TOOL_REQUEST, "tool": tool, "args": args});
-            let outcome = tool_answer(guarded_with_timeout(&client, ask, TOOL_WITHIN).await)
+            let outcome = tool_answer(guarded_with_timeout(&client, ask, within).await)
                 .map(|mut result| {
                     if result.is_object() {
                         result["host"] = host.clone().into();
@@ -548,11 +606,55 @@ impl Upstream {
         });
     }
 
+    /// The hosts `key` names, in any case: by the name Reef has for one or
+    /// its server id, else by the hostname its server reports. These are
+    /// the ways a Burrow takes a `serverId` for itself
+    /// (`Config::names_this_host`).
+    fn hosts_named(&self, key: &str) -> Vec<&fleet::Host> {
+        let key = key.trim();
+        if key.is_empty() {
+            return Vec::new();
+        }
+        let hosts = || self.fleet.hosts.iter();
+        let named: Vec<_> = hosts()
+            .filter(|host| {
+                host.name().eq_ignore_ascii_case(key)
+                    || (host.server.as_ref()).is_some_and(|s| s.server_id.eq_ignore_ascii_case(key))
+            })
+            .collect();
+        if !named.is_empty() {
+            return named;
+        }
+        hosts()
+            .filter(|host| {
+                (host.server.as_ref()).is_some_and(|s| s.hostname.eq_ignore_ascii_case(key))
+            })
+            .collect()
+    }
+
     /// The agent `key` names, by id, a unique id prefix (seven or more
-    /// characters) or its name, on any host.
-    fn find_agent(&self, key: &str) -> Result<(String, paseo_client::proto::Agent), Refusal> {
+    /// characters) or its name, on any host, or only on the host `server`
+    /// names ([`Self::hosts_named`]) when it is given.
+    fn find_agent(
+        &self,
+        key: &str,
+        server: Option<&str>,
+    ) -> Result<(String, paseo_client::proto::Agent), Refusal> {
+        let hosts = match server {
+            Some(server) => {
+                let named = self.hosts_named(server);
+                if named.is_empty() {
+                    return Err(Refusal::new(
+                        code::NOT_FOUND,
+                        format!("No host in the fleet is {server}."),
+                    ));
+                }
+                named
+            }
+            None => self.fleet.hosts.iter().collect(),
+        };
         let all = || {
-            (self.fleet.hosts.iter()).flat_map(|host| {
+            (hosts.iter()).flat_map(|host| {
                 (host.directory.agents.values()).map(move |agent| (host.name(), agent))
             })
         };
@@ -571,7 +673,10 @@ impl Upstream {
         match found.as_slice() {
             [] => Err(Refusal::new(
                 code::NOT_FOUND,
-                format!("No agent in the fleet goes by {key}."),
+                match server {
+                    Some(server) => format!("No agent on {server} goes by {key}."),
+                    None => format!("No agent in the fleet goes by {key}."),
+                },
             )),
             [(host, agent)] => Ok((host.to_string(), (*agent).clone())),
             many => {
@@ -593,13 +698,19 @@ impl Upstream {
     /// Keeps `route` (saved, when `new`) and follows it to its notice.
     fn follow_route(&mut self, route: Route, new: bool) {
         if new {
-            self.routes
-                .under_way
-                .retain(|r| r.route_id != route.route_id);
-            self.routes.under_way.push(route.clone());
-            self.routes.save();
+            self.keep_route(route.clone());
         }
         tokio::spawn(follow(self.apply.clone(), route));
+    }
+
+    /// Keeps `route` among those under way, in `routes.json` by the time
+    /// this returns; one with its id already there is replaced.
+    fn keep_route(&mut self, route: Route) {
+        self.routes
+            .under_way
+            .retain(|r| r.route_id != route.route_id);
+        self.routes.under_way.push(route);
+        self.routes.save();
     }
 
     fn route_told(&mut self, route_id: &str, told: Vec<String>) {
@@ -633,24 +744,74 @@ fn tool_answer(answer: Result<Value, String>) -> Result<Value, String> {
     }
 }
 
-/// Paseo's `selectAgentListItems` order across hosts: attention first,
-/// then running, then by latest update.
-fn sort_listed(agents: &mut [Value]) {
-    let rank = |a: &Value| match a["status"].as_str() {
-        Some("running") => 0,
-        Some("initializing") => 1,
-        Some("idle") => 2,
-        Some("error") => 3,
-        _ => 4,
+/// Each host's list is already in Paseo's `selectAgentListItems` order —
+/// attention first, then the status, then the most recently updated — so
+/// the fleet's list is the merge of them. A compact list has no times, so
+/// its own order stands; equal ones take turns, host by host.
+fn merge_listed(lists: Vec<Vec<Value>>) -> Vec<Value> {
+    let count = lists.len();
+    let mut lists = lists;
+    let mut merged = Vec::new();
+    let mut turn = 0usize;
+    loop {
+        let mut best: Option<usize> = None;
+        for offset in 0..count {
+            let i = (turn + offset) % count;
+            let Some(head) = lists[i].first() else {
+                continue;
+            };
+            match best {
+                None => best = Some(i),
+                Some(b) if before(head, &lists[b][0]) => best = Some(i),
+                _ => {}
+            }
+        }
+        let Some(i) = best else {
+            break;
+        };
+        let item = lists[i].remove(0);
+        turn = (i + 1) % count;
+        merged.push(item);
+    }
+    merged
+}
+
+/// `a` sorts strictly before `b` in Paseo's list order. Burrows write every
+/// time the same way (RFC 3339, UTC), so times compare as text; a missing
+/// time (a compact item) compares equal.
+fn before(a: &Value, b: &Value) -> bool {
+    let key = |v: &Value| {
+        (
+            v["requiresAttention"] == true,
+            match v["status"].as_str() {
+                Some("running") => 0,
+                Some("initializing") => 1,
+                Some("idle") => 2,
+                Some("error") => 3,
+                _ => 4,
+            },
+            v["updatedAt"].as_str().unwrap_or_default().to_string(),
+        )
     };
-    // Burrows write every time the same way (RFC 3339, UTC), so as text.
-    let updated = |a: &Value| a["updatedAt"].as_str().unwrap_or_default().to_string();
-    agents.sort_by(|a, b| {
-        (b["requiresAttention"] == true)
-            .cmp(&(a["requiresAttention"] == true))
-            .then(rank(a).cmp(&rank(b)))
-            .then(updated(b).cmp(&updated(a)))
-    });
+    let (a_attention, a_rank, a_updated) = key(a);
+    let (b_attention, b_rank, b_updated) = key(b);
+    if a_attention != b_attention {
+        return a_attention;
+    }
+    if a_rank != b_rank {
+        return a_rank < b_rank;
+    }
+    a_updated > b_updated
+}
+
+/// Why the prompt the wait is for never ran, when the answer says so: a
+/// queued prompt that a stop dropped has an `error` and the agent, but no
+/// turn. A turn that failed has an `error` too, but also its turn, and its
+/// prompt was delivered; an agent that is gone has neither agent nor turn.
+fn never_ran(answer: &Value) -> Option<&str> {
+    (answer["error"].as_str()).map(str::trim).filter(|error| {
+        !error.is_empty() && !answer["final"].is_null() && answer["turnId"].is_null()
+    })
 }
 
 /// Paseo's `reasonFor`, as Burrow's finish notices say it.
@@ -658,6 +819,10 @@ fn reason(answer: &Value) -> &'static str {
     let last = &answer["final"];
     if last.is_null() {
         return "is unavailable";
+    }
+    // Before the agent's own state: a stop that dropped the prompt closed it.
+    if never_ran(answer).is_some() {
+        return "errored";
     }
     if last["status"] == "closed" {
         return "was closed";
@@ -718,11 +883,13 @@ async fn follow(apply: mpsc::UnboundedSender<Apply>, mut route: Route) {
             .unwrap_or(&route.target_title)
             .to_string();
         for (notice_id, permission) in notices {
+            // `error` tells the sender its prompt was not delivered.
             let notice = json!({
                 "type": FINISHED, "noticeId": notice_id,
                 "callerAgentId": route.caller_agent_id, "agentId": route.target_agent_id,
                 "title": title, "serverId": route.target_server_id, "host": route.target_host,
                 "reason": reason, "lastMessage": answer["lastMessage"], "permission": permission,
+                "error": never_ran(&answer),
             });
             match tell(&apply, &route.source_host, notice).await {
                 Told::Delivered => {}
@@ -787,6 +954,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_clients_tool_timeout_is_capped_at_the_daemons_longest_wait() {
+        // No timeout, or one the client did not give as milliseconds: the
+        // Reef's 20 seconds.
+        assert_eq!(tool_within(&json!({})), TOOL_WITHIN);
+        assert_eq!(tool_within(&json!({"timeoutMs": "soon"})), TOOL_WITHIN);
+        // A waiting tool passes its own, up to the daemon's longest wait.
+        assert_eq!(
+            tool_within(&json!({"timeoutMs": 5000})),
+            Duration::from_millis(5000)
+        );
+        assert_eq!(
+            tool_within(&json!({"timeoutMs": 86_400_000})),
+            TOOL_WITHIN_MAX
+        );
+        assert_eq!(
+            tool_within(&json!({"timeoutMs": 86_400_000 * 10})),
+            TOOL_WITHIN_MAX
+        );
+    }
+
+    #[test]
     fn a_pair_of_agents_is_held_to_its_rate() {
         let mut routes = Routes::default();
         for _ in 0..RATE_LIMIT {
@@ -813,5 +1001,232 @@ mod tests {
             "was closed"
         );
         assert_eq!(reason(&wait("error", Value::Null)), "is unavailable");
+    }
+
+    #[test]
+    fn a_prompt_a_stop_dropped_is_told_as_not_delivered_not_as_a_closed_agent() {
+        // What Burrow answers a wait on a queued prompt that never got a turn:
+        // an error, and the agent, closed by the stop that dropped it.
+        let dropped = json!({
+            "status": "error", "final": {"status": "closed"}, "lastMessage": null,
+            "turnId": null, "error": "The queued prompt was dropped: the agent was stopped",
+        });
+        assert_eq!(reason(&dropped), "errored");
+        assert_eq!(
+            never_ran(&dropped),
+            Some("The queued prompt was dropped: the agent was stopped")
+        );
+        // A turn that failed was delivered: its error is not news of that, and
+        // an agent closed after it is still reported as closed.
+        let failed = json!({
+            "status": "error", "final": {"status": "closed"}, "lastMessage": "partial",
+            "turnId": "t1", "error": "The provider crashed",
+        });
+        assert_eq!(never_ran(&failed), None);
+        assert_eq!(reason(&failed), "was closed");
+        // An agent that is gone says nothing of its prompt either.
+        let gone = json!({"status": "error", "final": null, "turnId": null,
+                          "error": "Agent not found: a1"});
+        assert_eq!(never_ran(&gone), None);
+        assert_eq!(reason(&gone), "is unavailable");
+        assert_eq!(never_ran(&json!({"status": "idle", "final": {}})), None);
+    }
+
+    /// A host for [`fleet_of`]: its name, server id, reported hostname, and
+    /// agents as (id, title).
+    type Seed<'a> = (&'a str, &'a str, &'a str, &'a [(&'a str, &'a str)]);
+
+    /// An upstream with `hosts`.
+    async fn fleet_of(hosts: &[Seed<'_>]) -> Upstream {
+        let (events, _events) = mpsc::channel(8);
+        let (apply, _apply) = mpsc::unbounded_channel();
+        let configs = (hosts.iter())
+            .map(|(name, ..)| fleet::HostConfig {
+                id: host_id(name),
+                name: name.to_string(),
+                endpoint: None,
+                password: None,
+            })
+            .collect();
+        let mut up = Upstream::new(configs, "cid_test".into(), events, apply);
+        for (host, (_, server_id, hostname, agents)) in up.fleet.hosts.iter_mut().zip(hosts) {
+            host.server = Some(paseo_client::ServerInfo {
+                server_id: server_id.to_string(),
+                hostname: hostname.to_string(),
+                ..Default::default()
+            });
+            for (id, title) in *agents {
+                host.directory.agents.insert(
+                    id.to_string(),
+                    paseo_client::proto::Agent {
+                        id: id.to_string(),
+                        title: Some(title.to_string()),
+                        ..Default::default()
+                    },
+                );
+            }
+        }
+        up
+    }
+
+    #[test]
+    fn the_fleets_list_is_the_merge_of_the_hosts_lists() {
+        let item = |id: &str, status: &str, updated: Option<&str>, attention: bool| {
+            let mut item = json!({"id": id, "status": status, "requiresAttention": attention});
+            if let Some(updated) = updated {
+                item["updatedAt"] = updated.into();
+            }
+            item
+        };
+        // With times: attention first, then the status, then the newest —
+        // whichever host it is on.
+        let a = vec![
+            item("a-ask", "running", Some("2026-11-08T10:00:00Z"), true),
+            item("a-run", "running", Some("2026-11-08T09:00:00Z"), false),
+            item("a-idle", "idle", Some("2026-11-08T09:30:00Z"), false),
+        ];
+        let b = vec![
+            item("b-run", "running", Some("2026-11-08T09:45:00Z"), false),
+            item("b-idle", "idle", Some("2026-11-08T09:50:00Z"), false),
+        ];
+        let merged = merge_listed(vec![a, b]);
+        let ids = |merged: &[Value]| -> Vec<String> {
+            (merged.iter())
+                .map(|v| v["id"].as_str().unwrap().to_string())
+                .collect()
+        };
+        assert_eq!(
+            ids(&merged),
+            vec!["a-ask", "b-run", "a-run", "b-idle", "a-idle"]
+        );
+        // Compact items have no times: their own order stands, and the
+        // equal ones take turns, host by host.
+        let a = vec![
+            item("a-1", "idle", None, true),
+            item("a-2", "running", None, false),
+        ];
+        let b = vec![
+            item("b-1", "idle", None, true),
+            item("b-2", "running", None, false),
+            item("b-3", "idle", None, false),
+        ];
+        assert_eq!(
+            ids(&merge_listed(vec![a, b])),
+            vec!["a-1", "b-1", "a-2", "b-2", "b-3"]
+        );
+        // One host alone is its own list, in the order its host gave it.
+        let one = vec![
+            item("x-1", "running", Some("2026-11-08T09:00:00Z"), false),
+            item("x-2", "idle", Some("2026-11-08T08:00:00Z"), false),
+        ];
+        assert_eq!(ids(&merge_listed(vec![one])), vec!["x-1", "x-2"]);
+        assert_eq!(merge_listed(Vec::new()), Vec::<Value>::new());
+    }
+
+    #[tokio::test]
+    async fn a_host_is_found_by_name_server_id_or_reported_hostname_in_any_case() {
+        let up = fleet_of(&[
+            ("buildbox", "srv_build", "ci.example.com", &[]),
+            ("devbox", "srv_dev", "Sam-Laptop", &[]),
+            // A reported hostname that is another host's name does not win.
+            ("spare", "srv_spare", "buildbox", &[]),
+        ])
+        .await;
+        let names = |key: &str| -> Vec<String> {
+            (up.hosts_named(key).iter())
+                .map(|host| host.name().to_string())
+                .collect()
+        };
+        assert_eq!(names("devbox"), ["devbox"]);
+        assert_eq!(names("DevBox"), ["devbox"]);
+        assert_eq!(names("SRV_DEV"), ["devbox"]);
+        assert_eq!(names(" sam-laptop "), ["devbox"]);
+        assert_eq!(names("ci.example.com"), ["buildbox"]);
+        assert_eq!(names("buildbox"), ["buildbox"]);
+        assert!(names("nowhere").is_empty());
+        assert!(names("").is_empty() && names("  ").is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_agent_is_looked_for_only_on_the_host_a_caller_names() {
+        let up = fleet_of(&[
+            (
+                "buildbox",
+                "srv_build",
+                "ci.example.com",
+                &[("agent-1111111", "worker"), ("agent-2222222", "docs")],
+            ),
+            (
+                "devbox",
+                "srv_dev",
+                "sam-laptop",
+                &[("agent-3333333", "Worker")],
+            ),
+            ("spare", "srv_spare", "spare", &[]),
+        ])
+        .await;
+        let found = |key: &str, server: Option<&str>| {
+            up.find_agent(key, server)
+                .ok()
+                .map(|(host, agent)| (host, agent.id))
+        };
+        let refused = |key: &str, server: Option<&str>| {
+            let refusal = up.find_agent(key, server).unwrap_err();
+            (refusal.code, refusal.error)
+        };
+
+        // On no host named, the name is on two: which one is not guessed.
+        assert_eq!(refused("worker", None).0, code::AMBIGUOUS);
+        // Where it is named, only that host is looked at, whichever way.
+        for server in ["devbox", "SRV_DEV", "Sam-Laptop"] {
+            assert_eq!(
+                found("worker", Some(server)),
+                Some(("devbox".into(), "agent-3333333".into())),
+                "{server}"
+            );
+        }
+        assert_eq!(
+            found("WORKER", Some("srv_build")),
+            Some(("buildbox".into(), "agent-1111111".into()))
+        );
+        // By id too, but only on that host: another's agent is not found there.
+        assert_eq!(
+            found("agent-2222222", Some("buildbox")),
+            Some(("buildbox".into(), "agent-2222222".into()))
+        );
+        assert_eq!(
+            refused("agent-2222222", Some("devbox")),
+            (
+                code::NOT_FOUND,
+                "No agent on devbox goes by agent-2222222.".to_string()
+            )
+        );
+        assert_eq!(
+            refused("worker", Some("spare")),
+            (
+                code::NOT_FOUND,
+                "No agent on spare goes by worker.".to_string()
+            )
+        );
+        // A host that is not one of the fleet's.
+        assert_eq!(
+            refused("worker", Some("srv_nowhere")),
+            (
+                code::NOT_FOUND,
+                "No host in the fleet is srv_nowhere.".to_string()
+            )
+        );
+        // As before without a host: an agent found anywhere.
+        assert_eq!(
+            found("docs", None),
+            Some(("buildbox".into(), "agent-2222222".into()))
+        );
+        assert_eq!(
+            refused("nobody", None),
+            (
+                code::NOT_FOUND,
+                "No agent in the fleet goes by nobody.".to_string()
+            )
+        );
     }
 }

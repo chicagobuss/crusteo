@@ -394,6 +394,12 @@ fn last_assistant_text(store: &Store, agent_id: &str) -> String {
         .unwrap_or_default()
 }
 
+/// The turn of the last timeline row that has one.
+fn last_turn(store: &Store, agent_id: &str) -> Option<String> {
+    let timeline = store.timeline(agent_id)?;
+    (timeline.rows().iter().rev()).find_map(|row| row.turn_id.clone())
+}
+
 /// The text of the reply that ends `rows`: its last run of reply rows.
 pub(crate) fn reply_text(rows: &[crate::timeline::Row]) -> String {
     let mut chunks: Vec<&str> = rows

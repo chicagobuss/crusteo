@@ -1,0 +1,6 @@
+// An API error Claude Code reports as a result that says `success` but is flagged `is_error`: the turn fails, with no code.
+{"dir":"in","frame":{"type":"control_request","request":{"subtype":"initialize"}}}
+{"dir":"out","frame":{"type":"control_response","response":{"subtype":"success","request_id":"$REQ","response":{}}}}
+{"cmd":{"prompt":{"turn":"foreground-turn-1","text":"Read the brief"}}}
+{"dir":"in","frame":{"type":"user","session_id":"sess-1"}}
+{"dir":"out","frame":{"type":"result","subtype":"success","is_error":true,"result":"Failed to authenticate. API Error: 403","session_id":"sess-1","usage":{}}}

@@ -42,6 +42,10 @@ const MAX_IMAGE_FRAME: usize = 12 * 1024 * 1024;
 /// itself stops reading past this, and a stranger's huge first frame is
 /// dropped long before it is buffered.
 const BEFORE_HELLO: usize = MAX_FRAME;
+/// What a desktop may send through to a daemon, as a daemon client may:
+/// paseo-client's own limits.
+const RELAY_MESSAGE: usize = 64 * 1024 * 1024;
+const RELAY_FRAME: usize = 16 * 1024 * 1024;
 /// Connections not yet signed in, at once; more are turned away.
 const MAX_STRANGERS: usize = 16;
 
@@ -246,6 +250,53 @@ async fn handle(
         .await;
         return;
     }
+    // A desktop in reef mode, to one host's daemon through Reef.
+    if head.upgrade && path.starts_with(crate::relay::PREFIX) {
+        let mut stranger = stranger;
+        let refused = if !allowed(&gate, &head) {
+            Some(("401 Unauthorized", "Unauthorized"))
+        } else if !origin_allowed(&head) {
+            Some(("403 Forbidden", "Origin not allowed"))
+        } else {
+            None
+        };
+        if let Some((status, why)) = refused {
+            let _ = respond(&mut stream, status, "text/plain", why).await;
+            return;
+        }
+        let daemon = match crate::relay::host_in(path) {
+            Some(id) => {
+                let (reply, answer) = tokio::sync::oneshot::channel();
+                if reef.send(FromServer::Daemon { id, reply }).is_err() {
+                    return;
+                }
+                answer.await.ok().flatten()
+            }
+            None => None,
+        };
+        let Some(daemon) = daemon else {
+            let _ = respond(&mut stream, "404 Not Found", "text/plain", "No such host").await;
+            return;
+        };
+        // Signed in by its token: big frames, as the daemon's own are.
+        let stream = Prefixed {
+            prefix: buffer,
+            at: 0,
+            inner: stream,
+            read: 0,
+            signed_in: Arc::new(AtomicBool::new(true)),
+        };
+        let config = WebSocketConfig::default()
+            .max_message_size(Some(RELAY_MESSAGE))
+            .max_frame_size(Some(RELAY_FRAME));
+        let Ok(socket) = tokio_tungstenite::accept_async_with_config(stream, Some(config)).await
+        else {
+            return;
+        };
+        stranger.welcome();
+        crate::relay::pass(socket, daemon).await;
+        return;
+    }
     if head.upgrade && path == "/ws" {
         if !origin_allowed(&head) {
             let _ = respond(
@@ -411,7 +462,7 @@ fn query(path: &str, key: &str) -> Option<String> {
 
 /// `%XX` escapes to their bytes; None when they do not make UTF-8. A `+`
 /// stays a `+`: the page encodes with `encodeURIComponent`.
-fn percent_decode(text: &str) -> Option<String> {
+pub(crate) fn percent_decode(text: &str) -> Option<String> {
     let bytes = text.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;

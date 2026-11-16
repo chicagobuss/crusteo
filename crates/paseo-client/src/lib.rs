@@ -21,7 +21,7 @@ use serde_json::Value;
 use tokio::sync::{mpsc, oneshot};
 
 pub use burrow_protocol::{PROTOCOL_VERSION, routing, terminal};
-pub use connection::ConnState;
+pub use connection::{ConnState, Socket, Transport, open_socket};
 pub use events::EventReceiver;
 pub use proto::ServerInfo;
 
@@ -81,6 +81,16 @@ pub struct Config {
     pub password: Option<String>,
     /// The ssh program for an `ssh://` endpoint. `ssh` on PATH when unset.
     pub ssh_program: Option<std::path::PathBuf>,
+    /// Sent as `Authorization: Bearer <token>` with the WebSocket handshake:
+    /// a Reef's device token, for a daemon reached through that Reef.
+    pub bearer: Option<String>,
+    /// How long one write to the daemon may stay pending before the
+    /// connection is given up as lost and dialled again. A path that drops
+    /// packets without resetting the connection leaves a write pending until
+    /// TCP gives up, minutes later. [`Config::new`] sets 15 s, the heartbeat's
+    /// own limit: it must outlast the slowest healthy write, a prompt with
+    /// several MB of images on a slow link.
+    pub write_timeout: Duration,
 }
 
 impl Config {
@@ -91,6 +101,8 @@ impl Config {
             app_version: env!("CARGO_PKG_VERSION").into(),
             password: None,
             ssh_program: None,
+            bearer: None,
+            write_timeout: connection::WRITE_TIMEOUT,
         }
     }
 

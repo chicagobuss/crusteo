@@ -5,7 +5,7 @@ use fleet::HostId;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use super::prompt_index::{PromptNavigation, magnification};
 use fleet::Bucket;
@@ -25,7 +25,7 @@ use gpui_kit::gpui::{
     AnyElement, App, AppContext, ClickEvent, Context, DismissEvent, Entity, EventEmitter,
     FocusHandle, Focusable, FollowMode, InteractiveElement, IntoElement, KeyDownEvent,
     ListAlignment, ListOffset, ListState, MouseButton, MouseDownEvent, MouseUpEvent, ParentElement,
-    Pixels, Point, Render, SharedString, StatefulInteractiveElement, Styled, Subscription,
+    Pixels, Point, Render, SharedString, StatefulInteractiveElement, Styled, Subscription, Task,
     WeakEntity, Window, anchored, deferred, div, list, px, relative, svg,
 };
 use gpui_kit::prelude::FluentBuilder;
@@ -112,6 +112,9 @@ pub struct Conversation {
     revision: u64,
     expanded: Rc<std::cell::RefCell<HashSet<String>>>,
     ticking: bool,
+    /// The redraw queued to bring its "3m ago"s up to date, and when it is
+    /// due. Dropping the task cancels the timer.
+    ages_timer: Option<(Instant, Task<()>)>,
     agent_marker: Option<String>,
     navigation: PromptNavigation,
     images: Rc<HashMap<String, Rc<CachedImages>>>,
@@ -305,6 +308,7 @@ impl Conversation {
             revision: u64::MAX,
             expanded: Rc::new(std::cell::RefCell::new(HashSet::new())),
             ticking: false,
+            ages_timer: None,
             agent_marker: None,
             navigation: PromptNavigation::default(),
             images: Rc::new(HashMap::new()),
@@ -1106,6 +1110,38 @@ impl Conversation {
         }
         cx.notify();
     }
+
+    /// Draws again now and then while drawn, so an idle conversation's
+    /// "3m ago"s keep up: it is cached, and nothing else redraws it until
+    /// its agent changes. Once it is no longer drawn this stops.
+    ///
+    /// One timer at a time. A queued one is replaced when a draw wants an
+    /// earlier wake, as when something new arrives after a long idle: the old
+    /// task is dropped, so it cannot fire, and the new one is the only one
+    /// that clears the field.
+    fn keep_ages_current(&mut self, cx: &mut Context<Self>) {
+        let newest = self.session.read(cx).timeline.items().last();
+        let after = newest.and_then(|item| {
+            fleet::clock::ago_redraw_after(&item.timestamp, crate::app::store::now_millis())
+        });
+        let Some(after) = after else {
+            return;
+        };
+        let due = Instant::now() + after;
+        let queued = self.ages_timer.as_ref().map(|(due, _)| *due);
+        if !fleet::clock::ages_timer_needs_replacing(queued, due) {
+            return;
+        }
+        let task = cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(after).await;
+            let _ = this.update(cx, |this, cx| {
+                this.ages_timer = None;
+                cx.notify();
+            });
+        });
+        self.ages_timer = Some((due, task));
+    }
+
     /// On a right-click over selected text, opens a menu to copy it, as
     /// shown or as the Markdown it was written in; over a `link` in a reply,
     /// to open it or copy its address. The text is taken now, so the menu
@@ -1669,6 +1705,7 @@ impl Render for Conversation {
             return self.subagent_view(&label, &view, cx);
         }
         let p = palette();
+        self.keep_ages_current(cx);
         self.sync_question_forms(window, cx);
         let rows = self.rows.clone();
         let replies = self.replies.clone();

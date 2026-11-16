@@ -17,6 +17,7 @@ use burrow_provider_claude::ClaudeProvider;
 use burrow_provider_codex::CodexProvider;
 use burrow_provider_pi::PiProvider;
 use clap::Parser;
+use serde_json::json;
 use tracing_subscriber::EnvFilter;
 
 /// How long startup waits for pi's model list.
@@ -36,11 +37,17 @@ Driving Burrow:
   agents Burrow starts already have. --host ssh://[user@]host goes through
   ssh, with your keys and ~/.ssh/config, to the daemon on that host's
   loopback (?daemonPort=N when it is not 6767). Name an agent by its id, a
-  unique prefix of it, or its name.
+  unique prefix of it, or its name; inspect, wait and logs find it on
+  another host through this host's Reef, when the fleet lets it.
 
-    burrow ls                          agents (-a adds archived ones)
+    burrow ls                          agents, most recently updated first
+    burrow ls -a                       the closed and archived ones too
+    burrow ls --state running          those in these states (several)
     burrow ls --label billing          those whose workspace has that label
     burrow ls --fleet                  every host's, through this host's Reef
+    burrow ls --fleet --on <host>      a fleet listing's, those hosts only
+    burrow ls --fleet --group-by host  counts per host, label or state
+    burrow ls --json --brief           the compact shape (shortId, …)
     burrow inspect <agent>             one agent's model, state, labels…
     burrow send <agent> \"<prompt>\"     a prompt; waits for the reply
     burrow run --provider claude \"<task>\"  start an agent; waits for it
@@ -182,11 +189,21 @@ enum Subcommand {
         #[command(flatten)]
         target: Target,
     },
-    /// List the agents, most recently updated first.
+    /// List the agents, most recently updated first. Closed and archived
+    /// ones are hidden without -a (and counted in a footer line).
     Ls {
-        /// Archived agents and background workspaces' too.
+        /// Closed and archived agents too, whatever the state filter says.
         #[arg(short, long)]
         all: bool,
+        /// Only agents in these states, the STATE column's words (asking,
+        /// running, initializing, idle, review, error, closed, archived);
+        /// several allowed. A state asked for is shown, closed and archived
+        /// included.
+        #[arg(long = "state", value_name = "STATE")]
+        states: Vec<String>,
+        /// Only agents on these hosts, a --fleet listing's; several allowed.
+        #[arg(long = "on", value_name = "HOST")]
+        on: Vec<String>,
         /// Only agents with this label: a workspace label's name (as the
         /// app shows it), or `key=value` for the agent's own. Several must
         /// all match.
@@ -196,9 +213,21 @@ enum Subcommand {
         /// between hosts turned on there), each with its host.
         #[arg(long)]
         fleet: bool,
+        /// Counts only: one line per host, label or state, with its total
+        /// and per-state counts, no agent rows.
+        #[arg(
+            long = "group-by",
+            value_name = "host|label|state",
+            conflicts_with_all = ["json", "brief"]
+        )]
+        group_by: Option<String>,
         /// Print the agents' snapshots as JSON.
         #[arg(long)]
         json: bool,
+        /// With --json: the compact shape (shortId, id, host, title, status,
+        /// attention, model, workspaceLabels, labels, updated).
+        #[arg(long)]
+        brief: bool,
         #[command(flatten)]
         target: Target,
     },
@@ -438,6 +467,50 @@ fn endpoint(target: &Target, listen: &[SocketAddr]) -> String {
     burrow_daemon::client::endpoint(&address)
 }
 
+/// `burrow ls --state`'s words, trimmed and lowercased; an error on one
+/// that is not a state.
+fn ls_states(states: &[String]) -> Result<Vec<String>, String> {
+    use burrow_daemon::commands::STATES;
+    let states = (states.iter())
+        .map(|s| s.trim().to_lowercase())
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>();
+    for state in &states {
+        if !STATES.contains(&state.as_str()) {
+            return Err(format!(
+                "not a state: {state} (states: {})",
+                STATES.join(", ")
+            ));
+        }
+    }
+    Ok(states)
+}
+
+/// `burrow ls --group-by`, and the values that need a fleet listing.
+fn ls_group_by(
+    group_by: Option<&str>,
+    fleet: bool,
+) -> Result<Option<burrow_daemon::commands::GroupBy>, String> {
+    use burrow_daemon::commands::GroupBy;
+    match group_by {
+        None => Ok(None),
+        Some("host") => {
+            if !fleet {
+                return Err(
+                    "--group-by host needs --fleet: a local listing's agents all have one host"
+                        .into(),
+                );
+            }
+            Ok(Some(GroupBy::Host))
+        }
+        Some("label") => Ok(Some(GroupBy::Label)),
+        Some("state") => Ok(Some(GroupBy::State)),
+        Some(given) => Err(format!(
+            "--group-by is host, label or state, not \"{given}\""
+        )),
+    }
+}
+
 /// A wait limit: plain seconds, or a number with `s`, `m` or `h`.
 fn parse_duration(given: &str) -> Result<std::time::Duration, String> {
     let given = given.trim();
@@ -517,18 +590,54 @@ async fn command(command: Subcommand, listen: &[SocketAddr]) -> ! {
             Subcommand::Ls {
                 all,
                 json,
+                brief,
                 labels,
                 fleet: true,
+                states,
+                on,
+                group_by,
                 ..
             } => {
+                if brief && !json {
+                    return Err("--brief needs --json".to_string().into());
+                }
+                let states = ls_states(&states)?;
+                let group_by = ls_group_by(group_by.as_deref(), true)?;
                 let filter = commands::LabelFilter::parse(&labels)?;
                 let (agents, missing) = commands::fleet(&mut client, all, &filter).await?;
+                let now = time::OffsetDateTime::now_utc();
+                let opts = commands::ListOpts {
+                    all,
+                    states,
+                    hosts: on,
+                    workspaces: Default::default(),
+                    group_by,
+                };
                 let mut out = if json {
-                    serde_json::to_string_pretty(&agents).unwrap_or_default() + "\n"
-                } else if agents.is_empty() && !filter.is_empty() {
+                    // The same rows the text would show: the filters and the
+                    // default hiding apply to the JSON too; the hidden-count
+                    // footer stays text-only.
+                    let picked = commands::filtered(&agents, &opts);
+                    let shown = commands::visible(&picked, &opts).0;
+                    if brief {
+                        // Compact and minified: it is for agents, not for
+                        // eyes.
+                        let brief = (shown.iter())
+                            .copied()
+                            .map(|a| commands::compact_agent(a, now))
+                            .collect::<Vec<_>>();
+                        serde_json::to_string(&brief).unwrap_or_default() + "\n"
+                    } else {
+                        serde_json::to_string_pretty(&shown).unwrap_or_default() + "\n"
+                    }
+                } else if agents.is_empty()
+                    && !filter.is_empty()
+                    && opts.states.is_empty()
+                    && opts.hosts.is_empty()
+                {
                     filter.none_shown()
                 } else {
-                    commands::list(&agents, all, time::OffsetDateTime::now_utc())
+                    commands::list(&agents, &opts, now)
                 };
                 if !missing.is_empty() && !json {
                     out.push_str(&format!("Not listed: {}\n", missing.join("; ")));
@@ -536,36 +645,89 @@ async fn command(command: Subcommand, listen: &[SocketAddr]) -> ! {
                 Ok(out)
             }
             Subcommand::Ls {
-                all, json, labels, ..
+                all,
+                json,
+                brief,
+                labels,
+                states,
+                on,
+                group_by,
+                ..
             } => {
+                if brief && !json {
+                    return Err("--brief needs --json".to_string().into());
+                }
+                if !on.is_empty() {
+                    return Err("--on filters a fleet listing: add --fleet"
+                        .to_string()
+                        .into());
+                }
+                let states = ls_states(&states)?;
+                let group_by = ls_group_by(group_by.as_deref(), false)?;
                 let filter = commands::LabelFilter::parse(&labels)?;
-                let workspaces = if filter.workspace.is_empty() {
-                    Default::default()
-                } else {
+                // The workspaces' label names: the --label filter's, the
+                // LABELS column's, and --brief's.
+                let workspaces = if !filter.workspace.is_empty() || !json || brief {
                     commands::workspace_labels(&mut client).await?
+                } else {
+                    Default::default()
                 };
                 let agents: Vec<serde_json::Value> = (agents.iter())
                     .filter(|a| filter.keeps(a, &workspaces))
                     .cloned()
                     .collect();
-                let shown: Vec<&serde_json::Value> = (agents.iter())
-                    .filter(|a| all || a["archivedAt"].is_null())
-                    .collect();
-                Ok(if json {
+                let now = time::OffsetDateTime::now_utc();
+                let opts = commands::ListOpts {
+                    all,
+                    states,
+                    workspaces,
+                    group_by,
+                    ..Default::default()
+                };
+                // The same rows the text would show: the filters and the
+                // default hiding apply to the JSON too; the hidden-count
+                // footer stays text-only.
+                let picked = commands::filtered(&agents, &opts);
+                let shown = commands::visible(&picked, &opts).0;
+                Ok(if json && !brief {
                     serde_json::to_string_pretty(&shown).unwrap_or_default() + "\n"
-                } else if shown.is_empty() && !filter.is_empty() {
+                } else if brief {
+                    // --json --brief: the compact shape, of the snapshots
+                    // --json would show; local ones learn their workspace's
+                    // labels first, as list_agents' items carry them.
+                    let brief = (shown.iter())
+                        .copied()
+                        .map(|a| {
+                            let mut a = a.clone();
+                            if a["workspaceLabels"].is_null() {
+                                a["workspaceLabels"] = (a["workspaceId"].as_str())
+                                    .and_then(|id| opts.workspaces.get(id))
+                                    .map(|names| {
+                                        names.iter().map(|n| json!(n)).collect::<Vec<_>>().into()
+                                    })
+                                    .unwrap_or_else(|| json!([]));
+                            }
+                            commands::compact_agent(&a, now)
+                        })
+                        .collect::<Vec<_>>();
+                    // Compact and minified: it is for agents, not for eyes.
+                    serde_json::to_string(&brief).unwrap_or_default() + "\n"
+                } else if agents.is_empty() && !filter.is_empty() && opts.states.is_empty() {
                     filter.none_shown()
                 } else {
-                    commands::list(&agents, all, time::OffsetDateTime::now_utc())
+                    commands::list(&agents, &opts, now)
                 })
             }
-            Subcommand::Inspect { agent, json, .. } => found(&agent).map(|agent| {
+            Subcommand::Inspect { agent, json, .. } => {
+                // Here first, then in the fleet, through the Reef: a fleet
+                // answer says its host, and the snapshot is enough to show.
+                let agent = commands::find_fleet(&mut client, &agents, &agent).await?;
                 if json {
-                    serde_json::to_string_pretty(&agent).unwrap_or_default() + "\n"
+                    Ok(serde_json::to_string_pretty(&agent).unwrap_or_default() + "\n")
                 } else {
-                    commands::inspect(&agent)
+                    Ok(commands::inspect(&agent))
                 }
-            }),
+            }
             Subcommand::Send {
                 agent,
                 prompt,
@@ -634,12 +796,57 @@ async fn command(command: Subcommand, listen: &[SocketAddr]) -> ! {
                 commands::run(&mut client, &run, (!no_wait).then_some(wait_timeout)).await
             }
             Subcommand::Wait { agent, timeout, .. } => {
-                let agent = found(&agent)?;
-                commands::wait(&mut client, &agent, timeout).await
+                let agent = commands::find_fleet(&mut client, &agents, &agent).await?;
+                if agent["host"].is_string() {
+                    // On another host: the wait runs there, through the
+                    // Reef; without --timeout it waits as long as a local
+                    // one would, which is a very long time.
+                    let limit = timeout;
+                    let mut args = json!({});
+                    if let Some(limit) = limit {
+                        args["timeoutMs"] = (limit.as_millis() as u64).into();
+                    }
+                    let within = limit.unwrap_or(std::time::Duration::from_secs(24 * 3600))
+                        + std::time::Duration::from_secs(10);
+                    let done = commands::fleet_tool(
+                        &mut client,
+                        "wait_for_finish",
+                        agent["id"].as_str().unwrap_or_default(),
+                        args,
+                        within,
+                    )
+                    .await?;
+                    commands::wait_result(&agent, &done)
+                } else {
+                    commands::wait(&mut client, &agent, timeout).await
+                }
             }
             Subcommand::Logs { agent, tail, .. } => {
-                let agent = found(&agent)?;
-                commands::logs(&mut client, &agent, tail).await
+                let agent = commands::find_fleet(&mut client, &agents, &agent).await?;
+                if agent["host"].is_string() {
+                    // On another host: its activity there, as the agent tool
+                    // shows it, the last few thousand of it at most.
+                    let mut args = json!({"limit": commands::LOG_ROWS as f64});
+                    if let Some(tail) = tail {
+                        args["limit"] = (tail as f64).into();
+                    }
+                    let shown = commands::fleet_tool(
+                        &mut client,
+                        "get_agent_activity",
+                        agent["id"].as_str().unwrap_or_default(),
+                        args,
+                        std::time::Duration::from_secs(30),
+                    )
+                    .await?;
+                    let content = shown["content"].as_str().unwrap_or("");
+                    Ok(if content.trim().is_empty() {
+                        format!("{} has no activity yet.\n", commands::title(&agent))
+                    } else {
+                        content.to_string() + "\n"
+                    })
+                } else {
+                    commands::logs(&mut client, &agent, tail).await
+                }
             }
             Subcommand::Rename { agent, name, .. } => {
                 let agent = found(&agent)?;

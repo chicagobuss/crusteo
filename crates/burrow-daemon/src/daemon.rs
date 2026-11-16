@@ -106,6 +106,16 @@ impl Config {
         }
     }
 
+    /// Whether a tool's `serverId` names this host: its server id, or a name
+    /// it goes by (its hostname, or one of `hostnames`), in any case, as a
+    /// Reef finds a host by any of these.
+    pub fn names_this_host(&self, id: &str) -> bool {
+        let id = id.trim();
+        (!id.is_empty() && self.server_id.eq_ignore_ascii_case(id))
+            || (self.hostname.iter().chain(&self.hostnames))
+                .any(|name| !name.is_empty() && name.eq_ignore_ascii_case(id))
+    }
+
     /// The folder Burrow's worktrees go in, `<project hash>/<slug>`.
     pub fn worktrees_root(&self) -> PathBuf {
         match (&self.worktrees_root, &self.home) {

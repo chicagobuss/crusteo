@@ -634,6 +634,11 @@ mod tests {
         .unwrap();
         let Process { input, mut output } = process;
         input.send(json!({"hello": "world"})).unwrap();
+        // Letting go ends the tree at once: `cat` answers first.
+        match timeout(WAIT, output.recv()).await.expect("no echo") {
+            Some(Output::Message(_)) => {}
+            other => panic!("expected the echo, got {other:?}"),
+        }
         drop(input);
         collect(&mut output).await;
         let trace = std::fs::read_to_string(&path).unwrap();
@@ -694,7 +699,14 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(200)).await;
         drop(input);
         collect(&mut output).await;
+        // Ended, a zombie too: in a container whose first process reaps
+        // nothing (CI's), a killed orphan stays one, and `kill -0` finds it.
         let alive = || {
+            if let Ok(stat) = std::fs::read_to_string(format!("/proc/{child}/stat")) {
+                return stat
+                    .rsplit_once(") ")
+                    .is_some_and(|(_, state)| !state.starts_with('Z'));
+            }
             std::process::Command::new("kill")
                 .args(["-0", &child.to_string()])
                 .stderr(Stdio::null())

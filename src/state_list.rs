@@ -27,9 +27,9 @@ use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::scroll::Scrollbar;
 use gpui_kit::gpui::{
-    AnyElement, App, ClickEvent, Context, Entity, InteractiveElement, IntoElement, KeyDownEvent,
-    ParentElement, Render, StatefulInteractiveElement, Styled, Subscription,
-    UniformListScrollHandle, Window, div, point, px, uniform_list,
+    AnyElement, App, ClickEvent, Context, Entity, Focusable as _, InteractiveElement, IntoElement,
+    KeyDownEvent, ParentElement, Render, ScrollStrategy, StatefulInteractiveElement, Styled,
+    Subscription, UniformListScrollHandle, Window, div, point, px, uniform_list,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 
@@ -124,6 +124,17 @@ pub struct StateList {
     sorted_by: Sort,
     /// Rows before the grep, for "12 of 136".
     total: usize,
+    /// The row the keyboard is on in a docked History: Up and Down in the
+    /// Grep box move it, Enter opens it. None for the top row, which is
+    /// where it goes back to as the grep changes or its agent leaves.
+    selected: Option<Key>,
+    /// Whether the Grep box has the cursor, as of the last draw: the
+    /// keyboard's row is ringed only then.
+    keyboard: bool,
+    /// Whether History was docked at the last look, so opening it is told
+    /// from its staying open.
+    was_docked: bool,
+    _grep_focus: Vec<Subscription>,
 }
 
 impl StateList {
@@ -141,13 +152,96 @@ impl StateList {
             Some(
                 cx.subscribe_in(&grep, window, |this, _, event: &InputEvent, _, cx| {
                     if let InputEvent::Change = event {
+                        // A new grep starts the keyboard at its top row.
+                        this.selected = None;
                         this.rebuild(cx);
                     }
                 }),
             );
+        // The ring shows while the box has the cursor: draw again as it
+        // comes and goes (the dock is drawn cached).
+        let focus = grep.read(cx).focus_handle(cx);
+        list._grep_focus = vec![
+            cx.on_focus(&focus, window, |_, _, cx| cx.notify()),
+            cx.on_blur(&focus, window, |_, _, cx| cx.notify()),
+        ];
+        // However History is opened (its key, its button, the command
+        // center), the cursor goes to the Grep box.
+        list.was_docked = core_docked(&list.core, cx);
+        cx.observe_in(&list.core.nav.clone(), window, |this, _, window, cx| {
+            let docked = core_docked(&this.core, cx);
+            if docked && !this.was_docked {
+                this.selected = None;
+                this.focus_grep(window, cx);
+            }
+            this.was_docked = docked;
+        })
+        .detach();
         list.grep = Some(grep);
         list.follow_nav(cx);
         list
+    }
+
+    /// The row the keyboard is on: its agent's, else the top one.
+    fn selected_ix(&self) -> Option<usize> {
+        if self.rows.is_empty() {
+            return None;
+        }
+        let found = self.selected.as_ref().and_then(|(host, agent)| {
+            (self.rows.iter()).position(|row| &row.host == host && &row.agent_id == agent)
+        });
+        Some(found.unwrap_or(0))
+    }
+
+    /// Up (-1) or Down (+1) from the Grep box: the keyboard's row moves,
+    /// stopping at either end, and is scrolled into view.
+    fn move_selection(&mut self, by: isize, cx: &mut Context<Self>) {
+        let Some(ix) = self.selected_ix() else {
+            return;
+        };
+        let to = (ix as isize + by).clamp(0, self.rows.len() as isize - 1) as usize;
+        let row = &self.rows[to];
+        self.selected = Some((row.host.clone(), row.agent_id.clone()));
+        self.scroll.scroll_to_item(to, ScrollStrategy::Nearest);
+        cx.notify();
+    }
+
+    /// Opens a row's agent, as a click on it does.
+    fn open_row(&mut self, ix: usize, cx: &mut Context<Self>) {
+        let Some(row) = self.rows.get(ix) else {
+            return;
+        };
+        let Some(workspace) = row.workspace_id.clone() else {
+            return;
+        };
+        let (host, agent) = (row.host.clone(), row.agent_id.clone());
+        let docked = self.docked;
+        self.core.nav.update(cx, |nav, cx| {
+            nav.set_pane(None, cx);
+            if docked {
+                // Docked, it stays beside the layout up, which shows the
+                // agent without being left.
+                nav.pick_agent(&host, &workspace, &agent, cx);
+            } else {
+                // As a notification's click does: its card in Lanes, else
+                // its tab.
+                nav.open_agent(&host, &workspace, &agent, cx);
+            }
+        });
+        if docked {
+            self.chosen = Some((host, agent));
+            cx.notify();
+        }
+    }
+
+    /// Empties the Grep box and shows every row again. Setting the box's
+    /// value sends no change event, so the rows are rebuilt here.
+    fn clear_grep(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(grep) = &self.grep {
+            grep.update(cx, |input, cx| input.set_value("", window, cx));
+        }
+        self.selected = None;
+        self.rebuild(cx);
     }
 
     /// Puts the cursor in the Grep box (Ctrl+G), its text selected.
@@ -209,6 +303,10 @@ impl StateList {
             _grep_events: None,
             sorted_by: Sort::default(),
             total: 0,
+            selected: None,
+            keyboard: false,
+            was_docked: false,
+            _grep_focus: Vec::new(),
         }
     }
 
@@ -429,29 +527,11 @@ impl StateList {
             .collect::<Vec<_>>()
             .join(" · ");
         let ago = row.changed_at.as_deref().map(time_ago).unwrap_or_default();
-        let open = row.workspace_id.clone().map(|workspace| {
-            let (host, agent) = (row.host.clone(), row.agent_id.clone());
-            cx.listener(move |this, _: &ClickEvent, _, cx| {
-                let docked = this.docked;
-                this.core.nav.update(cx, |nav, cx| {
-                    nav.set_pane(None, cx);
-                    if docked {
-                        // Docked, it stays beside the layout up, which shows
-                        // the agent without being left.
-                        nav.pick_agent(&host, &workspace, &agent, cx);
-                    } else {
-                        // As a notification's click does: its card in Lanes,
-                        // else its tab.
-                        nav.open_agent(&host, &workspace, &agent, cx);
-                    }
-                });
-                if docked {
-                    this.chosen = Some((host.clone(), agent.clone()));
-                    cx.notify();
-                }
-            })
-        });
+        let open = (row.workspace_id.is_some())
+            .then(|| cx.listener(move |this, _: &ClickEvent, _, cx| this.open_row(ix, cx)));
         let chosen = self.chosen.as_ref() == Some(&key);
+        // The keyboard's row, while the Grep box has the cursor.
+        let ringed = self.keyboard && self.selected_ix() == Some(ix);
         // Every line is one line, cut with an ellipsis at the panel's edge,
         // whatever its text: the flex children may shrink to nothing.
         let line = |text: String, color| {
@@ -523,6 +603,17 @@ impl StateList {
                     .when(row.background, |el| el.child(ui::background_tag())),
             )
             .child(line(about, about_color).w_full())
+            // Drawn over the row, so its lines stay where they are.
+            .when(ringed, |el| {
+                el.relative().child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .rounded(px(4.))
+                        .border_2()
+                        .border_color(p.accent),
+                )
+            })
             .into_any_element()
     }
 
@@ -567,14 +658,37 @@ impl StateList {
             .border_1()
             .border_color(p.border)
             .bg(p.surface1)
-            // Escape empties the box; a key press marked handled never
-            // becomes typed text on Windows, so only Escape is taken.
+            // Escape empties the box, or closes History when it is empty,
+            // Up and Down move the keyboard's row and Enter opens it. A key press marked handled never becomes
+            // typed text on Windows, so only these, which type nothing, are
+            // taken, and only with no modifier held.
             .capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
-                if event.keystroke.key != "escape" {
+                if event.keystroke.modifiers.modified() {
                     return;
                 }
-                if let Some(grep) = &this.grep {
-                    grep.update(cx, |input, cx| input.set_value("", window, cx));
+                match event.keystroke.key.as_str() {
+                    // Empties the box; in an empty one, closes History.
+                    "escape" => match &this.grep {
+                        Some(grep) if !grep.read(cx).value().is_empty() => {
+                            this.clear_grep(window, cx);
+                        }
+                        _ => {
+                            let nav = this.core.nav.clone();
+                            nav.update(cx, |nav, cx| {
+                                if nav.history_docked {
+                                    nav.toggle_history_dock(cx);
+                                }
+                            });
+                        }
+                    },
+                    "up" => this.move_selection(-1, cx),
+                    "down" => this.move_selection(1, cx),
+                    "enter" => {
+                        if let Some(ix) = this.selected_ix() {
+                            this.open_row(ix, cx);
+                        }
+                    }
+                    _ => return,
                 }
                 cx.stop_propagation();
             }))
@@ -593,9 +707,7 @@ impl StateList {
                         .xsmall()
                         .tooltip("Clear (Esc)")
                         .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                            if let Some(grep) = &this.grep {
-                                grep.update(cx, |input, cx| input.set_value("", window, cx));
-                            }
+                            this.clear_grep(window, cx);
                         })),
                 )
             });
@@ -720,13 +832,20 @@ impl StateList {
     }
 }
 
+/// Whether History is docked.
+fn core_docked(core: &Core, cx: &App) -> bool {
+    core.nav.read(cx).history_docked
+}
+
 impl Render for StateList {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette();
         let Some((listing, _)) = self.shown else {
             return div().into_any_element();
         };
         self.keep_ticking(cx);
+        self.keyboard = (self.grep.as_ref())
+            .is_some_and(|grep| grep.read(cx).focus_handle(cx).is_focused(window));
         let tools = if listing.is_none() {
             self.tools(cx)
         } else {

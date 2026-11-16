@@ -44,6 +44,12 @@ pub(crate) enum FromServer {
     Hosts {
         reply: tokio::sync::oneshot::Sender<Value>,
     },
+    /// One host's address and password as Reef reaches it, by its id, for
+    /// `/daemon/<id>/ws`; None for a host Reef does not have.
+    Daemon {
+        id: String,
+        reply: tokio::sync::oneshot::Sender<Option<crate::relay::Daemon>>,
+    },
     /// The label catalog, for `/api/labels`, after an edit if one came.
     Labels {
         edit: Option<Value>,
@@ -230,8 +236,9 @@ struct State {
 }
 
 /// The fleet as a desktop in reef mode takes it: each host's id, name and
-/// address as Reef reaches it. Never a daemon's password: that stays with
-/// each desktop.
+/// address as Reef reaches it. Never a daemon's password: Reef adds it for a
+/// desktop that comes through `relay` (`/daemon/<id>/ws`), and a desktop
+/// that connects directly brings its own.
 pub(crate) fn desktop_hosts(fleet: &fleet::Fleet) -> Value {
     let hosts: Vec<Value> = (fleet.hosts.iter())
         .map(|host| {
@@ -243,7 +250,7 @@ pub(crate) fn desktop_hosts(fleet: &fleet::Fleet) -> Value {
             })
         })
         .collect();
-    json!({ "reef": env!("CARGO_PKG_VERSION"), "hosts": hosts })
+    json!({ "reef": env!("CARGO_PKG_VERSION"), "hosts": hosts, "relay": crate::relay::PREFIX })
 }
 
 /// A host to add, from a phone: a name, and an address with the daemon's
@@ -512,6 +519,17 @@ impl State {
             }
             FromServer::Hosts { reply } => {
                 let _ = reply.send(desktop_hosts(&self.up.fleet));
+            }
+            FromServer::Daemon { id, reply } => {
+                let host = (self.up.fleet.hosts.iter()).find(|host| host.id().as_str() == id);
+                let daemon = host.and_then(|host| {
+                    let endpoint = host.config.endpoint.clone()?;
+                    (!endpoint.trim().is_empty()).then(|| crate::relay::Daemon {
+                        endpoint,
+                        password: host.config.password.clone(),
+                    })
+                });
+                let _ = reply.send(daemon);
             }
             FromServer::Labels { edit, reply } => {
                 let _ = reply.send(self.labels_request(edit));

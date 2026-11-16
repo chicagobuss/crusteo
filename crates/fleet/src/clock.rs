@@ -73,16 +73,43 @@ pub fn parse_iso(text: &str) -> Option<i64> {
 
 /// "3m ago" style.
 pub fn time_ago(iso: &str) -> String {
+    time_ago_at(iso, now_millis())
+}
+
+/// [`time_ago`] as of `now`, in epoch millis.
+pub fn time_ago_at(iso: &str, now: i64) -> String {
     let Some(then) = parse_iso(iso) else {
         return String::new();
     };
-    let secs = (now_millis() - then) / 1000;
+    let secs = (now - then) / 1000;
     match secs {
         s if s < 45 => "just now".into(),
         s if s < 3600 => format!("{}m ago", (s / 60).max(1)),
         s if s < 86_400 => format!("{}h ago", s / 3600),
         s => format!("{}d ago", s / 86_400),
     }
+}
+
+/// How soon a view showing [`time_ago`] labels must draw again so they keep
+/// up, given the newest time it labels: a label is only reworked when its
+/// view draws. Half a minute while any can say "just now" or minutes, five
+/// minutes once all say hours or days.
+pub fn ago_redraw_after(newest: &str, now: i64) -> Option<std::time::Duration> {
+    let then = parse_iso(newest)?;
+    let secs = if now - then < 3_600_000 { 30 } else { 300 };
+    Some(std::time::Duration::from_secs(secs))
+}
+
+/// Whether a view that wants its next draw by `wanted` must set a new timer,
+/// given the one it has queued, due at `queued` (none if it has none). Only
+/// a timer due later than wanted is replaced, so a fresh "just now" is not
+/// left waiting on a five-minute wake. One due sooner, or at the same time,
+/// stays: it draws the view, which asks again.
+pub fn ages_timer_needs_replacing(
+    queued: Option<std::time::Instant>,
+    wanted: std::time::Instant,
+) -> bool {
+    queued.is_none_or(|due| wanted < due)
 }
 
 /// A random-looking v4 UUID, for message and idempotency ids. Not for
@@ -123,6 +150,61 @@ mod tests {
             parse_iso("2026-10-02T06:57:24Z")
         );
         assert_eq!(parse_iso("not a time"), None);
+    }
+
+    #[test]
+    fn an_age_is_told_from_when_it_is_drawn_not_when_the_item_came() {
+        let at = "2026-11-13T09:52:00.000Z";
+        let then = parse_iso(at).unwrap();
+        assert_eq!(time_ago_at(at, then + 15_000), "just now");
+        assert_eq!(time_ago_at(at, then + 90_000), "1m ago");
+        assert_eq!(time_ago_at(at, then + (6 * 60 + 48) * 60_000), "6h ago");
+        assert_eq!(time_ago_at(at, then + 3 * 86_400_000), "3d ago");
+        assert_eq!(time_ago_at("not a time", then), "");
+    }
+
+    #[test]
+    fn a_just_now_label_is_redrawn_before_it_goes_stale() {
+        let at = "2026-11-13T09:52:00.000Z";
+        let then = parse_iso(at).unwrap();
+        // "just now" lasts 45 s, so the next draw comes sooner than that.
+        let soon = ago_redraw_after(at, then + 5_000).unwrap();
+        assert!(soon.as_secs() < 45);
+        // Hours change slowly: no need to draw as often.
+        let later = ago_redraw_after(at, then + 2 * 3_600_000).unwrap();
+        assert!(later > soon && later.as_secs() <= 600);
+        assert_eq!(ago_redraw_after("", then), None);
+    }
+
+    #[test]
+    fn a_new_item_pulls_in_a_timer_queued_for_old_ones() {
+        use std::time::{Duration, Instant};
+        let at = "2026-11-13T09:52:00.000Z";
+        let then = parse_iso(at).unwrap();
+        let start = Instant::now();
+
+        // Nothing queued: set a timer.
+        assert!(ages_timer_needs_replacing(None, start));
+
+        // An idle view whose newest item is hours old queues the long wake.
+        let long = ago_redraw_after(at, then + 2 * 3_600_000).unwrap();
+        let queued = start + long;
+
+        // Ten seconds later something new arrives and wants the short one:
+        // it is due before the long wake, so it replaces it.
+        let short = ago_redraw_after(at, then + 5_000).unwrap();
+        let wanted = start + Duration::from_secs(10) + short;
+        assert!(wanted < queued);
+        assert!(ages_timer_needs_replacing(Some(queued), wanted));
+
+        // Drawing again a few seconds on wants a later wake than the one now
+        // queued, so the timer stays and does not restart on every draw.
+        let redrawn = start + Duration::from_secs(15) + short;
+        assert!(!ages_timer_needs_replacing(Some(wanted), redrawn));
+        // The same deadline stays too.
+        assert!(!ages_timer_needs_replacing(Some(wanted), wanted));
+        // And a short timer is not swapped for a long one.
+        assert!(!ages_timer_needs_replacing(Some(wanted), queued));
     }
 
     #[test]

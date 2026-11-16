@@ -5,13 +5,15 @@
 //! redraws only the columns of the hosts it touched, and a column builds
 //! only the cards in view, however many agents a host has.
 
+use std::time::Instant;
+
 use fleet::{Agent, Bucket, Connection, DirChange, HostId};
 use gpui_kit::component::menu::PopupMenu;
 use gpui_kit::gpui::{
     AnyElement, AnyView, App, AppContext, ClickEvent, Context, CursorStyle, DismissEvent, Entity,
     Focusable, InteractiveElement, IntoElement, ListAlignment, ListOffset, ListState, MouseButton,
     MouseDownEvent, ParentElement, Pixels, Point, Render, ScrollWheelEvent, SharedString,
-    StatefulInteractiveElement, StyleRefinement, Styled, Subscription, WeakEntity, Window,
+    StatefulInteractiveElement, StyleRefinement, Styled, Subscription, Task, WeakEntity, Window,
     anchored, deferred, div, list, px,
 };
 use gpui_kit::prelude::FluentBuilder;
@@ -69,6 +71,9 @@ struct HostColumn {
     list: ListState,
     /// The agent picked in the docked History, if it is this host's.
     picked: Option<String>,
+    /// The redraw queued to bring its cards' "3m ago"s up to date, and when
+    /// it is due. Dropping the task cancels the timer.
+    ages_timer: Option<(Instant, Task<()>)>,
 }
 
 #[derive(Clone, PartialEq)]
@@ -204,6 +209,7 @@ impl FleetView {
                                 cards: Vec::new(),
                                 list: ListState::new(0, ListAlignment::Top, px(120.)),
                                 picked: None,
+                                ages_timer: None,
                             })
                         });
                     (name, column)
@@ -338,6 +344,37 @@ impl HostColumn {
         }
     }
 
+    /// Draws again now and then while drawn, so its cards' "3m ago"s keep up
+    /// when nothing on the host changes. Once it is no longer drawn this stops.
+    ///
+    /// One timer at a time. A queued one is replaced when a draw wants an
+    /// earlier wake, as when an agent changes after a long idle: the old task
+    /// is dropped, so it cannot fire, and the new one is the only one that
+    /// clears the field.
+    fn keep_ages_current(&mut self, cx: &mut Context<Self>) {
+        let newest = (self.cards.iter())
+            .filter_map(|card| card.updated_at.as_deref())
+            .max();
+        let after = newest
+            .and_then(|at| fleet::clock::ago_redraw_after(at, crate::app::store::now_millis()));
+        let Some(after) = after else {
+            return;
+        };
+        let due = Instant::now() + after;
+        let queued = self.ages_timer.as_ref().map(|(due, _)| *due);
+        if !fleet::clock::ages_timer_needs_replacing(queued, due) {
+            return;
+        }
+        let task = cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(after).await;
+            let _ = this.update(cx, |this, cx| {
+                this.ages_timer = None;
+                cx.notify();
+            });
+        });
+        self.ages_timer = Some((due, task));
+    }
+
     /// Re-reads this host's header and cards; redraws if either changed.
     fn refresh(&mut self, cx: &mut Context<Self>) {
         let store = self.core.store.read(cx);
@@ -469,6 +506,7 @@ impl HostColumn {
 impl Render for HostColumn {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette();
+        self.keep_ages_current(cx);
         let mut counts = [0usize; 5];
         for (slot, bucket) in counts.iter_mut().zip(Bucket::GROUP_ORDER) {
             *slot = self

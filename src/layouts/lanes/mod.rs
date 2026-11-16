@@ -682,14 +682,16 @@ impl Lanes {
         focus.focus(window, cx);
         // Relative ages need one redraw per minute while this view is visible,
         // not a frame loop. Cached parents no longer provide incidental ticks.
-        cx.spawn(async move |this, cx| {
+        // Visible, not focused: a window looked at beside another app shows
+        // its ages too.
+        cx.spawn_in(window, async move |this, cx| {
             loop {
                 cx.background_executor()
                     .timer(Duration::from_secs(60))
                     .await;
                 if this
-                    .update(cx, |this, cx| {
-                        if this.side.window_active() && this.core.nav.read(cx).layout == "lanes" {
+                    .update_in(cx, |this, window, cx| {
+                        if window.is_visible() && this.core.nav.read(cx).layout == "lanes" {
                             cx.notify();
                         }
                     })

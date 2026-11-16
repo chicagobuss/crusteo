@@ -284,9 +284,13 @@ async fn a_turn_reads_the_same_live_and_from_history() {
     let pushes = h
         .until("turn_completed", |m| stream_event(m, "turn_completed"))
         .await;
+    // The provider's session can say it started before or after the turn
+    // does; it is not part of the turn.
     let streamed: Vec<&Value> = pushes
         .iter()
-        .filter(|m| m["type"] == "agent_stream")
+        .filter(|m| {
+            m["type"] == "agent_stream" && m["payload"]["event"]["type"] != "thread_started"
+        })
         .collect();
     assert_eq!(streamed[0]["payload"]["event"]["type"], "turn_started");
     assert_eq!(
