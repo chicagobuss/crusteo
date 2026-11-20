@@ -316,6 +316,17 @@ fn handshake_failed(err: &tokio_tungstenite::tungstenite::Error, bearer: bool) -
     }
 }
 
+/// How long the daemon has to answer the hello. Through a Reef's
+/// pass-through ([`Config::relayed`]) the hello waits on Reef opening the
+/// daemon too, which through ssh may take [`SSH_CONNECT_TIMEOUT`].
+fn hello_wait(config: &Config) -> Duration {
+    if config.relayed {
+        SSH_CONNECT_TIMEOUT + CONNECT_TIMEOUT
+    } else {
+        CONNECT_TIMEOUT
+    }
+}
+
 async fn session(
     config: &Config,
     commands: &mut mpsc::UnboundedReceiver<Command>,
@@ -364,7 +375,7 @@ async fn session_over(
     }
 
     // The daemon answers a hello with a server_info status, or refuses it.
-    let deadline = Instant::now() + CONNECT_TIMEOUT;
+    let deadline = Instant::now() + hello_wait(config);
     let info = loop {
         let frame = match timeout(deadline - Instant::now().min(deadline), stream.next()).await {
             Err(_) => return Ended::Lost("no server_info after hello".into()),
@@ -775,6 +786,20 @@ mod tests {
             assert!(stream.peer_addr().unwrap().is_ipv4());
             accept.await.unwrap().unwrap();
         });
+    }
+
+    /// Review #6 (0.2.1): through Reef's pass-through the daemon answers the
+    /// hello only once Reef has opened it, which through ssh takes up to
+    /// [`SSH_CONNECT_TIMEOUT`], and then the daemon answers. A relayed
+    /// connection waits for both; a direct one still gives up after
+    /// [`CONNECT_TIMEOUT`].
+    #[test]
+    fn a_relayed_hello_waits_out_reefs_ssh_connect() {
+        let mut config = Config::new("192.0.2.10:6798", "relay-test");
+        assert_eq!(hello_wait(&config), CONNECT_TIMEOUT);
+        config.relayed = true;
+        assert_eq!(hello_wait(&config), SSH_CONNECT_TIMEOUT + CONNECT_TIMEOUT);
+        assert!(hello_wait(&config) > SSH_CONNECT_TIMEOUT);
     }
 
     #[test]

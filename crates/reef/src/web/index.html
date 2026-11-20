@@ -959,6 +959,13 @@ function allowed() {
   try { return Notification.permission !== "default" && Notification.permission !== "denied"; } catch (e) { return false; }
 }
 
+// The agent whose conversation is on screen, in a page that is not in the
+// background, and not covered by the list.
+function watching(host, id) {
+  return !!open && open.host === host && open.id === id && !document.hidden
+    && !$("convpane").hidden && !recent.open;
+}
+
 // Each notice once, and one toast per agent: a newer one replaces it.
 const noticed = new Set();
 function notify(n) {
@@ -967,6 +974,9 @@ function notify(n) {
   if (noticed.has(seen)) return;
   noticed.add(seen);
   if (n.kind === "cli_update" || n.kind === "models") return notifyUpdate(n);
+  // The conversation on screen already shows what the notice would say, as
+  // crusteo's desktop leaves out the agent you are looking at.
+  if (watching(n.host, n.agent)) return;
   // A newer notice for the agent takes its card's place, pinned if it was.
   let pinned = false;
   for (const old of document.querySelectorAll("#toasts .toast")) {

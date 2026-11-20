@@ -87,7 +87,7 @@ async fn notify_when_started(daemon: Arc<Daemon>, caller: String, sent: agents::
             agents::Waited::TimedOut => return,
             agents::Waited::Dropped => {
                 let body = format!(
-                    "Your queued message to agent {} was dropped: the agent was stopped or restarted before it got to it.",
+                    "Your queued message to agent {} was dropped: the agent was stopped, closed or restarted before it got to it.",
                     sent.agent_id
                 );
                 let told =
@@ -1131,6 +1131,8 @@ impl Cx<'_> {
             background: false,
             agent_id: None,
             caller_agent_id: self.caller.map(str::to_string),
+            mode_from_caller: true,
+            unattended: false,
         };
         let agent = agents::create(self.daemon, request).await?;
         if let (true, Some(caller)) = (notify, self.caller) {
@@ -1214,6 +1216,16 @@ impl Cx<'_> {
             args.prompt.clone(),
             message_id.clone(),
         );
+        // An earlier prompt's notice waits for the turn this one cuts off or
+        // steers into: drop it first, or the cut-off turn's end tells the
+        // caller "finished". A queued prompt leaves it: that turn ends first.
+        let cuts_in = matches!(busy, agents::Busy::Interrupt | agents::Busy::Steer);
+        let child = self
+            .daemon
+            .read(|store| store.find_agent(&args.agent_id).map(|a| a.id.clone()));
+        if let (true, true, Some(child)) = (notify, cuts_in, &child) {
+            finish::forget(self.daemon, &caller, child);
+        }
         let deliver = async move {
             let sent = agents::send(
                 &daemon,

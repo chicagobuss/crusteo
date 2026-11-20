@@ -34,7 +34,7 @@ and `examples/`: two systemd user units and a launchd agent (in the source tree 
 `packaging/burrow/`).
 
 ```sh
-version=0.2.1
+version=0.2.2
 target=x86_64-unknown-linux-musl
 base=https://github.com/chicagobuss/crusteo/releases/download/v$version
 curl -LO "$base/burrow-$version-$target.tar.gz"
@@ -54,7 +54,7 @@ The examples keep the binary in `~/burrow`; its state goes to `~/.burrow`.
 ```sh
 mkdir -p ~/burrow
 install -m 0755 "burrow-$version-$target/burrow" ~/burrow/
-~/burrow/burrow --version      # burrow 0.2.1 (<commit>)
+~/burrow/burrow --version      # burrow 0.2.2 (<commit>)
 ```
 
 Burrow offers each agent it finds: `claude`, `codex`, `pi`, `agy` and `cursor-agent` on PATH,
@@ -99,8 +99,16 @@ An agent is its id, a unique prefix of it, or its name. They talk to this host's
 through [Paseo's daemon lock](#paseos-daemon-lock), then `--listen`, then the default, or to
 another with `--host <host[:port]>` (port 6767 when left out) or `PASEO_HOST`, which the agents
 Burrow starts have. `burrow send` exits 2 when the agent waits on a permission and 3 when
-`--timeout` passes first. `burrow status` connects as a client does, so when the port answers but
-Burrow drops the session it says so and exits 1.
+`--timeout` passes first. Before it waits it says, on standard error, that the prompt was
+delivered and whether it started a turn, joined one or is queued; a timeout says it was delivered
+and the reply is still coming. To hand work over and go on, use `--no-wait`. `burrow status`
+connects as a client does, so when the port answers but Burrow drops the session it says so and
+exits 1.
+
+A prompt from `burrow send` reads as the agent's user's own, unless an agent sent it. Something
+else handing work over — a script, a CI job, an assistant outside Burrow — names itself with
+`--from <name>`: the agent and every client then see a message "From <name>", as from another
+agent, under the id `external:<name>`, which no agent has, so nothing is told when its turn ends.
 
 Sent to an agent mid-turn, a prompt joins the turn where the agent's provider can take a message
 mid-turn (Claude Code, Codex, Pi), and otherwise waits behind the turn and starts when it ends
@@ -175,6 +183,32 @@ codesign --force --sign "<certificate name or SHA-1>" --identifier dev.crusteo.b
 ```
 
 or upgrade with `examples/upgrade-macos.sh`, which signs for you (below).
+
+## Keep Claude agents signed in
+
+Burrow's Claude agents sign in as `claude` does for you on that host. When that sign-in lapses,
+a turn fails with "Claude Code is not signed in on <host>", and `claude auth login` on the host,
+over ssh too, fixes it. On a Mac, over ssh, unlock the keychain first
+(`security unlock-keychain ~/Library/Keychains/login.keychain-db`). Without that, the login is
+saved to `~/.claude/.credentials.json`, the expired one in the keychain is read first, and the
+agents stay signed out.
+
+To keep a host's agents signed in however its own sign-in is doing, give Burrow a long-lived
+token. Make one with `claude setup-token` (it lasts a year, and works over ssh), then save it
+in `claude-token` in Burrow's state folder, readable only by you:
+
+```sh
+install -m 600 /dev/null ~/.burrow/claude-token
+cat > ~/.burrow/claude-token        # paste the token, then Enter and Ctrl-D
+```
+
+Each agent's `claude` then gets it as `CLAUDE_CODE_OAUTH_TOKEN`, which comes before the
+keychain and `~/.claude/.credentials.json`. Burrow reads the file each time it starts an
+agent's CLI, so a new token needs no restart, and removing the file goes back to the host's own
+sign-in. On Linux and macOS a file others can read is not used, and Burrow's log says why. On
+Windows Burrow does not check who can read it, so keep it where only you can. An agent created with
+its own `CLAUDE_CODE_OAUTH_TOKEN` (`paseo run --env`) keeps it. An `ANTHROPIC_API_KEY` or
+`ANTHROPIC_AUTH_TOKEN` in Burrow's environment still comes before any token.
 
 ## Run it next to Paseo
 

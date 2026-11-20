@@ -627,23 +627,49 @@ pub fn inspect(agent: &Value) -> String {
         .collect()
 }
 
+/// Who a `burrow send` is from.
+#[derive(Clone, Copy, Debug)]
+pub enum Sender<'a> {
+    /// The agent's user: a person at a terminal.
+    User,
+    /// An agent, by id (`PASEO_AGENT_ID`).
+    Agent(&'a str),
+    /// Someone outside Burrow, by name (`--from`).
+    Named(&'a str),
+}
+
 /// `burrow send`: sends `prompt` and, unless `wait` is `None`, waits for the
-/// turn to end and returns the agent's last message. `source` is the sending
-/// agent's id when an agent sends it (`PASEO_AGENT_ID`).
+/// turn to end and returns the agent's last message. While it waits, the
+/// receipt is on standard error, so a timeout is not read as a failure to
+/// deliver. `host` is the `--host` it was sent with, for the hint to wait.
 pub async fn send(
     client: &mut Client,
     agent: &Value,
     prompt: &str,
-    source: Option<&str>,
+    sender: Sender<'_>,
     behavior: &str,
     wait: Option<Option<Duration>>,
+    host: Option<&str>,
 ) -> Outcome {
     let id = agent["id"].as_str().unwrap_or_default();
+    // A daemon that does not know `sourceName` would take the prompt as its
+    // user's, and say it was delivered.
+    let named = burrow_protocol::server_info::feature::MESSAGE_SOURCE_NAME;
+    if matches!(sender, Sender::Named(_)) && client.info["features"][named] != true {
+        return Err(
+            "--from needs a Burrow from 0.2.2 on; this daemon would show the prompt as its \
+             user's"
+                .to_string()
+                .into(),
+        );
+    }
     let mut message = json!({"type": "send_agent_message_request", "agentId": id,
                              "text": prompt, "activeTurnBehavior": behavior,
                              "messageId": uuid::Uuid::new_v4().to_string()});
-    if let Some(source) = source {
-        message["sourceAgentId"] = source.into();
+    match sender {
+        Sender::Agent(source) => message["sourceAgentId"] = source.into(),
+        Sender::Named(name) => message["sourceName"] = name.into(),
+        Sender::User => {}
     }
     // Replacing a turn waits for it to end.
     let reply = client
@@ -656,26 +682,11 @@ pub async fn send(
         return Err(format!("{} refused the prompt: {why}", title(agent)).into());
     }
     let queued = (reply["disposition"] == "queued").then(|| reply["queuePosition"].as_u64());
+    let receipt = receipt(agent, &reply);
     let Some(limit) = wait else {
-        let how = match (reply["disposition"].as_str(), queued) {
-            (Some("steered"), _) => "Sent into the running turn of",
-            (Some("interrupted"), _) => "Replaced the running turn of",
-            (_, Some(Some(1))) => "Queued (next) behind the running turn of",
-            (_, Some(_)) => "Queued behind the running turn of",
-            _ => "Sent to",
-        };
-        return Ok(format!("{how} {} ({}).\n", title(agent), short(id)));
+        return Ok(receipt + "\n");
     };
-    if let Some(position) = queued {
-        let place = match position {
-            Some(1) | None => "next".to_string(),
-            Some(n) => format!("number {n}"),
-        };
-        eprintln!(
-            "{} is mid-turn; this waits behind it ({place} in line).",
-            title(agent)
-        );
-    }
+    eprintln!("{receipt}");
     // Its own turn's end, not whichever turn runs then.
     let mut ask = json!({"type": "wait_for_finish_request", "agentId": id});
     if queued.is_some() {
@@ -683,7 +694,51 @@ pub async fn send(
     } else if reply["turnId"].is_string() {
         ask["turnId"] = reply["turnId"].clone();
     }
-    finish(client, agent, ask, limit).await
+    finish(client, agent, ask, limit).await.map_err(|failed| {
+        if failed.code != 3 {
+            return failed;
+        }
+        let within = limit.map_or_else(String::new, |l| format!(" within {}", seconds(l)));
+        let host = host.map_or_else(String::new, |host| format!("--host {host} "));
+        let wait = format!("`burrow wait {host}{}`", short(id));
+        // `burrow wait` waits for whichever turn runs then, not this prompt's:
+        // for a queued prompt that may still be the turn before it.
+        let message = match queued {
+            Some(_) => format!(
+                "Delivered; queued, no reply{within}. {wait} waits for the turn it is running, which may still be the one before this prompt."
+            ),
+            None => format!(
+                "Delivered; no reply{within} (it is still working). {wait} waits for the turn it is running."
+            ),
+        };
+        Failed { message, code: 3 }
+    })
+}
+
+/// What became of a sent prompt, in a line: "Delivered to Builder (aa11bb22):
+/// started."
+fn receipt(agent: &Value, reply: &Value) -> String {
+    let how = match reply["disposition"].as_str() {
+        Some("steered") => "steered into its running turn".to_string(),
+        Some("interrupted") => "its running turn was replaced".to_string(),
+        Some("queued") => match reply["queuePosition"].as_u64() {
+            Some(1) | None => "queued (next) behind its running turn".to_string(),
+            Some(n) => format!("queued (#{n}) behind its running turn"),
+        },
+        _ => "started".to_string(),
+    };
+    let id = agent["id"].as_str().unwrap_or_default();
+    format!("Delivered to {} ({}): {how}.", title(agent), short(id))
+}
+
+/// "5 s", "90 s", "1.5 s".
+fn seconds(d: Duration) -> String {
+    let s = d.as_secs_f64();
+    if s.fract() == 0.0 {
+        format!("{} s", s as u64)
+    } else {
+        format!("{s:.1} s")
+    }
 }
 
 /// Waits as `ask` (a `wait_for_finish_request`) says, at most `limit`, and
@@ -1751,6 +1806,30 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn a_receipt_says_it_was_delivered_and_how() {
+        let agent = agent("aa11bb22-cccc-dddd-eeee-ffff00001111", "Builder", "running");
+        let said = |reply: Value| receipt(&agent, &reply);
+        assert_eq!(
+            said(json!({"disposition": "started"})),
+            "Delivered to Builder (aa11bb22): started."
+        );
+        assert_eq!(
+            said(json!({"disposition": "steered"})),
+            "Delivered to Builder (aa11bb22): steered into its running turn."
+        );
+        assert_eq!(
+            said(json!({"disposition": "queued", "queuePosition": 1})),
+            "Delivered to Builder (aa11bb22): queued (next) behind its running turn."
+        );
+        assert_eq!(
+            said(json!({"disposition": "queued", "queuePosition": 3})),
+            "Delivered to Builder (aa11bb22): queued (#3) behind its running turn."
+        );
+        assert_eq!(seconds(Duration::from_secs(5)), "5 s");
+        assert_eq!(seconds(Duration::from_millis(1500)), "1.5 s");
     }
 
     #[test]

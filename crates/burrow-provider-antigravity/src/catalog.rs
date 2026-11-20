@@ -22,6 +22,7 @@ pub fn modes() -> Vec<Mode> {
         ),
         icon: Some("ShieldOff".into()),
         color_tier: Some("dangerous".into()),
+        unattended: true,
     }]
 }
 

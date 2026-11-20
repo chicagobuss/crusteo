@@ -247,6 +247,26 @@ async fn a_turn_is_recorded_scrubbed_and_summed_up() {
     })
     .await;
     assert_eq!(all.iter().filter(|r| r["kind"] == "prompt").count(), 2);
+
+    // Labels set on the agent in crusteo (here: explicitly none) are the
+    // ones its records carry, as the lists show them, not its workspace's.
+    daemon.upsert_agent(fake::agent(
+        AGENT,
+        "wks_rec",
+        "Fix the build",
+        "2026-11-01T12:00:00.000Z",
+        json!({ "labels": { "crusteo.labels": "v1:" } }),
+    ));
+    turn(&daemon, "Unlabelled now?", "Yes.");
+    let relabelled = eventually("the third turn", || {
+        let all = records(&log);
+        (all.iter())
+            .find(|r| r["kind"] == "prompt" && r["text"] == "Unlabelled now?")
+            .cloned()
+    })
+    .await;
+    assert_eq!(relabelled["workspace"]["labels"], json!([]));
+    assert_eq!(relabelled["workspace"]["title"], "shop-checkout");
 }
 
 #[tokio::test]

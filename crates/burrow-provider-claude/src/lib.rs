@@ -36,6 +36,8 @@ pub struct ClaudeProvider {
     trace_dir: Option<PathBuf>,
     /// What the transcripts last said, for the session listings.
     described: std::sync::Arc<history::Described>,
+    /// How a failed sign-in is explained, and the token file agents get.
+    sign_in: session::SignIn,
 }
 
 impl ClaudeProvider {
@@ -68,7 +70,32 @@ impl ClaudeProvider {
             models,
             trace_dir: burrow_provider::env::var_os("BURROW_CLAUDE_TRACE").map(PathBuf::from),
             described: std::sync::Arc::default(),
+            sign_in: session::SignIn::default(),
         })
+    }
+
+    /// The host's name, for saying where to sign in when a turn fails for
+    /// want of a sign-in.
+    pub fn on_host(mut self, host: Option<String>) -> Self {
+        self.sign_in.host = host;
+        self
+    }
+
+    /// A file holding a long-lived token (from `claude setup-token`) that
+    /// each agent's CLI is given as `CLAUDE_CODE_OAUTH_TOKEN`, ahead of the
+    /// host's own sign-in. It is read at every launch, so a new token needs
+    /// no restart; with no file there, the CLI signs in as it would by
+    /// itself. An agent's own `env` can still set the variable.
+    pub fn with_token_file(mut self, path: PathBuf) -> Self {
+        match read_token(&path) {
+            Ok(Some(_)) => {
+                tracing::info!(file = %path.display(), "Claude agents sign in with the token there");
+            }
+            Ok(None) => {}
+            Err(err) => tracing::warn!(%err, "not giving Claude agents the token file"),
+        }
+        self.sign_in.token_file = Some(path);
+        self
     }
 
     pub fn version(&self) -> Option<String> {
@@ -132,6 +159,8 @@ impl Provider for ClaudeProvider {
                 let name = format!("claude-{}.jsonl", uuid::Uuid::new_v4().simple());
                 dir.join(name)
             }),
+            token_file: self.sign_in.token_file.clone(),
+            used_token: false,
         };
         let settings = Settings {
             model: spec.model.clone(),
@@ -140,7 +169,8 @@ impl Provider for ClaudeProvider {
             append_system_prompt: spec.system_prompt.clone(),
             mcp_servers: spec.mcp_servers.clone(),
         };
-        let session = Session::new(launcher, settings, spec.resume.clone(), events);
+        let session = Session::new(launcher, settings, spec.resume.clone(), events)
+            .signing_in(self.sign_in.clone());
         tokio::spawn(session.run(command_rx));
         Ok(ProviderSession {
             commands,
@@ -179,6 +209,46 @@ struct CliLauncher {
     env: Vec<(String, String)>,
     unset: Vec<String>,
     trace: Option<PathBuf>,
+    /// See [`ClaudeProvider::with_token_file`].
+    token_file: Option<PathBuf>,
+    /// Whether the last launch gave the CLI the token file's token.
+    used_token: bool,
+}
+
+/// What the CLI is told to sign in with, ahead of the host's own sign-in.
+pub const TOKEN_ENV: &str = "CLAUDE_CODE_OAUTH_TOKEN";
+
+/// What the CLI signs in with ahead of [`TOKEN_ENV`] (the install guide's
+/// order).
+const KEYS_AHEAD_OF_TOKEN: &[&str] = &["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"];
+
+/// The token in `path`, trimmed. `None` when there is no file or it is
+/// empty. Refused when others than its owner can read it, as ssh refuses a
+/// private key: `chmod 600` it.
+pub fn read_token(path: &Path) -> Result<Option<String>, String> {
+    use std::io::Read;
+    let failed = |err: std::io::Error| format!("{}: {err}", path.display());
+    let mut file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(failed(err)),
+    };
+    // The file opened, not whatever is at the path by now.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = file.metadata().map_err(failed)?.permissions().mode();
+        if mode & 0o077 != 0 {
+            return Err(format!(
+                "{} can be read by others than its owner; run chmod 600 on it",
+                path.display()
+            ));
+        }
+    }
+    let mut text = String::new();
+    file.read_to_string(&mut text).map_err(failed)?;
+    let token = text.trim();
+    Ok((!token.is_empty()).then(|| token.to_string()))
 }
 
 /// The launch flags, as the Agent SDK builds them for Paseo's options.
@@ -271,7 +341,39 @@ const PARENT_SESSION_ENV: [&str; 4] = [
 pub const ENTRYPOINT: &str = "Burrow";
 
 impl CliLauncher {
-    fn command(&self, resume: Option<&str>, settings: &Settings) -> tokio::process::Command {
+    /// The file's token, unless the agent's own `env` names one.
+    fn token(&self) -> Option<String> {
+        if self.env.iter().any(|(key, _)| key == TOKEN_ENV) {
+            return None;
+        }
+        match read_token(self.token_file.as_deref()?) {
+            Ok(token) => token,
+            Err(err) => {
+                tracing::warn!(%err, "not giving the Claude agent the token file");
+                None
+            }
+        }
+    }
+
+    /// Whether the CLI gets an API key, which it signs in with ahead of
+    /// [`TOKEN_ENV`]: from the agent's environment, else Burrow's own.
+    fn key_ahead_of_token(&self) -> bool {
+        KEYS_AHEAD_OF_TOKEN.iter().any(|key| {
+            let value = match self.env.iter().rev().find(|(k, _)| k == key) {
+                Some((_, value)) => Some(value.clone()),
+                None if self.unset.iter().any(|u| u == key) => None,
+                None => std::env::var(key).ok(),
+            };
+            value.is_some_and(|value| !value.trim().is_empty())
+        })
+    }
+
+    fn command(
+        &self,
+        resume: Option<&str>,
+        settings: &Settings,
+        token: Option<&str>,
+    ) -> tokio::process::Command {
         let mut command = tokio::process::Command::new(&self.binary);
         command
             .args(arguments(resume, settings))
@@ -283,6 +385,9 @@ impl CliLauncher {
             .chain(self.unset.iter().map(String::as_str))
         {
             command.env_remove(key);
+        }
+        if let Some(token) = token {
+            command.env(TOKEN_ENV, token);
         }
         for (key, value) in &self.env {
             command.env(key, value);
@@ -296,11 +401,20 @@ impl CliLauncher {
 
 impl Launcher for CliLauncher {
     fn launch(&mut self, resume: Option<&str>, settings: &Settings) -> std::io::Result<Transport> {
-        let process = process::spawn(self.command(resume, settings), self.trace.as_deref())?;
+        let token = self.token();
+        // A key the CLI takes ahead of the token is what a refused sign-in
+        // was refused with, not the token file.
+        self.used_token = token.is_some() && !self.key_ahead_of_token();
+        let command = self.command(resume, settings, token.as_deref());
+        let process = process::spawn(command, self.trace.as_deref())?;
         Ok(Transport {
             input: process.input,
             output: process.output,
         })
+    }
+
+    fn used_token(&self) -> bool {
+        self.used_token
     }
 }
 
@@ -319,14 +433,11 @@ mod tests {
             ],
             unset: vec!["PASEO_HOME".into()],
             trace: None,
+            token_file: None,
+            used_token: false,
         };
-        let command = launcher.command(None, &Settings::default());
-        let env: std::collections::HashMap<String, Option<String>> = (command.as_std().get_envs())
-            .map(|(key, value)| {
-                let value = value.map(|v| v.to_string_lossy().into_owned());
-                (key.to_string_lossy().into_owned(), value)
-            })
-            .collect();
+        let command = launcher.command(None, &Settings::default(), None);
+        let env = envs(&command);
         let get = |key: &str| env.get(key).cloned();
         assert_eq!(get("CLAUDE_CODE_ENTRYPOINT"), Some(Some(ENTRYPOINT.into())));
         assert_eq!(
@@ -337,6 +448,60 @@ mod tests {
         assert_eq!(get("CLAUDE_CODE_SSE_PORT"), Some(None));
         assert_eq!(get("ANTHROPIC_MODEL"), Some(Some("opus".into())));
         assert_eq!(get("PASEO_HOME"), Some(None), "what the daemon unsets goes");
+        assert_eq!(get(TOKEN_ENV), None, "no token file, no token");
+    }
+
+    fn envs(
+        command: &tokio::process::Command,
+    ) -> std::collections::HashMap<String, Option<String>> {
+        (command.as_std().get_envs())
+            .map(|(key, value)| {
+                let value = value.map(|v| v.to_string_lossy().into_owned());
+                (key.to_string_lossy().into_owned(), value)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_token_file_signs_the_cli_in_unless_the_agent_names_its_own() {
+        let dir = std::env::temp_dir().join(format!("burrow-token-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("claude-token");
+        let mut launcher = CliLauncher {
+            binary: PathBuf::from("claude"),
+            cwd: PathBuf::from("."),
+            env: Vec::new(),
+            unset: Vec::new(),
+            trace: None,
+            token_file: Some(file.clone()),
+            used_token: false,
+        };
+        assert_eq!(launcher.token(), None, "no file yet");
+        std::fs::write(&file, "  \n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        assert_eq!(launcher.token(), None, "an empty file is no token");
+        std::fs::write(&file, "a-test-token\n").unwrap();
+        assert_eq!(launcher.token().as_deref(), Some("a-test-token"));
+        let command = launcher.command(None, &Settings::default(), launcher.token().as_deref());
+        assert_eq!(
+            envs(&command).get(TOKEN_ENV).cloned(),
+            Some(Some("a-test-token".into()))
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+            assert_eq!(launcher.token(), None, "a token others can read is refused");
+            assert!(read_token(&file).unwrap_err().contains("chmod 600"));
+            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        launcher.env = vec![(TOKEN_ENV.into(), "the-agents-own".into())];
+        assert_eq!(launcher.token(), None, "the agent's env wins");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// A `claude` that answers `--version` and, in print mode, an

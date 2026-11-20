@@ -725,16 +725,20 @@ impl Lanes {
             let model = (store.fleet.agent(&card.host, &card.agent_id))
                 .and_then(|agent| agent.model_label())
                 .map(str::to_string);
-            let workspace = (!card.workspace_name.is_empty()).then(|| card.workspace_name.clone());
-            let line = [workspace, Some(host), model]
+            let workspace = (!card.workspace_name.is_empty())
+                .then(|| format!("Paseo workspace: {}", card.workspace_name));
+            let runs = [Some(host), model]
                 .into_iter()
                 .flatten()
                 .collect::<Vec<_>>()
                 .join(" · ");
-            match agent_folder(&self.core, &card.host, &card.agent_id, cx) {
-                Some((folder, _)) => format!("{line}\n{}", tilde(&folder)),
-                None => line,
-            }
+            let folder = agent_folder(&self.core, &card.host, &card.agent_id, cx)
+                .map(|(folder, _)| format!("Working directory: {}", tilde(&folder)));
+            [workspace, Some(runs), folder]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>()
+                .join("\n")
         };
         let shell = card_frame(id, COMPACT_HEIGHT, focused, frame, look, content)
             .tooltip(move |window, cx| Tooltip::new(place.clone()).build(window, cx));

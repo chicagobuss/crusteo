@@ -242,7 +242,8 @@ enum Subcommand {
         target: Target,
     },
     /// Send an agent a prompt and wait for its reply (exit 2: it waits on a
-    /// permission; 3: still working at --timeout).
+    /// permission; 3: still working at --timeout). To hand work over and go
+    /// on, --no-wait returns once the agent has it.
     Send {
         /// The agent: its id, a unique prefix of it, or its name.
         agent: String,
@@ -268,6 +269,12 @@ enum Subcommand {
         /// provider cannot be steered (Paseo's steer).
         #[arg(long)]
         steer: bool,
+        /// Who it is from, when that is not the agent's user: a script, a
+        /// CI job, an assistant outside Burrow. Shown as a message "From
+        /// <name>", as another agent's is. (An agent sending is named by
+        /// its id already.)
+        #[arg(long, value_name = "NAME")]
+        from: Option<String>,
         #[command(flatten)]
         target: Target,
     },
@@ -572,6 +579,7 @@ async fn command(command: Subcommand, listen: &[SocketAddr]) -> ! {
         }
     };
     let endpoint = endpoint(target, listen);
+    let host = target.host.clone();
     let outcome: Result<String, Failed> = async {
         if let Subcommand::Status { .. } = command {
             return Ok(burrow_daemon::status::fetch(&endpoint).await?.render());
@@ -737,6 +745,7 @@ async fn command(command: Subcommand, listen: &[SocketAddr]) -> ! {
                 queue,
                 interrupt,
                 steer,
+                from,
                 ..
             } => {
                 let agent = found(&agent)?;
@@ -748,15 +757,13 @@ async fn command(command: Subcommand, listen: &[SocketAddr]) -> ! {
                     _ => "auto",
                 };
                 let wait = (!no_wait).then(|| timeout.map(std::time::Duration::from_secs));
-                commands::send(
-                    &mut client,
-                    &agent,
-                    &prompt,
-                    caller.as_deref(),
-                    behavior,
-                    wait,
-                )
-                .await
+                let sender = match (caller.as_deref(), from.as_deref()) {
+                    (Some(agent), _) => commands::Sender::Agent(agent),
+                    (None, Some(name)) => commands::Sender::Named(name),
+                    (None, None) => commands::Sender::User,
+                };
+                let host = host.as_deref();
+                commands::send(&mut client, &agent, &prompt, sender, behavior, wait, host).await
             }
             Subcommand::Run {
                 prompt,
@@ -1062,6 +1069,10 @@ fn start_again() -> anyhow::Error {
     anyhow::anyhow!("restarting is done by this host's service manager")
 }
 
+/// The file in the state directory whose token Claude agents sign in with,
+/// when it is there: see `ClaudeProvider::with_token_file`.
+const CLAUDE_TOKEN_FILE: &str = "claude-token";
+
 /// How to find each provider not turned off, at startup and whenever its
 /// CLI changes ([`burrow_daemon::discovery`]).
 fn discoveries(args: &Args, home: Option<&std::path::Path>) -> Vec<Discovery> {
@@ -1072,11 +1083,19 @@ fn discoveries(args: &Args, home: Option<&std::path::Path>) -> Vec<Discovery> {
     if !args.no_claude {
         let binary = args.claude_bin.clone();
         let cli = program(&binary, "claude");
+        let host =
+            (args.hostname.clone()).or_else(|| gethostname::gethostname().into_string().ok());
+        let token_file = home.map(|home| home.join(CLAUDE_TOKEN_FILE));
         found.push(Discovery::cli(
             "claude",
             cli,
             move || match ClaudeProvider::detect(binary.as_deref()) {
                 Some(claude) => {
+                    let claude = claude.on_host(host.clone());
+                    let claude = match &token_file {
+                        Some(file) => claude.with_token_file(file.clone()),
+                        None => claude,
+                    };
                     tracing::info!(version = ?claude.version(), "offering Claude Code");
                     Some(Arc::new(claude) as Arc<dyn Provider>)
                 }

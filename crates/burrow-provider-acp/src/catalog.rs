@@ -97,6 +97,7 @@ pub fn modes(mode_state: &Value, options: &[Value]) -> (Vec<Mode>, Option<String
                 description: mode["description"].as_str().map(str::to_string),
                 icon: None,
                 color_tier: None,
+                unattended: false,
             })
             .collect();
         let current = mode_state["currentModeId"].as_str().map(str::to_string);
@@ -111,6 +112,7 @@ pub fn modes(mode_state: &Value, options: &[Value]) -> (Vec<Mode>, Option<String
                 description,
                 icon: None,
                 color_tier: None,
+                unattended: false,
             })
             .collect();
         return (modes, option["currentValue"].as_str().map(str::to_string));

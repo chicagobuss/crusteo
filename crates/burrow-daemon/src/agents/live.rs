@@ -238,14 +238,18 @@ async fn drive(
         }
     }
     flush(&daemon, &agent_id, &mut coalescer);
+    // Marked first, so what holds the gate (a prompt starting, an interrupt)
+    // sees the end and lets go.
     live.ended.send_replace(true);
-    // The session ended: whatever was running is over.
+    // The session ended: whatever was running is over. Under the gate, so a
+    // prompt starting a turn is not halfway through; forgotten last, so a
+    // session started after it is not the one marked closed here.
+    let gate = live.gate.lock().await;
     let still_registered = daemon
         .agents
         .live(&agent_id)
         .is_some_and(|current| Arc::ptr_eq(&current, &live));
     if still_registered {
-        daemon.agents.forget(&agent_id);
         finish_turn(&daemon, &agent_id, &live, None, TurnEnd::Closed);
         update(&daemon, &agent_id, |agent| {
             agent.status = AgentStatus::Closed;
@@ -253,7 +257,9 @@ async fn drive(
             agent.pending_permissions.clear();
             agent.cli = None;
         });
+        daemon.agents.forget(&agent_id);
     }
+    drop(gate);
     live.drop_queued(&agent_id, "its session ended");
 }
 
@@ -647,20 +653,67 @@ fn finish_turn(
     }
 }
 
-/// Waits until the turn count moves past `seen`.
+/// A turn whose prompt never reached the session, because the session ended
+/// as it went: announced, so it is ended for clients (canceled) and the
+/// agent is left closed, not running. Nothing when the session's own end
+/// closed it already.
+pub(super) fn abandon_turn(daemon: &Daemon, agent_id: &str, live: &Live, turn_id: &str) {
+    if !live.give_up_turn(turn_id) {
+        return;
+    }
+    let reason = "the agent's session ended before the prompt reached it";
+    stream(
+        daemon,
+        agent_id,
+        json!({"type": "turn_canceled", "provider": live.info.id, "turnId": turn_id,
+               "reason": reason}),
+    );
+    // Kept, as a failed turn's error is, so a wait for this turn, even one
+    // asked later, says it was not delivered rather than that it finished.
+    record(
+        daemon,
+        agent_id,
+        None,
+        json!({"type": "assistant_message",
+               "text": format!("[System Error] The prompt was not delivered: {reason}"),
+               "messageId": format!("{turn_id}:error")}),
+    );
+    update(daemon, agent_id, |agent| {
+        if agent
+            .active_turn
+            .as_ref()
+            .is_some_and(|t| t.turn_id == turn_id)
+        {
+            agent.active_turn = None;
+        }
+        agent.status = AgentStatus::Closed;
+    });
+    live.turns_done.send_modify(|n| *n += 1);
+}
+
+/// Waits until the turn count moves past `seen`, or the session ends (its
+/// turn with it; the session's own end waits for the gate the caller holds).
 async fn turn_finished(live: &Live, seen: u64) -> bool {
     let mut done = live.turns_done.subscribe();
-    tokio::time::timeout(INTERRUPT_GRACE, done.wait_for(|n| *n > seen))
+    let mut ended = live.ended.subscribe();
+    let finished = async {
+        tokio::select! {
+            r = done.wait_for(|n| *n > seen) => r.is_ok(),
+            r = ended.wait_for(|ended| *ended) => r.is_ok(),
+        }
+    };
+    tokio::time::timeout(INTERRUPT_GRACE, finished)
         .await
-        .is_ok_and(|r| r.is_ok())
+        .unwrap_or(false)
 }
 
 /// Interrupts the running turn, if any, and waits for it to end.
 pub(super) async fn interrupt(live: &Live) -> Result<(), ()> {
+    // Counted before looking, so a turn ending in between is not missed.
+    let seen = *live.turns_done.borrow();
     if active_turn(live).is_none() {
         return Ok(());
     }
-    let seen = *live.turns_done.borrow();
     let _ = live.commands.send(Command::Interrupt);
     if turn_finished(live, seen).await {
         Ok(())
@@ -729,6 +782,30 @@ impl Live {
         state
             .started
             .push_back((message_id.to_string(), turn.to_string()));
+        drop(state);
+        self.started.send_modify(|n| *n += 1);
+    }
+
+    /// `turn` is no longer the active one, if it still was; whether it was.
+    pub(super) fn give_up_turn(&self, turn: &str) -> bool {
+        let mut state = self.state();
+        let active = state.active_turn.as_deref() == Some(turn);
+        if active {
+            state.active_turn = None;
+        }
+        active
+    }
+
+    /// The queued prompt `message_id` did not start after all: dropped.
+    pub(super) fn drop_starting(&self, message_id: &str) {
+        let mut state = self.state();
+        if state.starting.as_deref() == Some(message_id) {
+            state.starting = None;
+        }
+        if state.dropped.len() >= REMEMBERED_ENDS {
+            state.dropped.pop_front();
+        }
+        state.dropped.push_back(message_id.to_string());
         drop(state);
         self.started.send_modify(|n| *n += 1);
     }

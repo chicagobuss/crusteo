@@ -7,7 +7,7 @@ use burrow_protocol::directory::{AgentSnapshot, AttentionReason};
 use burrow_provider::Command;
 use serde_json::{Value, json};
 
-use super::{last_assistant_text, preview, publish, resolve, stream, update};
+use super::{last_assistant_text, preview, publish, resolve, stream, update, update_quietly};
 use crate::clock;
 use crate::daemon::Daemon;
 use crate::store::StoreEvent;
@@ -203,7 +203,7 @@ pub fn clear_attention(daemon: &Arc<Daemon>, keys: &[String]) -> Vec<AgentSnapsh
         let requires =
             daemon.read(|store| store.agents.get(&agent_id).map(|a| a.requires_attention));
         let snapshot = if requires == Some(true) {
-            update(daemon, &agent_id, |agent| {
+            update_quietly(daemon, &agent_id, |agent| {
                 agent.requires_attention = false;
                 agent.attention_reason = None;
                 agent.attention_timestamp = None;

@@ -30,6 +30,43 @@ impl Provider for Unsteerable {
     }
 }
 
+/// A provider whose CLI finishes its first turn and exits at once, as a CLI
+/// that crashes or is killed right after a reply does: the prompt queued
+/// behind that turn races the session's end.
+struct ExitsAfterTurn(EchoProvider);
+
+impl Provider for ExitsAfterTurn {
+    fn info(&self) -> ProviderInfo {
+        let mut info = self.0.info();
+        info.id = "exits".into();
+        info.capabilities.steer = false;
+        info
+    }
+
+    fn start(&self, _spec: SessionSpec) -> Result<Session, ProviderError> {
+        use burrow_provider::{Command, ProviderEvent};
+        let (commands, mut received) = tokio::sync::mpsc::unbounded_channel();
+        let (events, session_events) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            while let Some(command) = received.recv().await {
+                if let Command::Prompt { turn_id, .. } = command {
+                    tokio::time::sleep(Duration::from_millis(300)).await;
+                    let _ = events.send(ProviderEvent::TurnCompleted {
+                        turn: Some(turn_id),
+                        usage: None,
+                    });
+                    let _ = events.send(ProviderEvent::Exited { error: None });
+                    return;
+                }
+            }
+        });
+        Ok(Session {
+            commands,
+            events: session_events,
+        })
+    }
+}
+
 struct Harness {
     running: Running,
     client: Client,
@@ -46,6 +83,7 @@ async fn harness(slow: Duration) -> Harness {
     };
     daemon.agents.register(Arc::new(echo()));
     daemon.agents.register(Arc::new(Unsteerable(echo())));
+    daemon.agents.register(Arc::new(ExitsAfterTurn(echo())));
     let running = start(daemon).await.expect("start");
     let client = Client::connect(&running.local_addr.to_string())
         .await
@@ -192,6 +230,39 @@ async fn stopping_the_agent_drops_what_waits_behind_its_turn() {
         .await
         .expect("fetch");
     assert_eq!(after["agent"]["status"], "idle", "{after}");
+    h.stop().await;
+}
+
+/// Review #8 (0.2.1): the turn ends, the CLI exits, and the prompt queued
+/// behind the turn starts on a session that is gone. Whichever comes first,
+/// the agent ends up closed, not running, and a wait on that prompt answers.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_prompt_queued_as_the_cli_exits_leaves_the_agent_closed_and_its_wait_answered() {
+    let mut h = harness(Duration::from_millis(1)).await;
+    for round in 0..12 {
+        let agent = h.create("exits").await;
+        let first = h.send(&agent, "a", None).await;
+        assert_eq!(first["disposition"], "started", "round {round}: {first}");
+        let queued = h.send(&agent, "b", Some("queue")).await;
+        assert_eq!(queued["disposition"], "queued", "round {round}: {queued}");
+
+        let b = h.wait(&agent, ("messageId", &queued["messageId"])).await;
+        assert_ne!(b["status"], "timeout", "round {round}: the wait hung: {b}");
+        assert_eq!(b["final"]["status"], "closed", "round {round}: {b}");
+        let after = h
+            .client
+            .request(
+                json!({"type": "fetch_agent_request", "agentId": agent}),
+                WITHIN,
+            )
+            .await
+            .expect("fetch");
+        assert_eq!(after["agent"]["status"], "closed", "round {round}: {after}");
+        assert!(
+            after["agent"]["activeTurn"].is_null(),
+            "round {round}: {after}"
+        );
+    }
     h.stop().await;
 }
 

@@ -177,6 +177,18 @@ impl Upstream {
         let agent = self.fleet.agent(&host, &key.1)?;
         let workspace =
             (agent.workspace_id.as_deref()).and_then(|id| self.fleet.workspace(&host, id));
+        // The labels the lists show for it: with Reef's catalog, the agent's
+        // own (or its workspace's, matched by name); without one, or before
+        // its first import has run, the workspace's Paseo labels.
+        let labels: Vec<String> = match self.fleet.labels.as_ref() {
+            Some(catalog) if catalog.imported => {
+                (fleet::labels::effective(agent, workspace, catalog).iter())
+                    .filter_map(|id| catalog.get(id))
+                    .map(|label| label.name.clone())
+                    .collect()
+            }
+            _ => workspace.map(|w| w.labels.clone()).unwrap_or_default(),
+        };
         Some(Context {
             host: key.0.clone(),
             agent: json!({
@@ -186,7 +198,7 @@ impl Upstream {
             workspace: json!({
                 "id": agent.workspace_id,
                 "title": workspace.map(|w| w.title.clone().unwrap_or_else(|| w.name.clone())),
-                "labels": workspace.map(|w| w.labels.clone()).unwrap_or_default(),
+                "labels": labels,
                 "cwd": agent.cwd,
                 "branch": workspace.and_then(|w| w.branch()),
             }),

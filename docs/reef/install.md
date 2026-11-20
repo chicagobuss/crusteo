@@ -26,7 +26,7 @@ Each holds the `reef` binary, this guide as `INSTALL.md`, the license, the chang
 `reef-settings.json` (in the source tree they are in `packaging/reef/`).
 
 ```sh
-version=0.2.1
+version=0.2.2
 target=x86_64-unknown-linux-musl
 base=https://github.com/chicagobuss/crusteo/releases/download/v$version
 curl -LO "$base/reef-$version-$target.tar.gz"
@@ -47,7 +47,7 @@ The examples keep everything in one folder, `~/reef`:
 mkdir -p ~/reef
 install -m 0755 "reef-$version-$target/reef" ~/reef/
 cp "reef-$version-$target/examples/hosts.json" ~/reef/
-~/reef/reef --version      # reef 0.2.1 (<commit>)
+~/reef/reef --version      # reef 0.2.2 (<commit>)
 ```
 
 ### hosts.json

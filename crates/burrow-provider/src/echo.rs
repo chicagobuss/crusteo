@@ -52,6 +52,7 @@ impl Provider for EchoProvider {
                     description: Some("Asks before running tools".into()),
                     icon: Some("Shield".into()),
                     color_tier: Some("safe".into()),
+                    unattended: false,
                 },
                 Mode {
                     id: "bypassPermissions".into(),
@@ -59,6 +60,7 @@ impl Provider for EchoProvider {
                     description: Some("Runs tools without asking".into()),
                     icon: Some("ShieldOff".into()),
                     color_tier: Some("dangerous".into()),
+                    unattended: true,
                 },
             ],
             default_mode_id: Some("default".into()),

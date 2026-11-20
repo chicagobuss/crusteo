@@ -25,6 +25,7 @@ pub fn modes(auto_review: bool) -> Vec<Mode> {
         description: Some(description.into()),
         icon: Some(icon.into()),
         color_tier: Some(tier.into()),
+        unattended: id == "full-access",
     };
     let mut modes = vec![
         mode(

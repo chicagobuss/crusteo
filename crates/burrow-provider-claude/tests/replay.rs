@@ -444,6 +444,34 @@ async fn an_error_reported_as_success_fails_the_turn_without_a_code() {
     );
 }
 
+#[tokio::test]
+async fn a_lapsed_sign_in_fails_the_turn_saying_where_to_sign_in() {
+    let played = play(
+        include_str!("fixtures/signed_out.jsonl"),
+        Some("sess-1"),
+        None,
+    )
+    .await;
+    let failed = played.events.iter().find_map(|x| match x {
+        ProviderEvent::TurnFailed {
+            error,
+            code,
+            diagnostic,
+            ..
+        } => Some((error.clone(), code.clone(), diagnostic.clone())),
+        _ => None,
+    });
+    let (error, code, diagnostic) = failed.expect("the turn fails");
+    assert!(
+        error.starts_with("Claude Code is not signed in on this host"),
+        "{error}"
+    );
+    assert!(error.contains("`claude auth login`"), "{error}");
+    assert_eq!(code.as_deref(), Some("authentication_failed"));
+    assert_eq!(diagnostic, None, "the CLI's words are already the reply");
+    assert!(text(&played.events).contains("API Error: 401"));
+}
+
 /// Replays a transcript recorded with `BURROW_CLAUDE_TRACE`: the daemon's
 /// side (prompts, answers, the interrupt) is rebuilt from its `in` frames,
 /// and every `out` frame is what Claude Code really sent.

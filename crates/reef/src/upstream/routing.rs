@@ -85,6 +85,26 @@ pub struct Route {
     pub told: Vec<String>,
 }
 
+impl Route {
+    /// The same sender and the same target: one route at a time between
+    /// them, as Burrow keeps one finish subscription per caller and child.
+    fn same_pair(&self, other: &Route) -> bool {
+        self.pair() == other.pair()
+    }
+
+    fn pair(&self) -> Pair {
+        (
+            self.source_host.clone(),
+            self.caller_agent_id.clone(),
+            self.target_host.clone(),
+            self.target_agent_id.clone(),
+        )
+    }
+}
+
+/// Sender host, sender, target host, target.
+type Pair = (String, String, String, String);
+
 /// Routes under way and how often each pair of agents routed lately.
 #[derive(Default)]
 pub struct Routes {
@@ -92,6 +112,9 @@ pub struct Routes {
     path: Option<PathBuf>,
     pub under_way: Vec<Route>,
     sent: HashMap<(String, String), VecDeque<Instant>>,
+    /// The turn each pair was last told the end of: a prompt steered into
+    /// a turn that ends at once can leave two routes waiting on it.
+    told_turn: HashMap<Pair, String>,
 }
 
 impl Routes {
@@ -176,16 +199,32 @@ async fn link(apply: &mpsc::UnboundedSender<Apply>, host: &str) -> LinkNow {
 }
 
 /// Has Reef's state keep `route`, saved, and follow it; returns once it is
-/// in `routes.json`, or Reef is stopping.
-async fn follow_recorded(apply: &mpsc::UnboundedSender<Apply>, route: Route) {
+/// in `routes.json`, or Reef is stopping. `replaces` drops the pair's route
+/// under way: the new prompt joined or cut off the turn that one waits for.
+async fn follow_recorded(apply: &mpsc::UnboundedSender<Apply>, route: Route, replaces: bool) {
     let (tx, rx) = oneshot::channel();
     let asked = apply.send(Box::new(move |up: &mut Upstream| {
-        up.follow_route(route, true);
+        if replaces {
+            up.keep_route(route.clone(), true);
+        }
+        up.follow_route(route, !replaces);
         let _ = tx.send(());
     }));
     if asked.is_ok() {
         let _ = rx.await;
     }
+}
+
+/// Whether `route` is still the one to tell: nothing replaced or ended it,
+/// and, for its turn's end (`ending`), no route between the same two agents
+/// was told that turn's end already. Claims that turn for it when so.
+async fn still_to_tell(apply: &mpsc::UnboundedSender<Apply>, route: &Route, ending: bool) -> bool {
+    let (tx, rx) = oneshot::channel();
+    let route = route.clone();
+    let asked = apply.send(Box::new(move |up: &mut Upstream| {
+        let _ = tx.send(up.claim(&route, ending));
+    }));
+    asked.is_ok() && rx.await.unwrap_or(false)
 }
 
 impl Upstream {
@@ -197,6 +236,8 @@ impl Upstream {
             .and_then(|p| crate::config::read_json(p).ok())
             .unwrap_or_default();
         self.routes.path = path;
+        // Under way again, so the next save keeps them and each is told.
+        self.routes.under_way = saved.clone();
         for route in saved {
             self.follow_route(route, false);
         }
@@ -338,8 +379,10 @@ impl Upstream {
         // once the route is kept, so a Reef stopped now still tells it.
         let interrupting = behavior == "interrupt";
         if interrupting {
+            // The turn the pair's earlier route waits for is being cut off:
+            // its end is not the sender's news.
             if let Some(route) = &route {
-                self.keep_route(route.clone());
+                self.keep_route(route.clone(), true);
             }
             let mut receipt = receipt.clone();
             receipt["disposition"] = "interrupting".into();
@@ -365,7 +408,7 @@ impl Upstream {
                 match (outcome, route) {
                     (Ok(_), Some(mut route)) => {
                         route.turn_id = turn;
-                        follow_recorded(&apply, route).await;
+                        follow_recorded(&apply, route, false).await;
                     }
                     (Ok(_), None) => {}
                     (Err(refusal), route) => {
@@ -403,10 +446,13 @@ impl Upstream {
                 receipt
             });
             // The route is on disk before the sender hears: a Reef stopped
-            // in between would otherwise lose the notice it is owed.
-            if let (Ok(_), Some(mut route)) = (&answer, route) {
+            // in between would otherwise lose the notice it is owed. One that
+            // started a turn or steered into one replaces the pair's earlier
+            // route; a queued one waits behind it, and each turn is told.
+            if let (Ok(receipt), Some(mut route)) = (&answer, route) {
                 route.turn_id = turn;
-                follow_recorded(&apply, route).await;
+                let replaces = receipt["disposition"] != "queued";
+                follow_recorded(&apply, route, replaces).await;
             }
             source.send(response(&request_id, answer));
         });
@@ -698,17 +744,21 @@ impl Upstream {
     /// Keeps `route` (saved, when `new`) and follows it to its notice.
     fn follow_route(&mut self, route: Route, new: bool) {
         if new {
-            self.keep_route(route.clone());
+            self.keep_route(route.clone(), false);
         }
         tokio::spawn(follow(self.apply.clone(), route));
     }
 
     /// Keeps `route` among those under way, in `routes.json` by the time
-    /// this returns; one with its id already there is replaced.
-    fn keep_route(&mut self, route: Route) {
-        self.routes
-            .under_way
-            .retain(|r| r.route_id != route.route_id);
+    /// this returns; one with its id already there is replaced, and with
+    /// `replace_pair` so is the route between the same two agents that waits
+    /// for a turn (the one joined or cut off). A queued prompt's route, still
+    /// waiting by its message, is its own turn's and stays.
+    fn keep_route(&mut self, route: Route, replace_pair: bool) {
+        self.routes.under_way.retain(|r| {
+            r.route_id != route.route_id
+                && !(replace_pair && r.turn_id.is_some() && r.same_pair(&route))
+        });
         self.routes.under_way.push(route);
         self.routes.save();
     }
@@ -718,6 +768,23 @@ impl Upstream {
             route.told = told;
             self.routes.save();
         }
+    }
+
+    /// See [`still_to_tell`]. A route whose turn's end was told already is
+    /// done.
+    fn claim(&mut self, route: &Route, ending: bool) -> bool {
+        if !(self.routes.under_way.iter()).any(|r| r.route_id == route.route_id) {
+            return false;
+        }
+        if let (true, Some(turn)) = (ending, &route.turn_id) {
+            let pair = route.pair();
+            if self.routes.told_turn.get(&pair) == Some(turn) {
+                self.route_done(&route.route_id);
+                return false;
+            }
+            self.routes.told_turn.insert(pair, turn.clone());
+        }
+        true
     }
 
     fn route_done(&mut self, route_id: &str) {
@@ -859,6 +926,11 @@ async fn follow(apply: mpsc::UnboundedSender<Apply>, mut route: Route) {
                 }
             }
         };
+        // A queued prompt's turn, once known: a turn told by another route
+        // (one steered into it) is not told again.
+        if route.turn_id.is_none() {
+            route.turn_id = answer["turnId"].as_str().map(str::to_string);
+        }
         let reason = reason(&answer);
         let mut notices: Vec<(String, Value)> = Vec::new();
         if reason == "needs permission" {
@@ -877,6 +949,12 @@ async fn follow(apply: mpsc::UnboundedSender<Apply>, mut route: Route) {
             }
         } else {
             notices.push((format!("{}:end", route.route_id), Value::Null));
+        }
+        // A newer prompt between the same two agents took this one's place
+        // while it waited, or another route already told this turn's end:
+        // the notice is not this one's to give.
+        if !still_to_tell(&apply, &route, reason != "needs permission").await {
+            return;
         }
         let title = (answer["final"]["title"].as_str())
             .filter(|t| !t.trim().is_empty())

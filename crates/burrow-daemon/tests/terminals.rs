@@ -268,23 +268,34 @@ async fn terminals_run_in_a_workspace_and_clients_attach_to_them() {
         .await;
     assert_eq!(released["subscriptionId"], second["subscriptionId"]);
 
-    // Killed: the stream ends, and the list empties.
+    // Killed: the stream ends, and the list empties. The two come in either
+    // order: the terminal's own thread tells the list, the stream's task
+    // tells the end.
     let killed = a
         .request(json!({"type": "kill_terminal_request", "terminalId": terminal}))
         .await;
     assert_eq!(killed["success"], true);
-    let exit = a
-        .until_message("the stream's end", |m| m["type"] == "terminal_stream_exit")
-        .await;
+    let (mut exit, mut emptied) = (None, false);
+    timeout(WAIT, async {
+        while exit.is_none() || !emptied {
+            if let Event::Message(m) = a.events.recv().await.unwrap() {
+                if m["type"] == "terminal_stream_exit" {
+                    exit = Some(m);
+                } else if m["type"] == "terminals_changed" && m["payload"]["terminals"] == json!([])
+                {
+                    emptied = true;
+                }
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("no stream's end and emptied list within {WAIT:?}"));
+    let exit = exit.unwrap();
     assert_eq!(exit["payload"]["terminalId"], terminal.as_str());
     assert_eq!(
         exit["payload"]["subscriptionId"],
         attached["subscriptionId"]
     );
-    a.until_message("the emptied list", |m| {
-        m["type"] == "terminals_changed" && m["payload"]["terminals"] == json!([])
-    })
-    .await;
     assert_eq!(daemon.terminals.count(), 0);
 
     drop((a, b));

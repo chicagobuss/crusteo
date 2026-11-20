@@ -589,6 +589,8 @@ async fn create_initial_agent(
             background: false,
             agent_id: Some(input.agent_id.unwrap_or_else(|| agent_id.to_string())),
             caller_agent_id: input.caller_agent_id,
+            mode_from_caller: false,
+            unattended: false,
         },
     )
     .await?;

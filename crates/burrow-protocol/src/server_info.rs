@@ -84,6 +84,10 @@ pub mod feature {
     /// (`burrow.fleet.*` messages), so its agents can message agents on
     /// other hosts when that Reef allows it. Paseo's apps ignore it.
     pub const FLEET_ROUTING: &str = "burrowFleetRouting";
+    /// Burrow's own: `send_agent_message_request` takes `sourceName`, a
+    /// sender outside Burrow (`burrow send --from`). A daemon without it
+    /// takes such a prompt as its user's, so `--from` is refused there.
+    pub const MESSAGE_SOURCE_NAME: &str = "burrowMessageSourceName";
     // P1
     pub const PROVIDERS_SNAPSHOT: &str = "providersSnapshot";
     pub const CREATION_LIFECYCLE: &str = "creationLifecycle";
@@ -135,6 +139,7 @@ pub const P0_FEATURES: &[&str] = &[
     feature::TERMINAL_RESTORE_MODES,
     feature::TERMINAL_SIZE_OWNERSHIP,
     feature::FLEET_ROUTING,
+    feature::MESSAGE_SOURCE_NAME,
 ];
 
 /// `ServerInfoStatusPayloadSchema`.

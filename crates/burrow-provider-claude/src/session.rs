@@ -33,6 +33,69 @@ pub struct Transport {
 /// Starts (or restarts) the CLI. `resume` is the session to continue.
 pub trait Launcher: Send + 'static {
     fn launch(&mut self, resume: Option<&str>, settings: &Settings) -> std::io::Result<Transport>;
+
+    /// Whether the last launch gave the CLI the token file's token.
+    fn used_token(&self) -> bool {
+        false
+    }
+}
+
+/// What a turn that failed for want of a sign-in is explained with.
+#[derive(Debug, Clone, Default)]
+pub struct SignIn {
+    /// The host's name, to say where to sign in.
+    pub host: Option<String>,
+    /// The token file agents are given (see
+    /// [`crate::ClaudeProvider::with_token_file`]), there or not.
+    pub token_file: Option<std::path::PathBuf>,
+}
+
+/// What Claude Code says when it has no sign-in, or one the API refused.
+/// Its result names no code for it, and the assistant frame's `error` is
+/// only sent by newer CLIs.
+fn says_signed_out(text: &str) -> bool {
+    const SAID: [&str; 7] = [
+        // "Failed to authenticate. API Error: 401 Invalid bearer token"
+        "API Error: 401",
+        "authentication_error",
+        "OAuth token has expired",
+        "OAuth access token has expired",
+        "Please run /login",
+        "Invalid API key",
+        "Not logged in",
+    ];
+    SAID.iter().any(|said| text.contains(said))
+}
+
+/// The plain words for a turn that failed for want of a sign-in: where to
+/// sign in, or that the token file's token was refused.
+pub fn signed_out_message(sign_in: &SignIn, used_token: bool, on_mac: bool) -> String {
+    let host = sign_in.host.as_deref().unwrap_or("this host");
+    if used_token && let Some(file) = &sign_in.token_file {
+        return format!(
+            "Claude Code's sign-in was refused: the token Burrow gives it, from {}, has \
+             expired or been revoked. Make a new one with `claude setup-token` and save it \
+             there, or remove the file to use {host}'s own sign-in.",
+            file.display()
+        );
+    }
+    let mut message = format!(
+        "Claude Code is not signed in on {host}, or its sign-in has expired. Run \
+         `claude auth login` on {host}, then send this again."
+    );
+    if on_mac {
+        message.push_str(
+            " Over ssh, run `security unlock-keychain` first, or the login made there \
+             is hidden behind the old one in the keychain.",
+        );
+    }
+    if let Some(file) = &sign_in.token_file {
+        message.push_str(&format!(
+            " To stay signed in without that, save a token from `claude setup-token` in {}.",
+            file.display()
+        ));
+    }
+    message
 }
 
 /// What a launch depends on that can change during a session.
@@ -96,6 +159,11 @@ pub struct Session<L: Launcher> {
     /// The foreground turn's prompt, as the CLI's `command_lifecycle`
     /// frames tell of it.
     prompt: Option<Prompt>,
+    sign_in: SignIn,
+    /// The turn's reply was the CLI's own word that it is not signed in
+    /// (an assistant frame with `error: authentication_failed`), already
+    /// shown as the reply.
+    signed_out: bool,
 }
 
 /// Where a turn's prompt is in the CLI's queue. A prompt the CLI has
@@ -144,7 +212,15 @@ impl<L: Launcher> Session<L> {
             usage: Usage::default(),
             aborting: false,
             prompt: None,
+            sign_in: SignIn::default(),
+            signed_out: false,
         }
+    }
+
+    /// Where a failed sign-in says to sign in.
+    pub fn signing_in(mut self, sign_in: SignIn) -> Self {
+        self.sign_in = sign_in;
+        self
     }
 
     fn emit(&self, event: ProviderEvent) {
@@ -609,6 +685,9 @@ impl<L: Launcher> Session<L> {
     }
 
     fn on_assistant(&mut self, message: &Value) {
+        if message["error"] == "authentication_failed" {
+            self.signed_out = true;
+        }
         let id = message["message"]["id"].as_str().map(str::to_string);
         let (text_streamed, thinking_streamed) = id
             .as_ref()
@@ -743,6 +822,7 @@ impl<L: Launcher> Session<L> {
         self.cancel_tools("canceled");
         self.turn = None;
         self.streamed.clear();
+        let signed_out_reply = std::mem::take(&mut self.signed_out);
         let ok = message["subtype"] == "success" && !message["is_error"].as_bool().unwrap_or(false);
         if ok {
             self.emit(ProviderEvent::TurnCompleted {
@@ -764,6 +844,23 @@ impl<L: Launcher> Session<L> {
             } else {
                 errors.join("\n")
             };
+            if signed_out_reply || says_signed_out(&error) {
+                // The CLI's own words name no host and no way back; say
+                // where to sign in. They stay as the reply when it gave
+                // them as one, and are kept as the diagnostic otherwise.
+                let plain = signed_out_message(
+                    &self.sign_in,
+                    self.launcher.used_token(),
+                    cfg!(target_os = "macos"),
+                );
+                self.emit(ProviderEvent::TurnFailed {
+                    turn,
+                    error: plain,
+                    code: Some("authentication_failed".into()),
+                    diagnostic: (!signed_out_reply).then_some(error),
+                });
+                return;
+            }
             self.emit(ProviderEvent::TurnFailed {
                 turn,
                 error,
@@ -1034,6 +1131,39 @@ mod tests {
         let merged = question_answers(&original, &updated);
         assert_eq!(merged["answers"], json!({"Which file?": "a"}));
         assert!(merged["questions"][0].get("allowOther").is_none());
+    }
+
+    #[test]
+    fn a_failed_sign_in_says_where_to_sign_in_or_which_token_was_refused() {
+        assert!(says_signed_out("Invalid API key · Please run /login"));
+        // What 2.1.323 says for a refused token, besides its frame's `error`.
+        assert!(says_signed_out(
+            "Failed to authenticate. API Error: 401 Invalid bearer token"
+        ));
+        assert!(says_signed_out(
+            r#"API Error: 401 {"type":"error","error":{"type":"authentication_error"}}"#
+        ));
+        assert!(!says_signed_out("Failed to authenticate. API Error: 403"));
+        let mut sign_in = SignIn {
+            host: Some("buildbox".into()),
+            token_file: None,
+        };
+        let plain = signed_out_message(&sign_in, false, false);
+        assert_eq!(
+            plain,
+            "Claude Code is not signed in on buildbox, or its sign-in has expired. Run \
+             `claude auth login` on buildbox, then send this again."
+        );
+        assert!(signed_out_message(&sign_in, false, true).contains("security unlock-keychain"));
+        sign_in.token_file = Some("/home/user/.burrow/claude-token".into());
+        assert!(signed_out_message(&sign_in, false, false).ends_with(
+            "save a token from `claude setup-token` in /home/user/.burrow/claude-token."
+        ));
+        let refused = signed_out_message(&sign_in, true, false);
+        assert!(
+            refused.starts_with("Claude Code's sign-in was refused: the token Burrow gives it, from /home/user/.burrow/claude-token"),
+            "{refused}"
+        );
     }
 
     #[test]

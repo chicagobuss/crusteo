@@ -916,6 +916,9 @@ async fn to_new_agent(
         background: false,
         agent_id: None,
         caller_agent_id: None,
+        mode_from_caller: false,
+        // Nobody watches a schedule's run (Paseo's `unattended: true`).
+        unattended: true,
     };
     let outcome = match agents::create(daemon, request).await {
         Ok(agent) => {

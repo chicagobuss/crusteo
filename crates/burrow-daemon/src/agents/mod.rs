@@ -56,7 +56,8 @@ pub use create::{CreateAgent, PARENT_AGENT_LABEL, create};
 pub use idle::{close, release_idle, release_idle_loop};
 pub use import::{ImportSession, import_session};
 pub use messages::{
-    Busy, Delivered, Delivery, QUEUE_LIMIT, Waited, send, wait_started, wait_started_within,
+    Busy, Delivered, Delivery, OUTSIDE_PREFIX, QUEUE_LIMIT, Waited, send, send_from_outside,
+    wait_started, wait_started_within,
 };
 pub(crate) use messages::{send_notice, send_notice_once, send_system};
 pub use permissions::{clear_attention, respond_permission};
@@ -313,7 +314,7 @@ fn set_cli(daemon: &Daemon, agent_id: &str, cli: Option<burrow_protocol::directo
         .read(|store| store.agents.get(agent_id).map(|a| a.cli == cli))
         .unwrap_or(true);
     if !same {
-        update(daemon, agent_id, |agent| agent.cli = cli);
+        update_quietly(daemon, agent_id, |agent| agent.cli = cli);
     }
 }
 
@@ -337,12 +338,36 @@ fn update(
     agent_id: &str,
     change: impl FnOnce(&mut AgentSnapshot),
 ) -> Option<AgentSnapshot> {
+    apply_change(daemon, agent_id, true, change)
+}
+
+/// [`update`] that keeps `updatedAt`, which clients read as the agent's last
+/// activity: for what Paseo does not count as activity (clearing attention
+/// on a loaded agent, closing its runtime) and for Burrow's own `cli`.
+/// Paseo's app takes an upsert whose `updatedAt` did not move
+/// (`agent-directory-update-policy.ts`: incoming `>=` current).
+fn update_quietly(
+    daemon: &Daemon,
+    agent_id: &str,
+    change: impl FnOnce(&mut AgentSnapshot),
+) -> Option<AgentSnapshot> {
+    apply_change(daemon, agent_id, false, change)
+}
+
+fn apply_change(
+    daemon: &Daemon,
+    agent_id: &str,
+    activity: bool,
+    change: impl FnOnce(&mut AgentSnapshot),
+) -> Option<AgentSnapshot> {
     daemon.apply(|store| {
         let Some(mut agent) = store.agents.get(agent_id).cloned() else {
             return (None, Vec::new());
         };
         change(&mut agent);
-        agent.updated_at = clock::after(&agent.updated_at);
+        if activity {
+            agent.updated_at = clock::after(&agent.updated_at);
+        }
         let events = store.upsert_agent(agent.clone());
         (Some(agent), events)
     })

@@ -10,6 +10,7 @@ pub fn modes() -> Vec<Mode> {
         description: Some(description.into()),
         icon: Some(icon.into()),
         color_tier: Some(tier.into()),
+        unattended: id == "bypassPermissions",
     };
     vec![
         mode(

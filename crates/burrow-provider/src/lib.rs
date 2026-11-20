@@ -46,6 +46,9 @@ pub struct Mode {
     pub icon: Option<String>,
     /// `safe`, `moderate`, `dangerous`, `planning`.
     pub color_tier: Option<String>,
+    /// Runs without asking for permission (Paseo's `isUnattended`): an
+    /// unattended caller's child on another provider gets this mode.
+    pub unattended: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

@@ -119,9 +119,35 @@ pub(super) fn tilde(path: &str) -> String {
     home.unwrap_or_else(|| path.to_string())
 }
 
+/// What hovering a place label says, each part named: the workspace in full
+/// (the label may cut it short), the agent's working directory and branch,
+/// and that a click copies the directory. With neither, the host.
+fn place_hint(
+    workspace: Option<&str>,
+    folder: Option<&(String, Option<String>)>,
+    host_name: &str,
+) -> String {
+    let mut lines = Vec::new();
+    if let Some(workspace) = workspace {
+        lines.push(format!("Paseo workspace: {workspace}"));
+    }
+    if let Some((folder, branch)) = folder {
+        lines.push(format!("Working directory: {}", tilde(folder)));
+        if let Some(branch) = branch {
+            lines.push(format!("Branch: {branch}"));
+        }
+        lines.push("Click to copy the working directory".into());
+    }
+    if lines.is_empty() {
+        lines.push(host_name.to_string());
+    }
+    lines.join("\n")
+}
+
 /// Where an agent runs, "workspace · host", muted and at most `max` wide. A
-/// long workspace name is cut short, never the host. Hovering shows the
-/// agent's folder and branch; a click copies the folder.
+/// long workspace name is cut short, never the host. Hovering names the
+/// workspace in full and the agent's working directory and branch; a click
+/// copies the directory.
 pub fn place_label(
     core: &Core,
     host: &HostId,
@@ -132,17 +158,7 @@ pub fn place_label(
 ) -> AnyElement {
     let p = palette();
     let folder = agent_folder(core, host, agent, cx);
-    let hint = match &folder {
-        Some((folder, Some(branch))) => format!(
-            "{}\nBranch {branch}\nClick to copy the folder",
-            tilde(folder)
-        ),
-        Some((folder, None)) => format!("{}\nClick to copy the folder", tilde(folder)),
-        None => match &workspace {
-            Some(workspace) => format!("{workspace} · {host_name}"),
-            None => host_name.clone(),
-        },
-    };
+    let hint = place_hint(workspace.as_deref(), folder.as_ref(), &host_name);
     let store = core.store.clone();
     let host_part = match workspace {
         Some(_) => format!("\u{a0}· {host_name}"),
@@ -215,5 +231,29 @@ mod path_tests {
         assert_eq!(shown.chars().count(), super::MENU_PATH_CHARS);
         assert!(shown.starts_with("~/src/") && shown.contains('…'));
         assert!(shown.ends_with("feature-branch-with-a-long-name"));
+    }
+
+    #[test]
+    fn hovering_a_place_names_the_workspace_and_the_working_directory() {
+        let folder = ("/home/sam/code".to_string(), Some("fix-retry".to_string()));
+        assert_eq!(
+            super::place_hint(
+                Some("shop-checkout-and-a-long-name"),
+                Some(&folder),
+                "buildbox"
+            ),
+            "Paseo workspace: shop-checkout-and-a-long-name\nWorking directory: ~/code\n\
+             Branch: fix-retry\nClick to copy the working directory"
+        );
+        let no_branch = ("/srv/app".to_string(), None);
+        assert_eq!(
+            super::place_hint(None, Some(&no_branch), "buildbox"),
+            "Working directory: /srv/app\nClick to copy the working directory"
+        );
+        assert_eq!(
+            super::place_hint(Some("shop"), None, "buildbox"),
+            "Paseo workspace: shop"
+        );
+        assert_eq!(super::place_hint(None, None, "buildbox"), "buildbox");
     }
 }

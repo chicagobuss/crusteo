@@ -116,6 +116,39 @@ pub async fn send(
     deliver(daemon, key, text, message_id, images, busy, from).await
 }
 
+/// The id an outside sender's messages carry: no agent has it, so nothing
+/// is ever told about the turn it starts.
+pub const OUTSIDE_PREFIX: &str = "external:";
+
+/// `send_agent_message_request` with `sourceName` (Burrow's own): a prompt
+/// from a sender outside Burrow — a script, a CI job, an assistant on
+/// another machine — delivered as another agent's message from `name`, so
+/// clients show it as "From <name>" rather than as their user's prompt.
+pub async fn send_from_outside(
+    daemon: &Arc<Daemon>,
+    key: &str,
+    text: &str,
+    message_id: Option<String>,
+    images: Vec<Image>,
+    behavior: Option<&str>,
+    name: &str,
+) -> Result<Delivered, String> {
+    let name = outside_name(name)?;
+    let busy = Busy::parse(behavior, true);
+    let from = From::Outside(&name);
+    deliver(daemon, key, text, message_id, images, busy, from).await
+}
+
+/// A sender's name as messages show it: one line, trimmed, up to 64
+/// characters.
+fn outside_name(name: &str) -> Result<String, String> {
+    let name = name.trim();
+    if name.is_empty() || name.chars().count() > 64 || name.contains(['\n', '\r']) {
+        return Err("A sender's name is one line of 1 to 64 characters".into());
+    }
+    Ok(name.to_string())
+}
+
 /// How a wait for a queued prompt ended.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Waited {
@@ -258,6 +291,8 @@ enum From<'a> {
     User,
     /// Another agent, by id.
     Agent(&'a str),
+    /// A sender outside Burrow, by the name it gave.
+    Outside(&'a str),
     /// A notice about another agent (`event`).
     Notice {
         child: &'a str,
@@ -282,8 +317,18 @@ async fn deliver(
         unarchive(daemon, &agent_id);
     }
     restart_if_superseded(daemon, &agent_id).await;
-    let live = ensure_live(daemon, &agent_id)?;
-    let _gate = live.gate.lock().await;
+    // A session whose CLI exited as this waited for it is let go of under
+    // the gate; the next one takes the prompt.
+    let mut live = ensure_live(daemon, &agent_id)?;
+    let mut gate = live.gate.lock().await;
+    for _ in 0..2 {
+        if !*live.ended.borrow() {
+            break;
+        }
+        drop(gate);
+        live = ensure_live(daemon, &agent_id)?;
+        gate = live.gate.lock().await;
+    }
     live.touch();
     let client_message_id = message_id.clone().unwrap_or_else(ids::agent_id);
     let delivered = |delivery, turn_id| Delivered {
@@ -292,19 +337,34 @@ async fn deliver(
         delivery,
         turn_id,
     };
-    if let Some(message_id) = &message_id {
-        let mut state = live.state.lock().unwrap_or_else(|p| p.into_inner());
-        if state.recent_sends.contains(message_id) {
-            return Ok(delivered(Delivery::Duplicate, None));
-        }
-        if state.recent_sends.len() >= REMEMBERED_SENDS {
-            state.recent_sends.pop_front();
-        }
-        state.recent_sends.push_back(message_id.clone());
+    if let Some(message_id) = &message_id
+        && (live.state.lock().unwrap_or_else(|p| p.into_inner()))
+            .recent_sends
+            .contains(message_id)
+    {
+        return Ok(delivered(Delivery::Duplicate, None));
     }
+    // Remembered once taken (under the gate, so no copy gets in first): a
+    // send refused can be sent again.
+    let remember = || {
+        if let Some(message_id) = &message_id {
+            let mut state = live.state.lock().unwrap_or_else(|p| p.into_inner());
+            if state.recent_sends.len() >= REMEMBERED_SENDS {
+                state.recent_sends.pop_front();
+            }
+            state.recent_sends.push_back(message_id.clone());
+        }
+    };
     let text = text.trim().to_string();
     let (prompt, mut user_message) = match from {
         From::Agent(sender) => from_agent(daemon, sender, &client_message_id, &text, None),
+        From::Outside(name) => envelope(
+            &format!("{OUTSIDE_PREFIX}{name}"),
+            Some(name.to_string()),
+            &client_message_id,
+            &text,
+            None,
+        ),
         From::Notice { child, event } => {
             from_agent(daemon, child, &client_message_id, &text, Some(event))
         }
@@ -331,11 +391,15 @@ async fn deliver(
         let can_steer = live.info.capabilities.steer;
         match busy {
             Busy::Auto | Busy::Steer if can_steer => {
-                let _ = live.commands.send(Command::Steer {
+                let sent = live.commands.send(Command::Steer {
                     message_id: client_message_id.clone(),
                     text: prompt,
                     images,
                 });
+                if sent.is_err() {
+                    return Err(format!("Agent {agent_id} is not running"));
+                }
+                remember();
                 record(daemon, &agent_id, Some(turn.clone()), user_message);
                 update(daemon, &agent_id, |agent| {
                     agent.last_user_message_at = Some(clock::now_iso());
@@ -355,9 +419,11 @@ async fn deliver(
                     user_message,
                     images,
                     text,
-                    names: matches!(from, From::User | From::Agent(_)),
+                    names: matches!(from, From::User | From::Agent(_) | From::Outside(_)),
                 });
                 let position = state.queued.len();
+                drop(state);
+                remember();
                 return Ok(delivered(Delivery::Queued { position }, None));
             }
             Busy::Steer | Busy::Interrupt => {}
@@ -386,13 +452,16 @@ async fn deliver(
         user_message,
         images,
         text,
-        names: matches!(from, From::User | From::Agent(_)),
+        names: matches!(from, From::User | From::Agent(_) | From::Outside(_)),
     };
     start(daemon, &agent_id, &live, queued, turn_id.clone())?;
+    remember();
     Ok(delivered(delivery, Some(turn_id)))
 }
 
 /// Starts `turn_id` (already the live session's active turn) with a prompt.
+/// When the session has ended, or ends as the prompt goes to it, the turn is
+/// given up and the agent is left closed, not running.
 fn start(
     daemon: &Daemon,
     agent_id: &str,
@@ -400,6 +469,11 @@ fn start(
     prompt: Queued,
     turn_id: String,
 ) -> Result<(), String> {
+    let not_running = || format!("Agent {agent_id} is not running");
+    if *live.ended.borrow() || live.commands.is_closed() {
+        live.give_up_turn(&turn_id);
+        return Err(not_running());
+    }
     let started_at = clock::now_iso();
     stream(
         daemon,
@@ -420,14 +494,19 @@ fn start(
             started_at: Some(started_at),
         });
     });
-    live.commands
-        .send(Command::Prompt {
-            turn_id,
-            message_id: prompt.message_id,
-            text: prompt.prompt,
-            images: prompt.images,
-        })
-        .map_err(|_| format!("Agent {agent_id} is not running"))
+    let sent = live.commands.send(Command::Prompt {
+        turn_id: turn_id.clone(),
+        message_id: prompt.message_id,
+        text: prompt.prompt,
+        images: prompt.images,
+    });
+    // The session's end is marked before it closes its turn, so an end not
+    // seen here still finds this turn and closes it.
+    if sent.is_err() || *live.ended.borrow() {
+        super::live::abandon_turn(daemon, agent_id, live, &turn_id);
+        return Err(not_running());
+    }
+    Ok(())
 }
 
 /// Once a turn has ended: starts the prompt waiting behind it, if any and
@@ -441,10 +520,12 @@ pub(super) async fn drain(daemon: Arc<Daemon>, agent_id: String, live: Arc<Live>
         return;
     };
     let message_id = next.message_id.clone();
-    let started = start(&daemon, &agent_id, &live, next, turn_id.clone());
-    live.started_queued(&message_id, &turn_id);
-    if let Err(error) = started {
-        warn!(agent_id, %error, "a queued prompt did not start");
+    match start(&daemon, &agent_id, &live, next, turn_id.clone()) {
+        Ok(()) => live.started_queued(&message_id, &turn_id),
+        Err(error) => {
+            warn!(agent_id, %error, "a queued prompt did not start");
+            live.drop_starting(&message_id);
+        }
     }
 }
 
@@ -470,6 +551,18 @@ fn from_agent(
         })
         .map(|title| title.trim().to_string())
         .filter(|title| !title.is_empty());
+    envelope(sender, title, message_id, text, event)
+}
+
+/// [`from_agent`]'s envelope and timeline item, for sender id `sender`
+/// going by `title`.
+fn envelope(
+    sender: &str,
+    title: Option<String>,
+    message_id: &str,
+    text: &str,
+    event: Option<&str>,
+) -> (String, Value) {
     let named = match &title {
         Some(title) => format!(" source-agent-title=\"{}\"", escape_xml(title)),
         None => String::new(),
@@ -526,4 +619,154 @@ fn escape_xml(text: &str) -> String {
         .replace('>', "&gt;")
         .replace('"', "&quot;")
         .replace('\'', "&apos;")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::daemon::Config;
+    use burrow_provider::echo::EchoProvider;
+
+    /// Review #8 (0.2.1): a send that got the agent's session just before it
+    /// ended starts no turn on it, and leaves the agent as it was, not
+    /// running with a turn nothing will finish.
+    #[tokio::test]
+    async fn a_prompt_for_a_session_that_has_ended_starts_no_turn() {
+        let daemon = Daemon::new(Config::ephemeral());
+        daemon.agents.register(Arc::new(EchoProvider {
+            chunk_delay: Duration::ZERO,
+            slow_delay: Duration::ZERO,
+        }));
+        let cwd = std::env::temp_dir().join(format!("burrow-start-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&cwd).unwrap();
+        let request = super::super::CreateAgent {
+            provider: "echo".into(),
+            cwd: cwd.to_string_lossy().into(),
+            ..Default::default()
+        };
+        let agent = super::super::create(&daemon, request)
+            .await
+            .expect("create");
+        let live = ensure_live(&daemon, &agent.id).expect("live");
+
+        // Its CLI exits between the send taking the session and starting.
+        live.ended.send_replace(true);
+        let turn = live.begin_turn();
+        let prompt = Queued {
+            message_id: "m-1".into(),
+            prompt: "hello".into(),
+            user_message: json!({"type": "user_message", "text": "hello", "messageId": "m-1"}),
+            images: Vec::new(),
+            text: "hello".into(),
+            names: true,
+        };
+        let started = start(&daemon, &agent.id, &live, prompt, turn);
+        assert_eq!(started, Err(format!("Agent {} is not running", agent.id)));
+        assert_eq!(active_turn(&live), None);
+        let after = daemon
+            .read(|store| store.agent(&agent.id).cloned())
+            .unwrap();
+        assert_ne!(after.status, AgentStatus::Running);
+        assert!(after.active_turn.is_none(), "{:?}", after.active_turn);
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    async fn echo_agent() -> (Arc<Daemon>, String, std::path::PathBuf) {
+        let daemon = Daemon::new(Config::ephemeral());
+        daemon.agents.register(Arc::new(EchoProvider {
+            chunk_delay: Duration::ZERO,
+            slow_delay: Duration::ZERO,
+        }));
+        let cwd = std::env::temp_dir().join(format!("burrow-start-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&cwd).unwrap();
+        let request = super::super::CreateAgent {
+            provider: "echo".into(),
+            cwd: cwd.to_string_lossy().into(),
+            ..Default::default()
+        };
+        let agent = super::super::create(&daemon, request)
+            .await
+            .expect("create");
+        (daemon, agent.id, cwd)
+    }
+
+    /// 0.2.2 review: a send refused (the queue was full) is not remembered,
+    /// so sending it again once there is room queues it, not "duplicate".
+    #[tokio::test]
+    async fn a_refused_send_can_be_sent_again() {
+        let (daemon, agent_id, cwd) = echo_agent().await;
+        let live = ensure_live(&daemon, &agent_id).expect("live");
+        live.begin_turn(); // a turn runs, so sends queue behind it
+        let send = |id: String| {
+            let daemon = daemon.clone();
+            let agent_id = agent_id.clone();
+            async move {
+                deliver(
+                    &daemon,
+                    &agent_id,
+                    "hello",
+                    Some(id),
+                    Vec::new(),
+                    Busy::Queue,
+                    From::User,
+                )
+                .await
+                .map(|d| d.delivery)
+            }
+        };
+        for n in 0..QUEUE_LIMIT {
+            let queued = send(format!("m-{n}")).await;
+            assert!(matches!(queued, Ok(Delivery::Queued { .. })), "{queued:?}");
+        }
+        assert!(send("again".into()).await.is_err());
+        live.state.lock().unwrap().queued.pop_front();
+        let retried = send("again".into()).await;
+        assert!(
+            matches!(retried, Ok(Delivery::Queued { .. })),
+            "{retried:?}"
+        );
+        assert!(matches!(
+            send("again".into()).await,
+            Ok(Delivery::Duplicate)
+        ));
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    /// 0.2.2 review: a session's end waits for a send holding the gate, and
+    /// it is let go of only once the agent is marked closed, so a session
+    /// started after it is not the one marked. An interrupt waiting under
+    /// the gate ends with the session, not after its grace.
+    #[tokio::test]
+    async fn a_session_ends_after_the_send_holding_its_gate() {
+        let (daemon, agent_id, cwd) = echo_agent().await;
+        let live = ensure_live(&daemon, &agent_id).expect("live");
+        let gate = live.gate.lock().await;
+        live.begin_turn();
+        live.commands.send(Command::Shutdown).unwrap();
+        let interrupted =
+            tokio::time::timeout(Duration::from_secs(5), super::super::live::interrupt(&live))
+                .await;
+        assert_eq!(interrupted, Ok(Ok(())));
+        assert!(*live.ended.borrow());
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let current = daemon.agents.live(&agent_id);
+        assert!(
+            current.is_some_and(|current| Arc::ptr_eq(&current, &live)),
+            "let go of while a send held its gate"
+        );
+        drop(gate);
+        let gone = tokio::time::timeout(Duration::from_secs(5), async {
+            while daemon.agents.live(&agent_id).is_some() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        assert!(gone.is_ok(), "the session was never let go of");
+        let after = daemon
+            .read(|store| store.agent(&agent_id).cloned())
+            .unwrap();
+        assert_eq!(after.status, AgentStatus::Closed);
+        assert!(after.active_turn.is_none());
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
 }

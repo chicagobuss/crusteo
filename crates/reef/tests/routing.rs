@@ -915,3 +915,73 @@ async fn a_cli_reads_and_waits_on_other_hosts_by_name_once_routing_is_on() {
     let _ = std::fs::remove_dir_all(&cwd);
     let _ = std::fs::remove_dir_all(&data);
 }
+
+/// A second prompt between the same two agents, steered into the turn the
+/// first one started or cutting it off, leaves the sender one notice for
+/// that turn: not one per prompt, and not a "finished" for the cut-off turn.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_second_prompt_into_the_same_turn_is_one_notice() {
+    let (cwd, data) = (scratch("cwd"), scratch("data"));
+    let a = burrow("example-a").await;
+    let b = burrow("example-b").await;
+    let sender = a.agent(&cwd, "planner").await;
+    let target = b.agent(&cwd, "Builder").await;
+    let (reef, addr) = start_reef(&[&a, &b], &data).await;
+    set_routing(addr, true).await;
+    a.until_reach(Reach::On).await;
+    let send = |prompt: &'static str, behavior: &'static str| {
+        let (a, sender, target) = (&a, sender.clone(), target.clone());
+        async move {
+            let args = json!({"agentId": target, "prompt": prompt,
+                              "activeTurnBehavior": behavior});
+            (a.tool(&sender, "send_agent_prompt", args).await).unwrap()
+        }
+    };
+    // No second notice turns up a while after the first.
+    let settled = |count: usize| {
+        let (a, sender) = (&a, sender.clone());
+        async move {
+            let notices = a.until_notices(&sender, count).await;
+            tokio::time::sleep(Duration::from_millis(1500)).await;
+            let after = a.notices(&sender).await;
+            assert_eq!(after.len(), count, "{after:?}");
+            notices
+        }
+    };
+
+    // Steered: one turn, one notice, with the steered reply.
+    assert_eq!(send("slow work", "auto").await["disposition"], "started");
+    assert_eq!(send("more", "steer").await["disposition"], "steered");
+    let notices = settled(1).await;
+    assert!(notices[0].contains("work steered:"), "{notices:?}");
+    assert!(notices[0].contains("more"), "{notices:?}");
+    assert_eq!(routes(&data), json!([]));
+
+    // Cut off: the cut-off turn says nothing; the new one is told.
+    assert_eq!(send("slow again", "auto").await["disposition"], "started");
+    send("now", "interrupt").await;
+    let notices = settled(2).await;
+    assert!(notices[1].contains("echo: <paseo-system"), "{notices:?}");
+    assert!(notices[1].contains("\nnow\n"), "{notices:?}");
+    assert_eq!(routes(&data), json!([]));
+
+    // Queued behind a turn the next prompt steers into (0.2.2 review): the
+    // steered turn is told once, and the queued prompt's own turn too.
+    assert_eq!(send("slow third", "auto").await["disposition"], "started");
+    assert_eq!(send("queued", "queue").await["disposition"], "queued");
+    assert_eq!(send("joined", "steer").await["disposition"], "steered");
+    // Each turn's notice comes as it is told, in either order.
+    let notices = settled(4).await;
+    let last_two = &notices[2..];
+    let steered = |n: &&String| n.contains("third steered:") && n.contains("joined");
+    assert_eq!(last_two.iter().filter(steered).count(), 1, "{notices:?}");
+    let queued = |n: &&String| n.contains("\nqueued\n") && !n.contains("joined");
+    assert_eq!(last_two.iter().filter(queued).count(), 1, "{notices:?}");
+    assert_eq!(routes(&data), json!([]));
+
+    reef.stop();
+    a.stop().await;
+    b.stop().await;
+    let _ = std::fs::remove_dir_all(&cwd);
+    let _ = std::fs::remove_dir_all(&data);
+}

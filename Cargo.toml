@@ -10,7 +10,7 @@ exclude = ["vendor"]
 # coming release's version with `-internal` (builds then call themselves
 # 0.2.0-internal-<commit>, and no tag can match); the release cut sets the
 # plain version.
-version = "0.2.1"
+version = "0.2.2"
 edition = "2024"
 license = "Apache-2.0"
 repository = "https://github.com/chicagobuss/crusteo"

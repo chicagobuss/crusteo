@@ -11,7 +11,7 @@ use tracing::{info, warn};
 
 use super::create::PARENT_AGENT_LABEL;
 use super::live::{Live, interrupt};
-use super::{resolve, update};
+use super::{resolve, update_quietly};
 use crate::daemon::Daemon;
 
 /// How long a session told to stop gets before its replacement starts
@@ -98,7 +98,7 @@ pub async fn close(daemon: &Arc<Daemon>, key: &str) -> Result<String, String> {
         daemon.agents.forget(&agent_id);
         let _ = live.commands.send(Command::Shutdown);
     }
-    update(daemon, &agent_id, |agent| {
+    update_quietly(daemon, &agent_id, |agent| {
         agent.status = AgentStatus::Closed;
         agent.active_turn = None;
         agent.pending_permissions.clear();

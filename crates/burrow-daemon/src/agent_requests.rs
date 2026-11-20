@@ -291,6 +291,10 @@ struct SendRequest {
     /// The agent sending it, when one is (Paseo 0.12's provenance).
     #[serde(default)]
     source_agent_id: Option<String>,
+    /// Burrow's own: a sender outside Burrow, by name (`burrow send
+    /// --from`). Shown as a message from it; `sourceAgentId` wins.
+    #[serde(default)]
+    source_name: Option<String>,
     /// Paseo 0.13: the mode to switch the agent to before the prompt.
     #[serde(default)]
     session_mode: Option<String>,
@@ -339,7 +343,7 @@ async fn wait_for(daemon: &Arc<Daemon>, request: &WaitRequest) -> Value {
         agents::Waited::Dropped => {
             let agent = daemon.read(|store| store.agent(&agent_id).cloned());
             json!({"status": "error", "final": agent, "lastMessage": null, "turnId": null,
-                   "error": "The queued prompt was dropped: the agent was stopped or restarted before it got to it"})
+                   "error": "The queued prompt was dropped: the agent was stopped, closed or restarted before it got to it"})
         }
     }
 }
@@ -479,16 +483,34 @@ pub fn handle(
                                "accepted": false, "error": error}),
                     )];
                 }
-                let result = agents::send(
-                    &daemon,
-                    &request.agent_id,
-                    &request.text,
-                    request.message_id,
-                    images(request.images),
-                    request.active_turn_behavior.as_deref(),
-                    request.source_agent_id.as_deref(),
-                )
-                .await;
+                let agent_sender =
+                    (request.source_agent_id.as_deref()).filter(|s| !s.trim().is_empty());
+                let result = match (agent_sender, request.source_name.as_deref()) {
+                    (None, Some(name)) => {
+                        agents::send_from_outside(
+                            &daemon,
+                            &request.agent_id,
+                            &request.text,
+                            request.message_id,
+                            images(request.images),
+                            request.active_turn_behavior.as_deref(),
+                            name,
+                        )
+                        .await
+                    }
+                    _ => {
+                        agents::send(
+                            &daemon,
+                            &request.agent_id,
+                            &request.text,
+                            request.message_id,
+                            images(request.images),
+                            request.active_turn_behavior.as_deref(),
+                            agent_sender,
+                        )
+                        .await
+                    }
+                };
                 // Beyond Paseo's fields: what became of it, and the message
                 // id to wait on when it was queued.
                 let payload = match result {
@@ -924,6 +946,8 @@ async fn create_with_git(daemon: &Arc<Daemon>, request: Create) -> Result<AgentS
             background: request.background == Some(true),
             agent_id: request.agent_id,
             caller_agent_id: request.caller_agent_id,
+            mode_from_caller: false,
+            unattended: false,
         },
     )
     .await;

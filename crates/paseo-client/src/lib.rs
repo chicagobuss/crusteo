@@ -84,6 +84,10 @@ pub struct Config {
     /// Sent as `Authorization: Bearer <token>` with the WebSocket handshake:
     /// a Reef's device token, for a daemon reached through that Reef.
     pub bearer: Option<String>,
+    /// The endpoint is a Reef's pass-through, which opens the daemon only
+    /// once this client is connected to it, through ssh as long as ssh may
+    /// take: the daemon's answer to the hello is waited for that much longer.
+    pub relayed: bool,
     /// How long one write to the daemon may stay pending before the
     /// connection is given up as lost and dialled again. A path that drops
     /// packets without resetting the connection leaves a write pending until
@@ -102,6 +106,7 @@ impl Config {
             password: None,
             ssh_program: None,
             bearer: None,
+            relayed: false,
             write_timeout: connection::WRITE_TIMEOUT,
         }
     }

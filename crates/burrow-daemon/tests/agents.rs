@@ -272,6 +272,43 @@ async fn a_message_from_another_agent_says_who_sent_it() {
     h.stop().await;
 }
 
+/// Burrow's own `sourceName` (`burrow send --from`): a sender outside Burrow
+/// is shown as a message from it, as another agent's is, under an id no
+/// agent has; a name that is not one line of 1 to 64 characters is refused.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_message_from_outside_burrow_says_who_sent_it() {
+    let h = harness().await;
+    let agent = h.create().await;
+    let reply = h
+        .request(
+            json!({"type": "send_agent_message_request", "agentId": agent,
+            "text": "The nightly build failed", "messageId": "m-ci", "sourceName": " ci-bot "}),
+        )
+        .await;
+    assert_eq!(reply["accepted"], true, "{reply}");
+    h.until("turn_completed", |m| stream_event(m, "turn_completed"))
+        .await;
+    let page = h.tail(&agent).await;
+    let first = &page["entries"][0]["item"];
+    assert_eq!(first["name"], "agent_message", "{first}");
+    assert_eq!(
+        first["agentMessage"],
+        json!({"event": "message", "sender": {"id": "external:ci-bot", "title": "ci-bot"},
+               "text": "The nightly build failed"})
+    );
+
+    for bad in ["", "two\nlines", &"x".repeat(65)] {
+        let refused = h
+            .request(
+                json!({"type": "send_agent_message_request", "agentId": agent,
+                "text": "hi", "sourceName": bad}),
+            )
+            .await;
+        assert_eq!(refused["accepted"], false, "{bad:?}: {refused}");
+    }
+    h.stop().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_turn_reads_the_same_live_and_from_history() {
     let h = harness().await;
@@ -334,6 +371,12 @@ async fn a_turn_reads_the_same_live_and_from_history() {
         .request(json!({"type": "clear_agent_attention", "agentId": agent}))
         .await;
     assert_eq!(cleared["agents"][0]["requiresAttention"], false);
+    // Looking at an agent is not activity: as in Paseo, its `updatedAt`
+    // (what lists sort by "most recent") stays where its turn left it.
+    assert_eq!(
+        cleared["agents"][0]["updatedAt"],
+        agent_now["agent"]["updatedAt"]
+    );
     h.stop().await;
 }
 
@@ -1638,6 +1681,34 @@ async fn an_agents_cli_knows_who_it_is_and_where_its_daemon_is() {
         .read(|store| store.provider_config(&agent).cloned())
         .unwrap();
     assert_eq!(stored["env"]["TASK"], "x");
+    h.stop().await;
+}
+
+/// A new agent's mode must be one of its provider's: another provider's
+/// (Claude's `bypassPermissions` on Codex) ran as the default and asked for
+/// permission, found 2026-11-16. Paseo refuses it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_new_agents_mode_must_be_its_providers() {
+    let h = harness().await;
+    let cwd = h.cwd.to_string_lossy().to_string();
+    let refused = h
+        .request(json!({"type": "create_agent_request", "labels": {},
+            "config": {"provider": "echo", "cwd": cwd, "modeId": "full-access"}}))
+        .await;
+    assert_eq!(
+        refused["error"],
+        "Invalid mode 'full-access' for provider 'echo'. Available modes: default, bypassPermissions",
+        "{refused}"
+    );
+    assert!(refused["agent"].is_null(), "{refused}");
+    let made = h
+        .request(json!({"type": "create_agent_request", "labels": {},
+            "config": {"provider": "echo", "cwd": cwd, "modeId": "bypassPermissions"}}))
+        .await;
+    assert_eq!(
+        made["agent"]["currentModeId"], "bypassPermissions",
+        "{made}"
+    );
     h.stop().await;
 }
 

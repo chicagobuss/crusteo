@@ -5,6 +5,117 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.2] - 2026-11-19
+
+The last 0.2 release: fixes, mostly to messages between agents, and a token file that keeps a
+host's Claude agents signed in. Highlights:
+
+- **A token file keeps Claude agents signed in** (`~/.burrow/claude-token`), and a turn that
+  fails for want of a sign-in says where to sign in instead of the API's raw 401.
+- **`burrow send --from <name>`** for prompts from scripts and assistants outside Burrow, and
+  `burrow send` says the prompt was delivered before it waits.
+- **Messages between agents:** fewer doubled finish notices, and fewer sends reported delivered
+  that the agent never got. Some races remain; see Known issues below.
+- **A new agent's mode must be one its provider has**, as in Paseo.
+- Skiff no longer notifies you about the agent on screen, and opening an agent no longer moves
+  it to the top of "most recent".
+
+Before you upgrade:
+
+- **`burrow send --from` needs the target's Burrow at 0.2.2**; it refuses an older one, which
+  would show the prompt as its user's.
+- **Burrow still has no passwords.** Keep it on loopback or a private network such as a VPN.
+- **This is the last 0.2 release.** 0.3.0 comes next, with Paseo 0.16 compatibility and a
+  restructure of how Burrow and Reef track turns and notices.
+
+### Added
+
+- **`burrow send --from <name>`** for prompts that come from neither the agent's user nor another
+  agent: a script, a CI job, an assistant outside Burrow. The agent and every client see a message
+  "From <name>", as from another agent, instead of the user's own prompt. It needs a Burrow
+  from 0.2.2 on and refuses an older one, which would show the prompt as its user's.
+- **A token file keeps a host's Claude agents signed in.** A token from `claude setup-token`,
+  saved in `~/.burrow/claude-token` (`chmod 600`), is given to each Claude agent Burrow starts,
+  ahead of the host's own sign-in, so a Mac's agents keep working when its keychain login lapses
+  and no one can reach the Mac. Burrow reads the file at each start, so a new token needs no
+  restart. On Linux and macOS a file others can read is not used; on Windows Burrow does not
+  check. See "Keep Claude agents signed in" in the install guide.
+
+### Changed
+
+- **A Claude turn that fails for want of a sign-in says where to sign in**: "Claude Code is not
+  signed in on <host>, or its sign-in has expired. Run `claude auth login` on <host>, then send
+  this again", with the keychain step on a Mac, instead of the API's raw 401. When the token
+  file's token was refused, it says that instead, unless an `ANTHROPIC_API_KEY` came ahead of it.
+  The failure's code is `authentication_failed`.
+- **`burrow send` says the prompt was delivered before it waits** ("Delivered to Builder
+  (aa11bb22): queued (next) behind its running turn."), and a timeout says "Delivered; no reply
+  within 5 s (it is still working)", with the agent's `burrow wait` (and its `--host`), so a
+  timeout is not read as a failed delivery. `burrow wait` waits for the turn running then, which
+  for a queued prompt may still be the one before it, and the hint says so. It still exits 3.
+  `--no-wait` prints the same receipt.
+
+### Fixed
+
+- **A new agent's mode must be one its provider has**, as in Paseo. Burrow used to take any mode,
+  so an agent asked to make a Codex agent in Claude's `bypassPermissions` got one that asked for
+  permission at every command. Now it refuses with the provider's modes. An agent that makes
+  another without a mode passes on its own when both use the same provider (one its provider
+  doesn't have, which an earlier Burrow took, is not passed on). A caller that runs
+  without asking gets the other provider's full-access mode for its child, and otherwise must
+  name one. A schedule's run without a mode gets the provider's full-access mode.
+- **Skiff no longer notifies you about the agent you are looking at.** A finished turn,
+  permission request or message for the conversation on screen showed a card and buzzed the
+  phone; now it doesn't, as crusteo's desktop already did. With the page in the background, or
+  the list over the conversation, the notice comes as before.
+- **Opening an agent no longer moves it to the top of "most recent".** Burrow bumped an agent's
+  `updatedAt` when its attention was cleared, when its idle CLI was let go of, when it was
+  closed and when its CLI version changed, so lists sorted by it (Skiff's Most recent, crusteo's,
+  Paseo's) showed an agent nobody had worked with as the newest. As in Paseo, these now leave it
+  where its last activity put it.
+- **Fewer doubled finish notices between two agents.** A second prompt from the same agent,
+  steered into the turn the first started, got the sender two "finished" notices for one turn;
+  one that cut the turn off got a "finished" for the cancelled turn before the real one. Reef and
+  Burrow now drop the old notice before a prompt that interrupts or steers, so the sender hears
+  once. A queued prompt still waits behind the turn before it, and each is told, also when a
+  later prompt steers into or cuts off the turn before it. Some orders of events can still lose
+  or double a notice (see Known issues). Routes Reef reloads after a restart are kept on disk
+  again until told.
+- **Recorded turns carry the labels you gave the agent.** Reef's recorder put only the workspace's
+  Paseo labels on each record, so labels set in crusteo or Skiff, which live on the agent, never
+  reached a sink. Records now carry the labels the lists show for the agent.
+- **A prompt sent as an agent's CLI exits no longer leaves the agent "running".** A send, or the
+  next queued prompt, that started a turn just as the agent's CLI ended left a turn nothing would
+  finish: the agent stayed running and a wait on that prompt never answered. Now the agent is
+  closed, the send says it is not running, and a wait on that prompt, even one asked later, says
+  it was not delivered. A prompt sent as the CLI exits starts a new one, or fails "not running"
+  if it reached the old one first, and the old session's end no longer marks a new one closed.
+  The next prompt starts its CLI again, as for any closed agent.
+- **Fewer sends reported delivered that the agent never got.** A prompt steered into a turn whose
+  CLI had gone was reported delivered; it now fails "not running". A send refused (the agent's
+  queue was full) could not be sent again with the same message id: the retry was taken for a
+  duplicate and dropped. An interrupt that came as the turn ended waited 15 s and failed.
+- **The desktop in reef mode reaches hosts Reef opens through ssh.** Reef opens such a host only
+  once the desktop has connected to it, and ssh may take up to 30 s, but the desktop gave the
+  host 15 s to answer and then started again, so a slow ssh host never connected. Through Reef
+  the desktop now waits 45 s.
+
+### Known issues
+
+These come from how Burrow tracks a session's turns and Reef its notices, which 0.3.0
+restructures; each needs events to land within moments of each other.
+
+- **A finish notice between two agents can be lost or doubled.** A prompt that steers into or
+  cuts off an agent's next turn just after the turn before it finished, before that turn's notice
+  went out, can drop that notice. A queued prompt that is stopped or steered into once it has
+  started can bring an extra notice.
+- **A stop that lands as one turn ends and the next starts** can be reported done while the next
+  turn still runs, so a prompt meant to replace the turn reaches the agent while it runs.
+- **A send or stop that lands as an agent's CLI exits** can fail "not running", or return the
+  agent as still running; sending again starts its CLI. A prompt Burrow accepted just as it shut
+  the CLI down (a refresh, close or idle release) can be lost.
+- **On Windows the token file's permissions are not checked.**
+
 ## [0.2.1] - 2026-11-16
 
 Fixes, mostly to messages between agents and to connections, compact agent lists, and the desktop
@@ -1214,6 +1325,7 @@ First alpha, for a few early testers. Early software: expect rough edges.
 - Patched GPUI (`vendor/gpui-pre`) that skips redraws on window moves and lets cached views be
   reused after they move.
 
+[0.2.2]: https://github.com/chicagobuss/crusteo/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/chicagobuss/crusteo/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/chicagobuss/crusteo/releases/tag/v0.2.0
 [0.1.0-beta.6]: https://github.com/chicagobuss/crusteo/releases/tag/v0.1.0-beta.6

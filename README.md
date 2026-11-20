@@ -20,7 +20,7 @@ A 76-second overview video:
 
 https://github.com/user-attachments/assets/f5af6fcf-6d1e-4ad6-b496-8fcaaa0aaa2d
 
-> **Status: 0.2.1. Early, and moving fast; expect rough edges.** Crusteo is not affiliated
+> **Status: 0.2.2. Early, and moving fast; expect rough edges.** Crusteo is not affiliated
 > with or endorsed by the Paseo project. Everything speaks Paseo's daemon protocol (version 1), so
 > Paseo's own apps and CLI work with Burrow, and Crusteo and Reef work with Paseo's daemons. See
 > [docs/burrow/compatibility.md](docs/burrow/compatibility.md) for exactly which versions were

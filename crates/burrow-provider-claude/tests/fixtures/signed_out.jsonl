@@ -1,0 +1,7 @@
+// Claude Code with an expired sign-in: its reply is the API's 401, flagged `authentication_failed`, and the result repeats it as an error.
+{"dir":"in","frame":{"type":"control_request","request":{"subtype":"initialize"}}}
+{"dir":"out","frame":{"type":"control_response","response":{"subtype":"success","request_id":"$REQ","response":{}}}}
+{"cmd":{"prompt":{"turn":"foreground-turn-1","text":"Read the brief"}}}
+{"dir":"in","frame":{"type":"user","session_id":"sess-1"}}
+{"dir":"out","frame":{"type":"assistant","error":"authentication_failed","message":{"id":"msg_1","role":"assistant","content":[{"type":"text","text":"Failed to authenticate. API Error: 401 {\"type\":\"error\",\"error\":{\"type\":\"authentication_error\",\"message\":\"OAuth token has expired.\"}}"}]},"session_id":"sess-1"}}
+{"dir":"out","frame":{"type":"result","subtype":"success","is_error":true,"result":"Failed to authenticate. API Error: 401 {\"type\":\"error\",\"error\":{\"type\":\"authentication_error\",\"message\":\"OAuth token has expired.\"}}","session_id":"sess-1","usage":{}}}

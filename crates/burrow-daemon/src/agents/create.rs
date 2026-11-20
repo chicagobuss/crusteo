@@ -41,6 +41,82 @@ pub struct CreateAgent {
     /// The agent that asks for it (`callerAgentId`): without a workspace it
     /// joins the caller's, in the caller's directory, as its child.
     pub caller_agent_id: Option<String>,
+    /// With no `mode_id`, take the mode from the caller (Paseo does this
+    /// for its MCP `create_agent`, not for a client's create request).
+    pub mode_from_caller: bool,
+    /// Made to run with nobody watching (a schedule's run): with no
+    /// `mode_id`, it gets the provider's unattended mode.
+    pub unattended: bool,
+}
+
+/// The caller a new agent may take its mode from.
+#[derive(Debug, Clone, Copy)]
+pub struct ModeParent<'a> {
+    pub provider: &'a str,
+    pub mode_id: Option<&'a str>,
+    /// The caller's mode runs without asking.
+    pub unattended: bool,
+}
+
+/// The mode a new agent starts in, or `None` for the provider's default
+/// (Paseo's `resolveAndValidateCreateAgentMode`).
+///
+/// - A mode asked for must be one of the provider's.
+/// - Without one, a caller on the same provider passes on its mode; an
+///   unattended caller (or an unattended creation) on another provider gets
+///   that provider's unattended mode; otherwise a caller on another provider
+///   is refused, since its mode means nothing there.
+///
+/// A provider that lists no modes before a session (they come from its
+/// sessions) takes any mode asked for, and its default otherwise.
+pub fn resolve_mode(
+    requested: Option<&str>,
+    provider: &str,
+    modes: &[burrow_provider::Mode],
+    parent: Option<ModeParent<'_>>,
+    unattended: bool,
+) -> Result<Option<String>, String> {
+    let list = || {
+        modes
+            .iter()
+            .map(|m| m.id.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let unattended_mode = modes.iter().find(|m| m.unattended).map(|m| m.id.clone());
+    if let Some(mode) = requested {
+        if !modes.is_empty() && !modes.iter().any(|m| m.id == mode) {
+            return Err(format!(
+                "Invalid mode '{mode}' for provider '{provider}'. Available modes: {}",
+                list()
+            ));
+        }
+        return Ok(Some(mode.to_string()));
+    }
+    let Some(parent) = parent else {
+        return Ok(if unattended { unattended_mode } else { None });
+    };
+    if parent.provider == provider {
+        // A mode an earlier Burrow took unchecked is not passed on: the
+        // provider's default instead.
+        let known = |mode: &&str| modes.is_empty() || modes.iter().any(|m| m.id == *mode);
+        return Ok(parent.mode_id.filter(known).map(str::to_string));
+    }
+    if (unattended || parent.unattended)
+        && let Some(mode) = unattended_mode
+    {
+        return Ok(Some(mode));
+    }
+    if modes.is_empty() {
+        return Ok(None);
+    }
+    Err(format!(
+        "cannot inherit mode '{}' from caller (provider '{}') for new agent (provider '{provider}'). \
+         Pass an explicit mode. Available modes for '{provider}': {}",
+        parent.mode_id.unwrap_or("<none>"),
+        parent.provider,
+        list()
+    ))
 }
 
 /// The label Paseo puts on an agent another agent made.
@@ -61,10 +137,41 @@ pub async fn create(daemon: &Arc<Daemon>, request: CreateAgent) -> Result<AgentS
         ));
     }
     let mut request = request;
-    if let Some(caller_id) = request.caller_agent_id.clone() {
-        let caller = daemon
-            .read(|store| store.agents.get(&caller_id).cloned())
-            .ok_or_else(|| format!("Caller agent {caller_id} not found"))?;
+    let info = provider.info();
+    let caller = match request.caller_agent_id.clone() {
+        Some(caller_id) => Some(
+            daemon
+                .read(|store| store.agents.get(&caller_id).cloned())
+                .ok_or_else(|| format!("Caller agent {caller_id} not found"))?,
+        ),
+        None => None,
+    };
+    // The caller runs unattended when its mode is its provider's unattended one.
+    let parent_unattended = caller.as_ref().is_some_and(|caller| {
+        let mode = caller.current_mode_id.as_deref();
+        daemon.agents.provider(&caller.provider).is_some_and(|p| {
+            p.info()
+                .modes
+                .iter()
+                .any(|m| m.unattended && Some(m.id.as_str()) == mode)
+        })
+    });
+    request.mode_id = resolve_mode(
+        request.mode_id.as_deref(),
+        &info.id,
+        &info.modes,
+        caller
+            .as_ref()
+            .filter(|_| request.mode_from_caller)
+            .map(|caller| ModeParent {
+                provider: &caller.provider,
+                mode_id: caller.current_mode_id.as_deref(),
+                unattended: parent_unattended,
+            }),
+        request.unattended,
+    )?;
+    if let Some(caller) = caller {
+        let caller_id = caller.id.clone();
         if request.workspace_id.is_none() {
             let workspace = caller
                 .workspace_id
@@ -83,7 +190,6 @@ pub async fn create(daemon: &Arc<Daemon>, request: CreateAgent) -> Result<AgentS
             request.cwd
         ));
     }
-    let info = provider.info();
     let agent_id = request.agent_id.clone().unwrap_or_else(ids::agent_id);
     if daemon.read(|store| store.agent(&agent_id).is_some()) {
         return Err("agent_id_conflict".into());
@@ -191,4 +297,119 @@ pub async fn create(daemon: &Arc<Daemon>, request: CreateAgent) -> Result<AgentS
     daemon
         .read(|store| store.agent(&agent_id).cloned())
         .ok_or_else(|| "The agent disappeared while starting".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ModeParent, resolve_mode};
+    use burrow_provider::Mode;
+
+    fn modes(ids: &[&str], unattended: Option<&str>) -> Vec<Mode> {
+        ids.iter()
+            .map(|id| Mode {
+                id: id.to_string(),
+                unattended: Some(*id) == unattended,
+                ..Mode::default()
+            })
+            .collect()
+    }
+
+    fn codex() -> Vec<Mode> {
+        modes(&["auto", "full-access"], Some("full-access"))
+    }
+
+    fn parent<'a>(provider: &'a str, mode: Option<&'a str>, unattended: bool) -> ModeParent<'a> {
+        ModeParent {
+            provider,
+            mode_id: mode,
+            unattended,
+        }
+    }
+
+    #[test]
+    fn a_mode_asked_for_must_be_the_providers() {
+        let opencode = modes(&["build", "plan"], None);
+        assert_eq!(
+            resolve_mode(Some("plan"), "opencode", &opencode, None, false),
+            Ok(Some("plan".into()))
+        );
+        assert_eq!(
+            resolve_mode(Some("bypassPermissions"), "codex", &codex(), None, false),
+            Err("Invalid mode 'bypassPermissions' for provider 'codex'. Available modes: auto, full-access".into())
+        );
+        // An explicit mode wins over an unattended caller.
+        let claude = parent("claude", Some("bypassPermissions"), true);
+        assert_eq!(
+            resolve_mode(Some("auto"), "codex", &codex(), Some(claude), false),
+            Ok(Some("auto".into()))
+        );
+    }
+
+    #[test]
+    fn a_provider_without_listed_modes_takes_any_mode() {
+        assert_eq!(
+            resolve_mode(Some("agent"), "cursor", &[], None, false),
+            Ok(Some("agent".into()))
+        );
+        let claude = parent("claude", Some("default"), false);
+        assert_eq!(resolve_mode(None, "pi", &[], Some(claude), false), Ok(None));
+    }
+
+    #[test]
+    fn without_a_caller_the_default_or_the_unattended_mode() {
+        assert_eq!(resolve_mode(None, "codex", &codex(), None, false), Ok(None));
+        assert_eq!(
+            resolve_mode(None, "codex", &codex(), None, true),
+            Ok(Some("full-access".into()))
+        );
+    }
+
+    #[test]
+    fn a_caller_on_the_same_provider_passes_on_its_mode() {
+        let claude = modes(&["default", "bypassPermissions"], Some("bypassPermissions"));
+        let caller = parent("claude", Some("bypassPermissions"), true);
+        assert_eq!(
+            resolve_mode(None, "claude", &claude, Some(caller), false),
+            Ok(Some("bypassPermissions".into()))
+        );
+        let caller = parent("claude", None, false);
+        assert_eq!(
+            resolve_mode(None, "claude", &claude, Some(caller), false),
+            Ok(None)
+        );
+        // One an earlier Burrow took unchecked: the provider's default.
+        let caller = parent("codex", Some("bypassPermissions"), false);
+        assert_eq!(
+            resolve_mode(None, "codex", &codex(), Some(caller), false),
+            Ok(None)
+        );
+    }
+
+    #[test]
+    fn an_unattended_caller_on_another_provider_gets_its_unattended_mode() {
+        let caller = parent("claude", Some("bypassPermissions"), true);
+        assert_eq!(
+            resolve_mode(None, "codex", &codex(), Some(caller), false),
+            Ok(Some("full-access".into()))
+        );
+    }
+
+    #[test]
+    fn another_providers_mode_is_refused() {
+        let caller = parent("claude", Some("default"), false);
+        assert_eq!(
+            resolve_mode(None, "codex", &codex(), Some(caller), false),
+            Err("cannot inherit mode 'default' from caller (provider 'claude') for new agent (provider 'codex'). Pass an explicit mode. Available modes for 'codex': auto, full-access".into())
+        );
+        // An unattended caller, but no unattended mode to give.
+        let opencode = modes(&["build", "plan"], None);
+        let caller = parent("claude", Some("bypassPermissions"), true);
+        assert!(resolve_mode(None, "opencode", &opencode, Some(caller), false).is_err());
+        let caller = parent("opencode", None, false);
+        assert!(
+            resolve_mode(None, "codex", &codex(), Some(caller), false)
+                .unwrap_err()
+                .contains("cannot inherit mode '<none>'")
+        );
+    }
 }

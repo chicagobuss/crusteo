@@ -412,12 +412,13 @@ impl FleetStore {
         };
         host.connection = Connection::Connecting;
         // Through Reef's pass-through, with its device token.
-        let bearer = (self.reef.as_ref())
-            .filter(|reef| reef.link.passes(&endpoint))
-            .and_then(|reef| reef.link.token.clone());
+        let through = (self.reef.as_ref()).filter(|reef| reef.link.passes(&endpoint));
+        let bearer = through.and_then(|reef| reef.link.token.clone());
+        let relayed = through.is_some();
         let mut config = Config::new(endpoint, self.client_id.clone());
         config.password = host.config.password.clone();
         config.bearer = bearer;
+        config.relayed = relayed;
         let client = Client::connect(config);
         let events = client.events();
         self.next_generation += 1;

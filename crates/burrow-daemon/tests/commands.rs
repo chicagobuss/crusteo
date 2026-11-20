@@ -42,9 +42,18 @@ async fn the_commands_drive_an_agent_end_to_end() {
     assert!(commands::list(&agents, &Default::default(), now).contains(&id[..8]));
 
     // A prompt, and the reply once the turn ends.
-    let reply = commands::send(&mut client, &agent, "hello there", None, "auto", Some(None))
-        .await
-        .expect("a reply");
+    let user = commands::Sender::User;
+    let reply = commands::send(
+        &mut client,
+        &agent,
+        "hello there",
+        user,
+        "auto",
+        Some(None),
+        None,
+    )
+    .await
+    .expect("a reply");
     assert!(
         !reply.trim().is_empty(),
         "the echo agent answered: {reply:?}"

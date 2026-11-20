@@ -2,7 +2,9 @@
 //! prompted another through its tools with `notifyOnFinish` is told when
 //! that agent finishes, errors, needs permission or goes away, in an
 //! `agent-notification` envelope with Paseo's wording. One subscription per
-//! caller and child: a newer one replaces the older. Kept in
+//! caller, child and turn: a newer one replaces the older, unless that one
+//! waits for another turn's end (a queued prompt's turn starting after it).
+//! Kept in
 //! `<home>/finish-subscriptions.json`, so a restart keeps the intent. A
 //! caller that is gone or archived is told nothing.
 //!
@@ -105,12 +107,32 @@ pub fn register(daemon: &Arc<Daemon>, caller: &str, child: &str, turn: Option<St
         turn_id: turn,
     };
     {
+        // Another turn's (the one a queued prompt waited behind, its end
+        // not told yet) stays: each turn is told once.
         let mut all = daemon.finish.lock();
-        all.retain(|s| !(s.caller_agent_id == caller && s.child_agent_id == child));
+        all.retain(|s| {
+            let same_pair = s.caller_agent_id == caller && s.child_agent_id == child;
+            let other_turn = s.turn_id.is_some()
+                && subscription.turn_id.is_some()
+                && s.turn_id != subscription.turn_id;
+            !same_pair || other_turn
+        });
         all.push(subscription.clone());
         daemon.finish.save(&all);
     }
     tokio::spawn(watch(daemon.clone(), subscription));
+}
+
+/// Drops `caller`'s subscription to `child`, before a prompt that cuts off
+/// or joins the turn it waits for: that turn's end is not the caller's news,
+/// and the new prompt registers its own.
+pub fn forget(daemon: &Daemon, caller: &str, child: &str) {
+    let mut all = daemon.finish.lock();
+    let before = all.len();
+    all.retain(|s| !(s.caller_agent_id == caller && s.child_agent_id == child));
+    if all.len() != before {
+        daemon.finish.save(&all);
+    }
 }
 
 /// At start: the subscriptions a stop left waiting.
